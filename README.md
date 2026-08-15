@@ -71,7 +71,7 @@ For manual UI work, first deploy the contract to your chosen local GenLayer runt
 npm --prefix frontend run dev
 ```
 
-Connect an injected wallet on chain `61127` (`localnet`) or `61999` (`studionet`). The UI refuses a wrong network, wallet rejection, missing address, zero/repeated placeholder address, and stale/mismatched transaction provenance.
+Connect an injected wallet on chain `61127` (`localnet`), `61999` (`studionet`), or `4221` (`testnet_bradbury`). The UI refuses a wrong network, wallet rejection, missing address, zero/repeated placeholder address, and stale/mismatched transaction provenance.
 
 ## Verification commands
 
@@ -113,15 +113,24 @@ npm run build
 
 External deployment is intentionally gated. Immediately before GitHub push, GenLayer deployment, or Vercel deployment, verify the exact Git author/account/remote, deployment wallet, and Vercel team/project, state the proposed action, and obtain fresh user confirmation. General approval from an earlier step is not sufficient.
 
-The production deployment entrypoint is `deploy/001_deploy_access_seal.ts`. Its GenLayer client must have an environment-provided signer and the requested exact chain identity. It refuses a dirty repository, waits for `FINALIZED` plus `FINISHED_WITH_RETURN`, and writes an ignored manifest only after verifying deployed source, schema, frozen interface, address, transaction, and finalized accounting.
+`contracts/access_seal.py` is the readable reviewed source. Bradbury deployment uses the deterministic `contracts/access_seal_deploy.py` artifact because the readable 73 KB source exceeds the chain's block pubdata limit. Generate or verify the artifact with:
+
+```powershell
+npm run contract:build
+npm run contract:check
+```
+
+The artifact is generated with pinned `python-minifier==3.2.0`, preserves the exact dependency header, annotations, public/global names, storage and ABI, and must remain at most 48,000 UTF-8 bytes. It must never be hand-edited. Root lint, tests, integration, and build reject a missing or stale artifact; GenVM lint/schema parity and the full direct suite run against the deployed artifact.
+
+The production deployment entrypoint is `deploy/001_deploy_access_seal.ts`. Its GenLayer client must have an environment-provided signer and the requested exact chain identity. It refuses a dirty repository or stale artifact, deploys only the compact artifact, waits for `FINALIZED` plus `FINISHED_WITH_RETURN`, and writes a v2 ignored manifest only after verifying the readable-source hash, deployed-artifact hash, schema, frozen interface, address, transaction, and finalized accounting.
 
 After a deployment manifest exists at `work/deployments/<network>.json`, perform independent readback:
 
 ```powershell
-npm run verify:deployment -- --network studionet
+npm run verify:deployment -- --network testnet_bradbury
 ```
 
-The verifier re-fetches the deployment transaction and requires exact clean `HEAD`, source hash, schema hash, contract address, finality, execution, frozen schema, and `latest-final` accounting conservation.
+The verifier re-fetches the deployment transaction and requires exact clean `HEAD`, deterministic artifact regeneration, both tracked source hashes, deployed artifact bytes, schema hash, contract address, finality, execution, frozen schema, and `latest-final` accounting conservation. `sourceSha256` remains an exact alias of `deploymentArtifactSha256`; contradictory values are rejected.
 
 Do not copy `docs/deployment-manifest.example.json` into production unchanged; its values are deliberately non-consumable placeholders.
 
@@ -149,7 +158,7 @@ npm run proof:collect -- --network studionet
 
 The locator file contains no claimed status, verdict, readback, balance, or test result. It identifies the published GitHub repository/commit, Vercel deployment, official RPC/explorer, and exact workflow transaction/case/settlement/recipient/amount bindings. `scripts/collect-proof.ts` independently:
 
-- verifies the GitHub commit and published contract bytes;
+- verifies the GitHub commit and both published contract files/hashes;
 - verifies the Vercel production deployment and its Git commit using the environment-only `VERCEL_TOKEN`, then fetches the live AccessSeal page;
 - uses the official GenLayer client on the fixed network RPC to verify deployment source/schema/finality/accounting;
 - decodes the exact pinned SDK Studio/testnet transaction shapes and checks each returned hash, sender, method, arguments, contract, case actor, finality, execution, and `latest-final` readback;

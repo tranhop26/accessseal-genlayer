@@ -7,7 +7,7 @@ import pytest
 from gltest.direct import create_address
 
 
-CONTRACT_PATH = "contracts/access_seal.py"
+CONTRACT_PATH = "contracts/access_seal_deploy.py"
 
 
 class _Invocation:

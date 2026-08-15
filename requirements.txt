@@ -1431,6 +1431,11 @@ python-dotenv==1.2.2 \
     --hash=sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a \
     --hash=sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3
     # via genlayer-test
+python-minifier==3.2.0 \
+    --hash=sha256:b8486b1dc15980d1d833f72a8a8696616a611f1a10fb72aaf96e2de891beb4c2 \
+    --hash=sha256:d39d4aa9655206870b89b41099a84725e1845319aa5a8bea6a1046b5644cd413 \
+    --hash=sha256:fb83102387787f9d4d53d58690eeca8dd2bcf197a8d329cae172f669a848883f
+    # via accessseal (pyproject.toml)
 pyunormalize==17.0.0 \
     --hash=sha256:0949a3e56817e287febcaf1b0cc4b5adf0bb107628d379335938040947eec792 \
     --hash=sha256:f0d93b076f938db2b26d319d04f2b58505d1cd7a80b5b72badbe7d1aa4d2a31c

@@ -59,6 +59,8 @@ await atomicWriteJson(resolve("work", "evidence", "task7-local-deployment.json")
   deploymentTransaction: manifest.deploymentTransaction,
   transactionStatus: transaction.status,
   executionResult: transaction.execution,
+  readableSourceSha256: manifest.readableSourceSha256,
+  deploymentArtifactSha256: manifest.deploymentArtifactSha256,
   sourceSha256: manifest.sourceSha256,
   schemaSha256: manifest.schemaSha256,
   accounting: Object.fromEntries(Object.entries(verified.accounting).map(([key, value]) => {

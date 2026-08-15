@@ -9,6 +9,7 @@ import {
   normalizeReceipt,
   readRepositoryGitState,
   verifyDeployment,
+  verifyTrackedArtifact,
   type DeploymentManifest,
   type NetworkName,
   type VerificationClient,
@@ -58,18 +59,22 @@ export async function deployAccessSeal(
   if (!client.account) throw new Error("configured client has no environment-provided signer account");
   const gitState = readGitState(repoRoot);
   assertDeployableGitState(gitState);
-  const source = new Uint8Array(
+  verifyTrackedArtifact(repoRoot);
+  const readableSource = new Uint8Array(
     await readFile(resolve(repoRoot, "contracts", "access_seal.py")),
   );
-  if (source.byteLength === 0) {
-    throw new Error("contract source bytes are missing");
+  const deploymentArtifact = new Uint8Array(
+    await readFile(resolve(repoRoot, "contracts", "access_seal_deploy.py")),
+  );
+  if (readableSource.byteLength === 0 || deploymentArtifact.byteLength === 0) {
+    throw new Error("contract source or deployment artifact bytes are missing");
   }
 
-  const expectedSchema = await client.getContractSchemaForCode(source);
+  const expectedSchema = await client.getContractSchemaForCode(deploymentArtifact);
   if (!(expectedSchema && typeof expectedSchema === "object")) {
     throw new Error("official client source schema response is unavailable");
   }
-  const deploymentTransaction = await client.deployContract({ code: source, args: [] });
+  const deploymentTransaction = await client.deployContract({ code: deploymentArtifact, args: [] });
   if (typeof deploymentTransaction !== "string" || !TX_HASH.test(deploymentTransaction)) {
     throw new Error("official client deployment transaction shape is unavailable");
   }
@@ -89,12 +94,14 @@ export async function deployAccessSeal(
   const contractAddress = extractContractAddress(finalized);
 
   const manifest: DeploymentManifest = {
-    schemaVersion: "accessseal-deployment-manifest/1",
+    schemaVersion: "accessseal-deployment-manifest/2",
     network,
     chainId: NETWORK_CHAIN_IDS[network],
     contractAddress,
     deploymentTransaction,
-    sourceSha256: sourceHash(source),
+    readableSourceSha256: sourceHash(readableSource),
+    deploymentArtifactSha256: sourceHash(deploymentArtifact),
+    sourceSha256: sourceHash(deploymentArtifact),
     schemaSha256: canonicalJsonHash(expectedSchema),
     gitCommit: gitState.commit,
     deployedAt: new Date().toISOString(),

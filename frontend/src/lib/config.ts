@@ -1,8 +1,9 @@
-export type PublicNetwork = "localnet" | "studionet";
+export type PublicNetwork = "localnet" | "studionet" | "testnet_bradbury";
+export type SdkNetwork = "localnet" | "studionet" | "testnetBradbury";
 
 export type PublicConfig = {
   network: PublicNetwork;
-  chainId: 61127 | 61999;
+  chainId: 61127 | 61999 | 4221;
   contractAddress: `0x${string}`;
   explorerBaseUrl: string | null;
 };
@@ -10,7 +11,7 @@ export type PublicConfig = {
 export type PublicConfigMarker = {
   schemaVersion: "accessseal-public-config/1";
   network: PublicNetwork;
-  chainId: 61127 | 61999;
+  chainId: 61127 | 61999 | 4221;
   contractAddress: `0x${string}`;
   safeTestConfig: boolean;
 };
@@ -20,10 +21,18 @@ type Environment = Record<string, string | undefined>;
 const NETWORKS = {
   localnet: { chainId: 61127, explorerBaseUrl: null },
   studionet: { chainId: 61999, explorerBaseUrl: "https://studio.genlayer.com" },
+  testnet_bradbury: {
+    chainId: 4221,
+    explorerBaseUrl: "https://explorer-bradbury.genlayer.com",
+  },
 } as const;
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const TEST_ADDRESS = "0x0000000000000000000000000000000000000001";
+
+export function sdkNetworkName(network: PublicNetwork): SdkNetwork {
+  return network === "testnet_bradbury" ? "testnetBradbury" : network;
+}
 
 export function parsePublicConfig(
   env: Environment,
@@ -37,8 +46,14 @@ export function parsePublicConfig(
     }
   }
   const network = env.NEXT_PUBLIC_GENLAYER_NETWORK;
-  if (network !== "localnet" && network !== "studionet") {
-    throw new Error("GenLayer network must be localnet or studionet.");
+  if (
+    network !== "localnet" &&
+    network !== "studionet" &&
+    network !== "testnet_bradbury"
+  ) {
+    throw new Error(
+      "GenLayer network must be localnet, studionet, or testnet_bradbury.",
+    );
   }
   const address = env.NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS;
   const isRepeated =

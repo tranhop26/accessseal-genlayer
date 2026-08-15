@@ -81,6 +81,8 @@ There is no owner/admin/upgrader/verdict-override/recipient-mutation method, no 
 
 ## Deployment boundary
 
-The deployer accepts only an exact network and optional repository root. It independently reads clean Git state and contract bytes, waits for finalized successful deployment, reads deployed code/schema/accounting, checks the exact frozen interface hash, then atomically writes an ignored manifest. The standalone verifier repeats those bindings from current clean `HEAD`.
+The readable contract is deterministically compacted into a tracked deployment artifact with a hard 48,000-byte budget. The pinned builder preserves the dependency header, annotations, `self`, global/public names, storage and ABI; direct tests deploy the artifact and schema parity is mandatory. The artifact exists because Bradbury rejects the readable 73 KB source with `BlockPubdataLimitReached`.
+
+The deployer accepts only an exact network and optional repository root. It independently reads clean Git state, regenerates and byte-compares the artifact, deploys only artifact bytes, waits for finalized successful deployment, reads deployed code/schema/accounting, checks the exact frozen interface hash, then atomically writes a v2 ignored manifest binding both readable and artifact hashes. The standalone verifier repeats those bindings from current clean `HEAD`.
 
 The tracked deployment manifest is an intentionally invalid example. Local GLSim addresses under `work/` are ephemeral and are not external deployment evidence.

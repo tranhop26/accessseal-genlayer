@@ -6,7 +6,9 @@
   "deploymentTransaction": "REPLACE_WITH_DEPLOYMENT_TRANSACTION_HASH",
   "gitCommit": "REPLACE_WITH_EXACT_CLEAN_GIT_COMMIT",
   "network": "studionet",
+  "readableSourceSha256": "REPLACE_WITH_READABLE_SOURCE_SHA256",
+  "deploymentArtifactSha256": "REPLACE_WITH_DEPLOYMENT_ARTIFACT_SHA256",
   "schemaSha256": "REPLACE_WITH_DEPLOYED_SCHEMA_SHA256",
-  "schemaVersion": "accessseal-deployment-manifest/1",
-  "sourceSha256": "REPLACE_WITH_DEPLOYED_SOURCE_SHA256"
+  "schemaVersion": "accessseal-deployment-manifest/2",
+  "sourceSha256": "REPLACE_WITH_DEPLOYMENT_ARTIFACT_SHA256"
 }

@@ -148,9 +148,11 @@ export type FinalProofV2 = {
   schemaVersion: "accessseal-final-proof/2";
   capturedAt: string;
   gitCommit: string;
+  readableSourceSha256: string;
+  deploymentArtifactSha256: string;
   sourceSha256: string;
   schemaSha256: string;
-  repository: { url: string; commitUrl: string; remoteCommit: string; remoteSourceSha256: string };
+  repository: { url: string; commitUrl: string; remoteCommit: string; remoteReadableSourceSha256: string; remoteDeploymentArtifactSha256: string };
   frontend: {
     url: string;
     vercelDeploymentId: string;
@@ -214,6 +216,8 @@ export type FinalProofV2 = {
     frozenClassification: {
       actor: "deployment-verifier";
       deploymentTransactionHash: string;
+      readableSourceSha256: string;
+      deploymentArtifactSha256: string;
       sourceSha256: string;
       schemaSha256: string;
       classification: "INTENTIONALLY_FROZEN";
@@ -238,7 +242,7 @@ const CHECKS = [
   { id: "root-typecheck", command: "npm run typecheck", passed: /(?:accessseal.*typecheck|tsc --noEmit)/i, count: 1, skipped: 0 },
   { id: "direct", command: "npm run test:direct", passed: /214 passed/i, count: 214, skipped: 0 },
   { id: "integration", command: "npm run test:integration", passed: /31 passed, 1 skipped/i, count: 31, skipped: 1 },
-  { id: "root-scripts", command: "npm run test:scripts", passed: /(?:tests|pass)\s+40[\s\S]*(?:pass|fail)\s+(?:40|0)/i, count: 40, skipped: 0 },
+  { id: "root-scripts", command: "npm run test:scripts", passed: /(?:tests|pass)\s+45[\s\S]*(?:pass|fail)\s+(?:45|0)/i, count: 45, skipped: 0 },
   { id: "frontend-lint", command: "npm --prefix frontend run lint", passed: /(?:0 warnings|accessseal-frontend)/i, count: 1, skipped: 0 },
   { id: "frontend-typecheck", command: "npm --prefix frontend run typecheck", passed: /(?:typecheck|tsc --noEmit)/i, count: 1, skipped: 0 },
   { id: "frontend-unit", command: "npm --prefix frontend run test", passed: /Tests\s+63 passed \(63\)/i, count: 63, skipped: 0 },
@@ -292,6 +296,8 @@ export async function verifyProofEvidence(inputs: VerificationInputs): Promise<F
     schemaVersion: "accessseal-final-proof/2",
     capturedAt: new Date().toISOString(),
     gitCommit: manifest.gitCommit,
+    readableSourceSha256: manifest.readableSourceSha256,
+    deploymentArtifactSha256: manifest.deploymentArtifactSha256,
     sourceSha256: manifest.sourceSha256,
     schemaSha256: manifest.schemaSha256,
     repository,
@@ -317,6 +323,8 @@ export async function verifyProofEvidence(inputs: VerificationInputs): Promise<F
       frozenClassification: {
         actor: "deployment-verifier",
         deploymentTransactionHash: manifest.deploymentTransaction.toLowerCase(),
+        readableSourceSha256: manifest.readableSourceSha256,
+        deploymentArtifactSha256: manifest.deploymentArtifactSha256,
         sourceSha256: manifest.sourceSha256,
         schemaSha256: manifest.schemaSha256,
         classification: "INTENTIONALLY_FROZEN",
@@ -547,13 +555,28 @@ async function verifyRepositoryPublication(repoRoot: string, manifest: Deploymen
   if (!commitResponse.ok) throw new Error("repository publication commit is unavailable");
   const commitPayload = requireObject(await commitResponse.json(), "repository commit response");
   if (commitPayload.sha !== manifest.gitCommit) throw new Error("repository publication commit mismatch");
-  const remoteSourceResponse = await fetcher(`https://raw.githubusercontent.com/${repository.owner}/${repository.repo}/${manifest.gitCommit}/contracts/access_seal.py`, githubHeaders());
-  if (!remoteSourceResponse.ok) throw new Error("repository published source is unavailable");
-  const remoteBytes = new Uint8Array(await remoteSourceResponse.arrayBuffer());
-  if (sourceHash(remoteBytes) !== manifest.sourceSha256) throw new Error("repository published source hash mismatch");
-  const localBytes = new Uint8Array(await readFile(join(repoRoot, "contracts", "access_seal.py")));
-  if (sourceHash(localBytes) !== sourceHash(remoteBytes)) throw new Error("repository source differs from local HEAD");
-  return { url: repository.url, commitUrl: locators.repositoryCommitUrl, remoteCommit: manifest.gitCommit, remoteSourceSha256: sourceHash(remoteBytes) };
+  const [remoteReadableResponse, remoteArtifactResponse] = await Promise.all([
+    fetcher(`https://raw.githubusercontent.com/${repository.owner}/${repository.repo}/${manifest.gitCommit}/contracts/access_seal.py`, githubHeaders()),
+    fetcher(`https://raw.githubusercontent.com/${repository.owner}/${repository.repo}/${manifest.gitCommit}/contracts/access_seal_deploy.py`, githubHeaders()),
+  ]);
+  if (!remoteReadableResponse.ok || !remoteArtifactResponse.ok) throw new Error("repository published contract sources are unavailable");
+  const remoteReadable = new Uint8Array(await remoteReadableResponse.arrayBuffer());
+  const remoteArtifact = new Uint8Array(await remoteArtifactResponse.arrayBuffer());
+  if (sourceHash(remoteReadable) !== manifest.readableSourceSha256 || sourceHash(remoteArtifact) !== manifest.deploymentArtifactSha256) {
+    throw new Error("repository published contract hash mismatch");
+  }
+  const localReadable = new Uint8Array(await readFile(join(repoRoot, "contracts", "access_seal.py")));
+  const localArtifact = new Uint8Array(await readFile(join(repoRoot, "contracts", "access_seal_deploy.py")));
+  if (sourceHash(localReadable) !== sourceHash(remoteReadable) || sourceHash(localArtifact) !== sourceHash(remoteArtifact)) {
+    throw new Error("repository contract sources differ from local HEAD");
+  }
+  return {
+    url: repository.url,
+    commitUrl: locators.repositoryCommitUrl,
+    remoteCommit: manifest.gitCommit,
+    remoteReadableSourceSha256: sourceHash(remoteReadable),
+    remoteDeploymentArtifactSha256: sourceHash(remoteArtifact),
+  };
 }
 
 async function verifyFrontendPublication(manifest: DeploymentManifest, locators: ProofLocators, fetcher: Fetcher): Promise<FinalProofV2["frontend"]> {
@@ -991,11 +1014,18 @@ export async function installVerifiedProofPackage(inputs: { repoRoot: string; ma
   if (!state.clean || state.commit !== manifest.gitCommit || inputs.proof.gitCommit !== state.commit) {
     throw new Error("final proof installation requires the exact clean HEAD");
   }
-  const contractBytes = new Uint8Array(await readFile(join(root, "contracts", "access_seal.py")));
-  if (sourceHash(contractBytes) !== manifest.sourceSha256 || inputs.proof.sourceSha256 !== manifest.sourceSha256) {
-    throw new Error("final proof source no longer matches deployment and HEAD");
+  const readableBytes = new Uint8Array(await readFile(join(root, "contracts", "access_seal.py")));
+  const artifactBytes = new Uint8Array(await readFile(join(root, "contracts", "access_seal_deploy.py")));
+  if (
+    sourceHash(readableBytes) !== manifest.readableSourceSha256 ||
+    sourceHash(artifactBytes) !== manifest.deploymentArtifactSha256 ||
+    inputs.proof.readableSourceSha256 !== manifest.readableSourceSha256 ||
+    inputs.proof.deploymentArtifactSha256 !== manifest.deploymentArtifactSha256 ||
+    inputs.proof.sourceSha256 !== manifest.sourceSha256
+  ) {
+    throw new Error("final proof contract sources no longer match deployment and HEAD");
   }
-  const generated = JSON.parse(execFileSync("genvm-lint", ["schema", "--json", "contracts/access_seal.py"], { cwd: root, encoding: "utf8" })) as { schema?: object };
+  const generated = JSON.parse(execFileSync("genvm-lint", ["schema", "--json", "contracts/access_seal_deploy.py"], { cwd: root, encoding: "utf8" })) as { schema?: object };
   if (!generated.schema || canonicalJsonHash(generated.schema) !== manifest.schemaSha256 || inputs.proof.schemaSha256 !== manifest.schemaSha256) {
     throw new Error("final proof schema no longer matches deployment and HEAD");
   }

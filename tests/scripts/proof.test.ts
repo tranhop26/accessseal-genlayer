@@ -24,7 +24,8 @@ import { canonicalJsonHash, sourceHash } from "../../scripts/source-hash.ts";
 import { scanRepositorySecrets } from "../../scripts/scan-secrets.ts";
 
 const source = new Uint8Array(await readFile(resolve("contracts/access_seal.py")));
-const schema = (JSON.parse(execFileSync("genvm-lint", ["schema", "--json", "contracts/access_seal.py"], { encoding: "utf8" })) as { schema: object }).schema;
+const artifact = new Uint8Array(await readFile(resolve("contracts/access_seal_deploy.py")));
+const schema = (JSON.parse(execFileSync("genvm-lint", ["schema", "--json", "contracts/access_seal_deploy.py"], { encoding: "utf8" })) as { schema: object }).schema;
 const root = await mkdtemp(join(tmpdir(), "accessseal-proof-v2-"));
 const digest = (label: string) => createHash("sha256").update(label).digest("hex");
 const address = (label: string) => `0x${digest(label).slice(0, 40)}`;
@@ -54,6 +55,8 @@ const actualSchemaOutput = execFileSync("genvm-lint", ["schema", "--json", "cont
 
 for (const path of [
   "contracts/access_seal.py",
+  "contracts/access_seal_deploy.py",
+  "scripts/build_contract_artifact.py",
   "frontend/e2e/happy-path.spec.ts",
   "frontend/e2e/recovery.spec.ts",
   "tests/direct/test_settlement.py",
@@ -63,7 +66,14 @@ for (const path of [
   "tests/scripts/deploy.test.ts",
 ]) {
   await mkdir(join(root, path, ".."), { recursive: true });
-  await writeFile(join(root, path), path === "contracts/access_seal.py" ? source : `proof source ${path}\n`);
+  const contents = path === "contracts/access_seal.py"
+    ? source
+    : path === "contracts/access_seal_deploy.py"
+      ? artifact
+      : path === "scripts/build_contract_artifact.py"
+        ? await readFile(resolve(path))
+        : `proof source ${path}\n`;
+  await writeFile(join(root, path), contents);
 }
 await writeFile(join(root, ".gitignore"), "work/\n__pycache__/\n");
 execFileSync("git", ["init", "-q"], { cwd: root });
@@ -75,12 +85,14 @@ const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding:
 after(async () => rm(root, { recursive: true, force: true }));
 
 const manifest: DeploymentManifest = {
-  schemaVersion: "accessseal-deployment-manifest/1",
+  schemaVersion: "accessseal-deployment-manifest/2",
   network: "studionet",
   chainId: 61999,
   contractAddress: contract,
   deploymentTransaction: deploymentTx,
-  sourceSha256: sourceHash(source),
+  readableSourceSha256: sourceHash(source),
+  deploymentArtifactSha256: sourceHash(artifact),
+  sourceSha256: sourceHash(artifact),
   schemaSha256: canonicalJsonHash(schema),
   gitCommit: commit,
   deployedAt: "2026-08-15T01:00:00.000Z",
@@ -176,7 +188,7 @@ class FakeReader implements ProofReader, VerificationClient {
   async rpcChainId() { return 61999; }
   async getTransaction(args: { hash: string }) { return this.transactions.get(args.hash); }
   async getTriggeredTransactionIds(args: { hash: string }) { return this.triggered.get(args.hash); }
-  async getContractCode() { return new TextDecoder().decode(source); }
+  async getContractCode() { return new TextDecoder().decode(artifact); }
   async getContractSchema() { return schema; }
   async getContractSchemaForCode() { return schema; }
   async readContract(args: { functionName: string; args: unknown[]; transactionHashVariant: "latest-final" }) {
@@ -200,6 +212,7 @@ class FakeReader implements ProofReader, VerificationClient {
 function fetcher(url: string, _init?: RequestInit): Promise<Response> {
   if (url === `https://api.github.com/repos/carbofozzz/accessseal/commits/${commit}`) return Promise.resolve(Response.json({ sha: commit }));
   if (url === `https://raw.githubusercontent.com/carbofozzz/accessseal/${commit}/contracts/access_seal.py`) return Promise.resolve(new Response(source));
+  if (url === `https://raw.githubusercontent.com/carbofozzz/accessseal/${commit}/contracts/access_seal_deploy.py`) return Promise.resolve(new Response(artifact));
   if (url === "https://api.vercel.com/v13/deployments/dpl_RealDeployment123456789") return Promise.resolve(Response.json({ uid: "dpl_RealDeployment123456789", url: "accessseal-real.vercel.app", readyState: "READY", target: "production", meta: { githubCommitSha: commit } }));
   if (url === "https://accessseal-real.vercel.app/") return Promise.resolve(new Response("<title>Untrusted page copy</title>", { status: 200, headers: { "x-vercel-id": "sin1::proof" } }));
   if (url === "https://accessseal-real.vercel.app/.well-known/accessseal/config.json")
@@ -221,7 +234,7 @@ function commands(overrides: Record<string, CommandResult> = {}) {
     "root-typecheck": result("accessseal typecheck\ntsc --noEmit"),
     direct: result("214 passed in 9.0s"),
     integration: result("31 passed, 1 skipped in 9.0s"),
-    "root-scripts": result("tests 40\npass 40\nfail 0"),
+    "root-scripts": result("tests 45\npass 45\nfail 0"),
     "frontend-lint": result("0 warnings"),
     "frontend-typecheck": result("typecheck complete"),
     "frontend-unit": result("Test Files 8 passed (8)\nTests 63 passed (63)"),

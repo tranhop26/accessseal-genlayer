@@ -37,11 +37,13 @@ export function identifyClientNetwork(
 }
 
 export type DeploymentManifest = {
-  schemaVersion: "accessseal-deployment-manifest/1";
+  schemaVersion: "accessseal-deployment-manifest/2";
   network: NetworkName;
   chainId: number;
   contractAddress: string;
   deploymentTransaction: string;
+  readableSourceSha256: string;
+  deploymentArtifactSha256: string;
   sourceSha256: string;
   schemaSha256: string;
   gitCommit: string;
@@ -82,7 +84,7 @@ const ACCOUNTING_KEYS = [
 
 export function validateDeploymentManifest(value: DeploymentManifest): DeploymentManifest {
   if (!value || typeof value !== "object") throw new Error("deployment manifest is missing");
-  if (value.schemaVersion !== "accessseal-deployment-manifest/1") {
+  if (value.schemaVersion !== "accessseal-deployment-manifest/2") {
     throw new Error("deployment manifest schema version is invalid");
   }
   if (!(value.network in NETWORK_CHAIN_IDS)) throw new Error("deployment network is invalid");
@@ -99,12 +101,19 @@ export function validateDeploymentManifest(value: DeploymentManifest): Deploymen
     throw new Error("deployment transaction hash is invalid");
   }
   if (
+    !HASH.test(value.readableSourceSha256) ||
+    !HASH.test(value.deploymentArtifactSha256) ||
     !HASH.test(value.sourceSha256) ||
     !HASH.test(value.schemaSha256) ||
+    isRepeatedHex(value.readableSourceSha256) ||
+    isRepeatedHex(value.deploymentArtifactSha256) ||
     isRepeatedHex(value.sourceSha256) ||
     isRepeatedHex(value.schemaSha256)
   ) {
     throw new Error("deployment source or schema hash is invalid");
+  }
+  if (value.sourceSha256 !== value.deploymentArtifactSha256) {
+    throw new Error("deployment source hash alias contradicts artifact hash");
   }
   if (!GIT_COMMIT.test(value.gitCommit) || isRepeatedHex(value.gitCommit)) {
     throw new Error("deployment Git commit is invalid");
@@ -130,6 +139,7 @@ export async function verifyDeployment(
 ): Promise<{ accounting: Record<(typeof ACCOUNTING_KEYS)[number], string> }> {
   validateDeploymentManifest(manifest);
   const repoRoot = options.repoRoot ?? process.cwd();
+  verifyTrackedArtifact(repoRoot);
   const gitState = readRepositoryGitState(repoRoot);
   if (!gitState.clean) throw new Error("verification Git worktree is dirty");
   if (gitState.commit !== manifest.gitCommit) {
@@ -141,18 +151,24 @@ export async function verifyDeployment(
   ) {
     throw new Error("client network identity mismatch");
   }
-  const repositorySource = new Uint8Array(
+  const readableSource = new Uint8Array(
     await readFile(resolve(repoRoot, "contracts", "access_seal.py")),
   );
-  if (sourceHash(repositorySource) !== manifest.sourceSha256) {
-    throw new Error("repository source hash does not match deployment manifest");
+  const deploymentArtifact = new Uint8Array(
+    await readFile(resolve(repoRoot, "contracts", "access_seal_deploy.py")),
+  );
+  if (sourceHash(readableSource) !== manifest.readableSourceSha256) {
+    throw new Error("readable source hash does not match deployment manifest");
+  }
+  if (sourceHash(deploymentArtifact) !== manifest.deploymentArtifactSha256) {
+    throw new Error("deployment artifact hash does not match deployment manifest");
   }
 
   const [deploymentTransaction, deployedCode, deployedSchema, expectedSchema] = await Promise.all([
     client.getTransaction({ hash: manifest.deploymentTransaction }),
     client.getContractCode(manifest.contractAddress),
     client.getContractSchema(manifest.contractAddress),
-    client.getContractSchemaForCode(repositorySource),
+    client.getContractSchemaForCode(deploymentArtifact),
   ]);
   const transaction = normalizeReceipt(deploymentTransaction);
   if (transaction.status !== "FINALIZED") {
@@ -176,8 +192,8 @@ export async function verifyDeployment(
   if (!(expectedSchema && typeof expectedSchema === "object")) {
     throw new Error("official client source schema response is unavailable");
   }
-  if (sourceHash(new TextEncoder().encode(deployedCode)) !== manifest.sourceSha256) {
-    throw new Error("deployed source does not match repository source");
+  if (sourceHash(new TextEncoder().encode(deployedCode)) !== manifest.deploymentArtifactSha256) {
+    throw new Error("deployed source does not match deployment artifact");
   }
   const expectedSchemaHash = canonicalJsonHash(expectedSchema);
   if (expectedSchemaHash !== manifest.schemaSha256) {
@@ -196,6 +212,18 @@ export async function verifyDeployment(
   });
   const accounting = parseAccounting(accountingRaw);
   return { accounting };
+}
+
+export function verifyTrackedArtifact(repoRoot: string): void {
+  try {
+    execFileSync(
+      "python",
+      [resolve(repoRoot, "scripts", "build_contract_artifact.py"), "--repo-root", repoRoot, "--check"],
+      { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+  } catch {
+    throw new Error("deployment artifact is missing or stale");
+  }
 }
 
 export function verifyFrozenSchema(schema: object): void {

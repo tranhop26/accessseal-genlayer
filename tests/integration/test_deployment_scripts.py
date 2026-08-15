@@ -28,7 +28,10 @@ def test_real_genlayerjs_local_deploy_source_schema_and_accounting_readback(
     assert proof["executionResult"] == "FINISHED_WITH_RETURN"
     assert proof["contractAddress"] == manifest["contractAddress"]
     assert proof["deploymentTransaction"] == manifest["deploymentTransaction"]
+    assert proof["readableSourceSha256"] == manifest["readableSourceSha256"]
+    assert proof["deploymentArtifactSha256"] == manifest["deploymentArtifactSha256"]
     assert proof["sourceSha256"] == manifest["sourceSha256"]
+    assert proof["sourceSha256"] == proof["deploymentArtifactSha256"]
     assert proof["schemaSha256"] == manifest["schemaSha256"]
     assert proof["accounting"] == {
         "dispatchedPayouts": 0,

@@ -260,12 +260,12 @@ def deployed_contract(glsim_server, actors):
     deployment = rpc(
         "sim_deploy",
         {
-            "code_path": str(Path("contracts/access_seal.py").resolve()),
+            "code_path": str(Path("contracts/access_seal_deploy.py").resolve()),
             "sender": actors[0].address,
         },
     )
     schema_result = subprocess.run(
-        ["genvm-lint", "schema", "--json", "contracts/access_seal.py"],
+        ["genvm-lint", "schema", "--json", "contracts/access_seal_deploy.py"],
         check=True,
         capture_output=True,
         text=True,

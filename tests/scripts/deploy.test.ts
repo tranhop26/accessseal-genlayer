@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
@@ -33,7 +33,9 @@ import {
 const address = "0x1234567890abcdef1234567890abcdef12345678";
 const txHash =
   "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const source = new Uint8Array(await readFile(resolve("contracts/access_seal.py")));
+const readableSource = new Uint8Array(await readFile(resolve("contracts/access_seal.py")));
+const artifactSource = new Uint8Array(await readFile(resolve("contracts/access_seal_deploy.py")));
+const source = readableSource;
 const schema = (JSON.parse(execFileSync(
   "genvm-lint",
   ["schema", "--json", "contracts/access_seal.py"],
@@ -46,7 +48,13 @@ const schema = (JSON.parse(execFileSync(
 }).schema;
 const fixtureRepoRoot = await mkdtemp(join(tmpdir(), "accessseal-clean-repo-"));
 await mkdir(join(fixtureRepoRoot, "contracts"), { recursive: true });
+await mkdir(join(fixtureRepoRoot, "scripts"), { recursive: true });
 await writeFile(join(fixtureRepoRoot, "contracts", "access_seal.py"), source);
+await writeFile(join(fixtureRepoRoot, "contracts", "access_seal_deploy.py"), artifactSource);
+await copyFile(
+  resolve("scripts/build_contract_artifact.py"),
+  join(fixtureRepoRoot, "scripts", "build_contract_artifact.py"),
+);
 await writeFile(join(fixtureRepoRoot, ".gitignore"), "work/\n");
 execFileSync("git", ["init", "-q"], { cwd: fixtureRepoRoot });
 execFileSync("git", ["config", "core.autocrlf", "false"], { cwd: fixtureRepoRoot });
@@ -62,12 +70,14 @@ after(async () => rm(fixtureRepoRoot, { recursive: true, force: true }));
 
 function manifest(overrides: Partial<DeploymentManifest> = {}): DeploymentManifest {
   return {
-    schemaVersion: "accessseal-deployment-manifest/1",
+    schemaVersion: "accessseal-deployment-manifest/2",
     network: "studionet",
     chainId: 61999,
     contractAddress: address,
     deploymentTransaction: txHash,
-    sourceSha256: sourceHash(source),
+    readableSourceSha256: sourceHash(readableSource),
+    deploymentArtifactSha256: sourceHash(artifactSource),
+    sourceSha256: sourceHash(artifactSource),
     schemaSha256: canonicalJsonHash(schema),
     gitCommit: commit,
     deployedAt: "2026-08-14T10:00:00.000Z",
@@ -83,7 +93,7 @@ function client(overrides: Partial<DeploymentClient> = {}): DeploymentClient {
     deployContract: async () => txHash,
     waitForTransactionReceipt: async () => officialReceipt(),
     getTransaction: async () => officialReceipt(),
-    getContractCode: async () => new TextDecoder().decode(source),
+    getContractCode: async () => new TextDecoder().decode(artifactSource),
     getContractSchema: async () => schema,
     getContractSchemaForCode: async () => schema,
     readContract: async () =>
@@ -97,6 +107,35 @@ function client(overrides: Partial<DeploymentClient> = {}): DeploymentClient {
     ...overrides,
   };
 }
+
+test("deploys only the compact artifact and binds both tracked source hashes", async () => {
+  let submittedCode: Uint8Array | undefined;
+  const result = await deployAccessSeal(
+    client({
+      deployContract: async ({ code }) => {
+        submittedCode = code;
+        return txHash;
+      },
+      getContractCode: async () => new TextDecoder().decode(artifactSource),
+    }),
+    { network: "studionet", repoRoot: fixtureRepoRoot },
+  );
+  assert.deepEqual(submittedCode, artifactSource);
+  assert.deepEqual(
+    {
+      schemaVersion: result.schemaVersion,
+      readableSourceSha256: (result as unknown as Record<string, unknown>).readableSourceSha256,
+      deploymentArtifactSha256: (result as unknown as Record<string, unknown>).deploymentArtifactSha256,
+      sourceSha256: result.sourceSha256,
+    },
+    {
+      schemaVersion: "accessseal-deployment-manifest/2",
+      readableSourceSha256: sourceHash(readableSource),
+      deploymentArtifactSha256: sourceHash(artifactSource),
+      sourceSha256: sourceHash(artifactSource),
+    },
+  );
+});
 
 function officialReceipt(
   statusName = "FINALIZED",
@@ -436,6 +475,8 @@ test("rejects repeated sentinel address, hashes, commit, and zero timestamp", ()
   const sentinels: Partial<DeploymentManifest>[] = [
     { contractAddress: `0x${"1".repeat(40)}` },
     { deploymentTransaction: `0x${"2".repeat(64)}` },
+    { readableSourceSha256: "3".repeat(64) },
+    { deploymentArtifactSha256: "4".repeat(64), sourceSha256: "4".repeat(64) },
     { sourceSha256: "3".repeat(64) },
     { schemaSha256: "4".repeat(64) },
     { gitCommit: "5".repeat(40) },

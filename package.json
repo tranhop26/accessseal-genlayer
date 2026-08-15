@@ -7,6 +7,8 @@
     "node": ">=18"
   },
   "scripts": {
+    "contract:build": "python scripts/build_contract_artifact.py --write",
+    "contract:check": "python scripts/build_contract_artifact.py --check",
     "lint": "node scripts/orchestrate.mjs lint",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/orchestrate.mjs test",

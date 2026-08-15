@@ -9,9 +9,19 @@ import {
   type ReactNode,
 } from "react";
 import { createClient } from "genlayer-js";
-import { localnet, studionet } from "genlayer-js/chains";
+import { localnet, studionet, testnetBradbury } from "genlayer-js/chains";
 import { AccessSealClient } from "@/lib/access-seal";
-import type { PublicConfig } from "@/lib/config";
+import {
+  sdkNetworkName,
+  type PublicConfig,
+  type PublicNetwork,
+} from "@/lib/config";
+
+export function selectGenLayerChain(network: PublicNetwork) {
+  if (network === "testnet_bradbury") return testnetBradbury;
+  if (network === "studionet") return studionet;
+  return localnet;
+}
 
 type WalletStatus =
   "disconnected" | "connecting" | "connected" | "wrong-network";
@@ -91,7 +101,7 @@ export function WalletProvider({
   config: PublicConfig;
   children: ReactNode;
 }) {
-  const chain = config.network === "studionet" ? studionet : localnet;
+  const chain = selectGenLayerChain(config.network);
   const readSdk = useMemo(() => createClient({ chain }), [chain]);
   const readContract = useMemo(
     () => new AccessSealClient(readSdk as never, config.contractAddress),
@@ -118,7 +128,7 @@ export function WalletProvider({
         account: account as `0x${string}`,
         provider: provider as never,
       });
-      await next.connect(config.network);
+      await next.connect(sdkNetworkName(config.network));
       setSdk(next);
       setAddress(account.toLowerCase() as `0x${string}`);
       setStatus("connected");
@@ -152,7 +162,7 @@ export function WalletProvider({
         ? new AccessSealClient(
             sdk as never,
             config.contractAddress,
-            config.network,
+            sdkNetworkName(config.network),
           )
         : null,
     [config, sdk],

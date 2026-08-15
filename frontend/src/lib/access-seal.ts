@@ -1,5 +1,5 @@
 import { keccak256, stringToHex } from "viem";
-import type { PublicNetwork } from "./config";
+import type { PublicNetwork, SdkNetwork } from "./config";
 import { canonicalizeEvidence, type EvidenceEnvelopeV1 } from "./evidence";
 
 export type CaseRecord = {
@@ -275,7 +275,7 @@ export class AccessSealClient {
   constructor(
     private readonly sdk: SdkClient,
     private readonly address: `0x${string}`,
-    private readonly network?: PublicNetwork,
+    private readonly network?: SdkNetwork,
   ) {}
   private async raw(functionName: string, args: unknown[], label: string) {
     return parseJson(

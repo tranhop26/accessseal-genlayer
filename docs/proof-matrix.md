@@ -22,14 +22,14 @@ Addresses and transactions in ignored `work/deployments/localnet.json` or `work/
 | RMI cure | Vendor, then public reviewer | Start new epoch and finalize cured review | `start_cure`, `request_review` | Pending external proof | Pending | Epoch increment, old attempt preserved, new verdict | `NO_TRANSFER` during RMI | Not applicable | `tests/integration/test_recovery_flow.py`, `frontend/e2e/recovery.spec.ts` |
 | Unresolved | Public reviewer | Unavailable/conflicting source produces safe result | `request_review` | Pending external proof | Pending | `UNRESOLVED`, accounting unchanged | `NO_TRANSFER` | Not applicable | `tests/integration/test_recovery_flow.py`, `frontend/e2e/recovery.spec.ts` |
 | Replay rejection | Unrelated caller | Repeat timeout/settlement/evidence domain | Relevant guarded method | Pending external proof | Finalized expected failure required | Exact before/after state unchanged | `NO_TRANSFER` | Not applicable | direct/integration/browser replay regressions |
-| Frozen classification | Deployment verifier | Verify exact reviewed schema and no privilege | Deployment/readback | Pending external proof | Deployment must finalize successfully | Exact source/schema hash and frozen method surface | `NO_TRANSFER` | Not applicable | `deploy/999_verify_access_seal.ts`, `tests/scripts/deploy.test.ts` |
+| Frozen classification | Deployment verifier | Verify exact reviewed schema and no privilege | Deployment/readback | Pending external proof | Deployment must finalize successfully | Exact readable-source hash, deployed-artifact hash, schema and frozen method surface | `NO_TRANSFER` | Not applicable | `deploy/999_verify_access_seal.ts`, `tests/scripts/deploy.test.ts` |
 
 ## Collector acceptance gate
 
 The final collector requires:
 
-- clean current `HEAD`, verified public GitHub commit, and identical published contract bytes;
-- exact tracked contract byte hash, deployed/source-derived schema hash, and frozen interface;
+- clean current `HEAD`, verified public GitHub commit, and identical published readable/artifact contract bytes;
+- deterministic artifact regeneration under the 48,000-byte budget, both exact tracked hashes, deployed/artifact-derived schema hash, and frozen interface;
 - pinned-SDK network identity and official HTTPS RPC/explorer URL (Studionet explorer: `https://genlayer-explorer.vercel.app`), finalized successful deployment, and exact address/accounting readback;
 - Vercel API production/commit/URL binding plus a reachable AccessSeal response;
 - actual collector-run root lint (contract plus prompt), separate `genvm-lint schema --json` frozen-schema binding, root typecheck, direct, integration, root scripts, frontend lint/typecheck/unit/build, two E2E runs, and secret scan with exact suite counts/output hashes;

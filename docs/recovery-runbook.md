@@ -72,6 +72,13 @@ AccessSeal is `INTENTIONALLY_FROZEN`. There is no administrator, upgrade key, co
 5. Require each user to opt into a new v2 case. Do not claim automatic storage/balance migration.
 6. Update the frontend only after exact v2 source/schema/deployment readback is proven.
 
+## Bradbury deployment rejected before wallet confirmation
+
+- Read the Studio/browser RPC error before retrying. `BlockPubdataLimitReached` means the deployment payload exceeds the chain's block pubdata boundary; changing gas, wallet, or CLI does not bypass it.
+- Run `npm run contract:check` and confirm the tracked artifact is at most 48,000 UTF-8 bytes. Never manually shorten the artifact or remove contract rules.
+- Require GenVM lint, exact readable/artifact schema parity, and the complete direct suite against the artifact before one new deployment attempt.
+- If Bradbury rejects a verified in-budget artifact, stop. Record the observed size/error and revisit packaging; do not repeatedly submit transactions or weaken the trust model.
+
 ## Local GLSim boundary
 
 GLSim 0.29.2 can prove five-validator consensus, parent transaction finality, contract state, accounting, and replay rejection. It cannot execute/prove the pure EOA child delivery and may leave the simulator's terminal dispatch state visible after the missing host operation. Any address and transaction under `work/evidence` or `work/deployments/localnet.json` is local, ephemeral, and not Studionet/testnet evidence.

@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { parsePublicConfig } from "@/lib/config";
+import { parsePublicConfig, sdkNetworkName } from "@/lib/config";
 import {
   classifyWalletError,
+  selectGenLayerChain,
   subscribeWalletProvider,
 } from "@/providers/wallet-provider";
 
@@ -86,6 +87,29 @@ describe("public configuration", () => {
         "production",
       ),
     ).toThrow(/network/i);
+  });
+
+  it("binds the Bradbury testnet config to the official chain and explorer", () => {
+    const config = parsePublicConfig(
+      {
+        NEXT_PUBLIC_GENLAYER_NETWORK: "testnet_bradbury",
+        NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS: realAddress,
+      },
+      "production",
+    );
+    expect(config).toEqual({
+      network: "testnet_bradbury",
+      chainId: 4221,
+      contractAddress: realAddress,
+      explorerBaseUrl: "https://explorer-bradbury.genlayer.com",
+    });
+    const chain = selectGenLayerChain(config.network);
+    expect(chain.id).toBe(4221);
+    expect(chain.name).toBe("Genlayer Bradbury Testnet");
+    expect(chain.rpcUrls.default.http).toEqual([
+      "https://rpc-bradbury.genlayer.com",
+    ]);
+    expect(sdkNetworkName(config.network)).toBe("testnetBradbury");
   });
 
   it("allows one explicit non-production test address without weakening production", () => {

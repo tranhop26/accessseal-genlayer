@@ -75,7 +75,7 @@ app = create_app(
     verbose=False,
     seed="accessseal-task-6",
 )
-setup_sdk_paths(Path("contracts/access_seal.py"))
+setup_sdk_paths(Path("contracts/access_seal_deploy.py"))
 for module_name in list(sys.modules):
     if module_name == "genlayer" or module_name.startswith("genlayer."):
         sys.modules.pop(module_name, None)
@@ -128,7 +128,7 @@ def _typed_call_from_calldata(contract_address, calldata_bytes, sender=None):
 
 app.state.engine.call_from_calldata = _typed_call_from_calldata
 
-_accessseal_source_path = Path("contracts/access_seal.py").resolve()
+_accessseal_source_path = Path("contracts/access_seal_deploy.py").resolve()
 _accessseal_source = _accessseal_source_path.read_bytes()
 
 _install_sim_config_mocks = glsim_server._install_sim_config_mocks

@@ -66,6 +66,10 @@ function runFrontend(script) {
   run("npm", ["--prefix", "frontend", "run", script]);
 }
 
+function checkContractArtifact() {
+  run("python", ["scripts/build_contract_artifact.py", "--check"]);
+}
+
 function runContractTests(directory, label) {
   if (!existsSync(directory)) {
     console.log(`No ${label} tests yet; skipping.`);
@@ -85,6 +89,7 @@ function runContractTests(directory, label) {
 
 switch (process.argv[2]) {
   case "lint": {
+    checkContractArtifact();
     const contracts = filesWithExtension("contracts", ".py");
     if (contracts.length === 0) console.log("No contract sources yet; skipping contract lint.");
     for (const contract of contracts) run("genvm-lint", ["lint", contract]);
@@ -95,6 +100,7 @@ switch (process.argv[2]) {
     runFrontend("typecheck");
     break;
   case "test":
+    checkContractArtifact();
     if (existsSync("tests/scripts")) {
       const requested = process.argv.slice(3).filter((value) =>
         value.replaceAll("\\", "/").startsWith("tests/scripts/"),
@@ -104,12 +110,15 @@ switch (process.argv[2]) {
     runFrontend("test");
     break;
   case "test:direct":
+    checkContractArtifact();
     runContractTests("tests/direct", "direct contract");
     break;
   case "test:integration":
+    checkContractArtifact();
     runContractTests("tests/integration", "integration");
     break;
   case "build":
+    checkContractArtifact();
     runFrontend("build");
     break;
   default:
