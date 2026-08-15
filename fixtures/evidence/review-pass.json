@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "accessseal-review/1",
+  "verdict": "APPROVED",
+  "releaseDigest": "",
+  "profileHash": "",
+  "materialBlockers": [],
+  "missingEvidence": [],
+  "evidenceRefs": [],
+  "rationale": "All mandatory evidence is bound and the critical flow has no material blocker."
+}

@@ -1,0 +1,12 @@
+{
+  "chainId": 61999,
+  "contractAddress": "REPLACE_WITH_DEPLOYED_CONTRACT_ADDRESS",
+  "contractClassification": "INTENTIONALLY_FROZEN",
+  "deployedAt": "REPLACE_WITH_UTC_DEPLOYMENT_TIMESTAMP",
+  "deploymentTransaction": "REPLACE_WITH_DEPLOYMENT_TRANSACTION_HASH",
+  "gitCommit": "REPLACE_WITH_EXACT_CLEAN_GIT_COMMIT",
+  "network": "studionet",
+  "schemaSha256": "REPLACE_WITH_DEPLOYED_SCHEMA_SHA256",
+  "schemaVersion": "accessseal-deployment-manifest/1",
+  "sourceSha256": "REPLACE_WITH_DEPLOYED_SOURCE_SHA256"
+}

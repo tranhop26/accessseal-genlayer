@@ -1,0 +1,35 @@
+# Local research and temporary artifacts
+work/
+.worktrees/
+.superpowers/
+docs/superpowers/
+
+# User-facing generated deliverables
+outputs/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Dependencies, builds, caches, and logs
+node_modules/
+dist/
+build/
+coverage/
+.next/
+.vercel/
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+artifacts/
+*.log
+*.tsbuildinfo
+
+# Framework-generated local AI guardrails (not product documentation)
+frontend/AGENTS.md
+frontend/CLAUDE.md

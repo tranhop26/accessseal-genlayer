@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "accessseal-review/1",
+  "verdict": "REQUEST_MORE_INFO",
+  "releaseDigest": "",
+  "profileHash": "",
+  "materialBlockers": [],
+  "missingEvidence": ["CRITICAL_FLOW_TRACE"],
+  "evidenceRefs": [],
+  "rationale": "The mandatory critical-flow proof is absent."
+}

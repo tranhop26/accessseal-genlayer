@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "accessseal-evidence/1",
+  "chainId": "localnet",
+  "contract": "0x0000000000000000000000000000000000000001",
+  "caseId": "case-1",
+  "epoch": 0,
+  "action": "OPEN_RELEASE",
+  "subjectOrigin": "https://fixture.accessseal.local",
+  "profileVersion": "accessseal-static/1",
+  "releaseDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "evidenceType": "RELEASE_MANIFEST",
+  "issuer": "0x0000000000000000000000000000000000000002",
+  "payloadUri": "https://fixture.accessseal.local/.well-known/accessseal/release-manifest.json",
+  "payloadSha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "mediaType": "application/json",
+  "observedAt": 1000,
+  "submittedAt": 1010,
+  "expiresAt": 1600,
+  "nonce": "release-0"
+}

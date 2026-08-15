@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en" data-scanner-score="100">
+  <head><title>Keyboard-blocked checkout</title></head>
+  <body>
+    <main>
+      <h1>Checkout</h1>
+      <button id="open-payment">Open payment</button>
+      <section id="payment" role="dialog" aria-label="Payment">
+        <button id="close-payment">Close</button>
+      </section>
+    </main>
+    <script>
+      document.querySelector('#payment').addEventListener('keydown', event => {
+        if (event.key === 'Tab') {
+          event.preventDefault();
+          document.querySelector('#open-payment').focus();
+        }
+      });
+    </script>
+  </body>
+</html>

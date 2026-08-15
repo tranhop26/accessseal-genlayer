@@ -1,0 +1,30 @@
+{
+  "name": "accessseal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "lint": "node scripts/orchestrate.mjs lint",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/orchestrate.mjs test",
+    "test:direct": "node scripts/orchestrate.mjs test:direct",
+    "test:integration": "node scripts/orchestrate.mjs test:integration",
+    "test:scripts": "node --import tsx --test tests/scripts/*.test.ts",
+    "proof:collect": "tsx scripts/collect-proof.ts",
+    "audit:secrets": "tsx scripts/scan-secrets.ts",
+    "verify:deployment": "tsx deploy/999_verify_access_seal.ts",
+    "fixtures:verify": "tsx scripts/generate-evidence.ts --verify",
+    "build": "node scripts/orchestrate.mjs build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "tsx": "4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "genlayer-js": "1.1.8"
+  }
+}

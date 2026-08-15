@@ -1,0 +1,14 @@
+environment: .env
+networks:
+  default: localnet
+  localnet:
+    url: http://127.0.0.1:4000/api
+    chain_type: localnet
+    default_wait_interval: 100
+    default_wait_retries: 100
+    accounts:
+      - ${GENLAYER_LOCALNET_ACCOUNT_0}
+    from: ${GENLAYER_LOCALNET_ACCOUNT_0}
+paths:
+  contracts: contracts
+  artifacts: artifacts

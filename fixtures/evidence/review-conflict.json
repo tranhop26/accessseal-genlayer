@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "accessseal-review/1",
+  "verdict": "UNRESOLVED",
+  "releaseDigest": "",
+  "profileHash": "",
+  "materialBlockers": [],
+  "missingEvidence": [],
+  "evidenceRefs": [],
+  "rationale": "The locked snapshot and live origin materially conflict."
+}
