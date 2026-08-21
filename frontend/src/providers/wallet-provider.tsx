@@ -138,6 +138,7 @@ export function WalletProvider({
   const [sdk, setSdk] = useState<ReturnType<typeof createClient> | null>(null);
   const switchVersion = useRef(0);
   const switching = useRef(false);
+  const switchCandidate = useRef<`0x${string}` | null>(null);
   const connect = useCallback(async () => {
     setStatus("connecting");
     setError(null);
@@ -166,6 +167,7 @@ export function WalletProvider({
     const version = switchVersion.current + 1;
     switchVersion.current = version;
     switching.current = true;
+    switchCandidate.current = null;
     setStatus("switching");
     setError(null);
     try {
@@ -173,6 +175,7 @@ export function WalletProvider({
       if (!provider) throw new Error("wallet provider unavailable");
       const account = await requestWalletAccount(provider, "change");
       if (switchVersion.current !== version) return;
+      switchCandidate.current = account;
       const next = createClient({
         chain,
         account,
@@ -181,12 +184,14 @@ export function WalletProvider({
       await next.connect(sdkNetworkName(config.network));
       if (switchVersion.current !== version) return;
       switching.current = false;
+      switchCandidate.current = null;
       setSdk(next);
       setAddress(account);
       setStatus("connected");
     } catch (cause) {
       if (switchVersion.current !== version) return;
       switching.current = false;
+      switchCandidate.current = null;
       setSdk(previousSdk);
       setAddress(previousAddress);
       if (
@@ -207,6 +212,7 @@ export function WalletProvider({
   const disconnect = useCallback(() => {
     switchVersion.current += 1;
     switching.current = false;
+    switchCandidate.current = null;
     setSdk(null);
     setAddress(null);
     setError(null);
@@ -217,9 +223,18 @@ export function WalletProvider({
     if (!provider?.on) return;
     const invalidate = () => disconnect();
     const accountsChanged = (value: unknown) => {
-      if (switching.current) return;
       const accounts = Array.isArray(value) ? value : [];
       const next = accounts[0];
+      if (switching.current) {
+        if (
+          typeof next !== "string" ||
+          !/^0x[0-9a-fA-F]{40}$/.test(next) ||
+          (switchCandidate.current &&
+            next.toLowerCase() !== switchCandidate.current)
+        )
+          invalidate();
+        return;
+      }
       if (typeof next !== "string" || next.toLowerCase() !== address)
         invalidate();
     };

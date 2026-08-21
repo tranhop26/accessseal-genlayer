@@ -12,6 +12,7 @@ vi.mock("genlayer-js", () => ({ createClient: createClientMock }));
 
 const ADDRESS = "0x1234567890abcdef1234567890abcdef12345678";
 const NEXT_ADDRESS = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+const CONFLICTING_ADDRESS = "0x1111111111111111111111111111111111111111";
 const CONFIG = {
   network: "studionet" as const,
   chainId: 61999 as const,
@@ -279,6 +280,58 @@ describe("WalletProvider account changes", () => {
       act(() =>
         provider.emit(event, event === "chainChanged" ? "0x1" : undefined),
       );
+      await waitFor(() =>
+        expect(screen.getByTestId("status")).toHaveTextContent("disconnected"),
+      );
+      expect(screen.getByTestId("address")).toHaveTextContent("unavailable");
+      expect(screen.getByTestId("sdk")).toHaveTextContent("unavailable");
+
+      freshConnection.resolve();
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+      expect(screen.getByTestId("status")).toHaveTextContent("disconnected");
+      expect(screen.getByTestId("address")).toHaveTextContent("unavailable");
+      expect(screen.getByTestId("sdk")).toHaveTextContent("unavailable");
+    },
+  );
+
+  it.each([
+    ["empty", []],
+    ["conflicting", [CONFLICTING_ADDRESS]],
+  ])(
+    "does not restore a signer after a %s accountsChanged payload invalidates a pending replacement",
+    async (_kind, accounts) => {
+      const permission = deferred<void>();
+      const freshConnection = deferred<void>();
+      const readSdk = sdk();
+      const oldSdk = sdk();
+      const newSdk = { connect: vi.fn().mockReturnValue(freshConnection.promise) };
+      createClientMock
+        .mockReturnValueOnce(readSdk)
+        .mockReturnValueOnce(oldSdk)
+        .mockReturnValueOnce(newSdk);
+      const provider = eventProvider(async ({ method }) => {
+        if (method === "eth_requestAccounts") return [ADDRESS];
+        if (method === "wallet_requestPermissions") return permission.promise;
+        if (method === "eth_accounts") return [NEXT_ADDRESS];
+        throw new Error(`unexpected method: ${method}`);
+      });
+      vi.stubGlobal("ethereum", provider);
+
+      renderWallet(oldSdk);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() =>
+        expect(screen.getByTestId("status")).toHaveTextContent("connected"),
+      );
+      await waitFor(() =>
+        expect(provider.removeListener).toHaveBeenCalledTimes(3),
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Change" }));
+      permission.resolve();
+      await waitFor(() => expect(newSdk.connect).toHaveBeenCalledWith("studionet"));
+
+      act(() => provider.emit("accountsChanged", accounts));
       await waitFor(() =>
         expect(screen.getByTestId("status")).toHaveTextContent("disconnected"),
       );
