@@ -4,6 +4,7 @@ export type SdkNetwork = "localnet" | "studionet" | "testnetBradbury";
 export type PublicConfig = {
   network: PublicNetwork;
   chainId: 61127 | 61999 | 4221;
+  contractChainId: 1;
   contractAddress: `0x${string}`;
   explorerBaseUrl: string | null;
 };
@@ -73,6 +74,7 @@ export function parsePublicConfig(
   return {
     network,
     chainId: definition.chainId,
+    contractChainId: 1,
     contractAddress: address.toLowerCase() as `0x${string}`,
     explorerBaseUrl: definition.explorerBaseUrl,
   };

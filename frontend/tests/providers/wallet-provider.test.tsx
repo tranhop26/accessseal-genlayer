@@ -16,6 +16,7 @@ const CONFLICTING_ADDRESS = "0x1111111111111111111111111111111111111111";
 const CONFIG = {
   network: "studionet" as const,
   chainId: 61999 as const,
+  contractChainId: 1 as const,
   contractAddress: "0x814726d7a3a2cbc52c8ea622b49af1d6fda300a7" as const,
   explorerBaseUrl: "https://studio.genlayer.com",
 };

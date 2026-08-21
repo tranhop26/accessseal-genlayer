@@ -24,7 +24,7 @@ export default function NewCasePage() {
       !wallet.address ||
       !wallet.config ||
       draft.authority.buyer !== wallet.address ||
-      draft.authority.chainId !== wallet.config.chainId ||
+      draft.authority.chainId !== wallet.config.contractChainId ||
       draft.authority.network !== wallet.config.network ||
       draft.authority.contractAddress !== wallet.config.contractAddress
     ) {
@@ -88,7 +88,7 @@ export default function NewCasePage() {
           wallet.address && wallet.config
             ? {
                 buyer: wallet.address,
-                chainId: wallet.config.chainId,
+                chainId: wallet.config.contractChainId,
                 network: wallet.config.network,
                 contractAddress: wallet.config.contractAddress,
               }
