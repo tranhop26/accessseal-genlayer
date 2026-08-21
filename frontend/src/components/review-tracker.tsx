@@ -1,5 +1,7 @@
 import type { ReviewFinality, ReviewRecord } from "@/lib/access-seal";
 import type { TransactionPhase } from "@/lib/transactions";
+import { TransactionProgress } from "./status-panel";
+import styles from "./cases/case-detail.module.css";
 export function ReviewTracker({
   review,
   finality,
@@ -16,21 +18,22 @@ export function ReviewTracker({
   const final =
     finality.status === "FINALIZED" && transactionPhase === "FINALIZED_SUCCESS";
   return (
-    <section className="workflow-card" aria-labelledby="review-title">
-      <div className="section-heading">
-        <span className="step-number">03</span>
+    <section className={styles.card} aria-labelledby="review-title">
+      <div className={styles.sectionHeading}>
+        <span className={styles.stepNumber}>03</span>
         <div>
-          <span className="eyebrow">Validator consensus</span>
-          <h2 id="review-title">Review decision</h2>
+          <span className={styles.eyebrow}>Validator consensus</span>
+          <h3 id="review-title">Review decision</h3>
         </div>
       </div>
+      <TransactionProgress phase={transactionPhase} />
       {!final && (
-        <div className="pending-callout">
+        <div className={styles.pendingCallout}>
           Accepted is appealable and is not final. Settlement remains locked
           until protocol finality and successful execution.
         </div>
       )}
-      <div className={`verdict verdict-${review.verdict.toLowerCase()}`}>
+      <div className={styles.verdict} data-verdict={review.verdict}>
         <span>Verdict</span>
         <strong>{review.verdict.replaceAll("_", " ")}</strong>
         <p>
@@ -38,7 +41,7 @@ export function ReviewTracker({
         </p>
       </div>
       {review.verdict === "REQUEST_MORE_INFO" && (
-        <div className="cure-callout">
+        <div className={styles.cureCallout}>
           <strong>Cure attempt 1 of 1</strong>
           <p>
             Missing: {review.missingEvidence.join(", ") || "specified evidence"}
@@ -51,7 +54,7 @@ export function ReviewTracker({
         </div>
       )}
       {review.verdict === "UNRESOLVED" && (
-        <div className="unresolved-callout">
+        <div className={styles.unresolvedCallout}>
           <strong>No payout or refund is authorized.</strong>
           <p>
             Consensus was insufficient. Retry cooldown protects against rapid
@@ -65,14 +68,17 @@ export function ReviewTracker({
           )}
         </div>
       )}
-      <div className="evidence-refs" aria-label="Review evidence references">
+      <div
+        className={styles.evidenceRefs}
+        aria-label="Review evidence references"
+      >
         {review.evidenceRefs.map((ref) => (
           <a href={`#evidence-${ref}`} key={ref}>
             {ref}
           </a>
         ))}
       </div>
-      <dl className="compact-dl">
+      <dl className={styles.compactDl}>
         <div>
           <dt>Protocol finality</dt>
           <dd>{finality.status.replaceAll("_", " ")}</dd>

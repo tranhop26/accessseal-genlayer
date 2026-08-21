@@ -1,9 +1,27 @@
 import type { Accounting, Settlement } from "@/lib/access-seal";
+import { Button } from "./ui/button";
+import styles from "./cases/case-detail.module.css";
+
 export type DispatchConfirmation = {
   status: "PENDING" | "CONFIRMED" | "FAILED";
   childTransaction: string | null;
   recipientBalanceConfirmed: boolean;
 };
+
+export function isSettlementExecutable(settlement: Settlement | null) {
+  return (
+    settlement?.status === "PREPARED" &&
+    ((settlement.kind === "PAYOUT" && settlement.reason === "APPROVED") ||
+      (settlement.kind === "REFUND" &&
+        [
+          "REJECTED",
+          "UNRESOLVED_EXHAUSTED",
+          "CURE_EXHAUSTED",
+          "HARD_TIMEOUT",
+        ].includes(settlement.reason)))
+  );
+}
+
 export function SettlementPanel({
   canPrepare,
   settlement,
@@ -22,40 +40,29 @@ export function SettlementPanel({
   busy?: boolean;
 }) {
   const dispatched = settlement?.status === "DISPATCHED_FINALIZED";
-  const executable =
-    settlement?.status === "PREPARED" &&
-    ((settlement.kind === "PAYOUT" && settlement.reason === "APPROVED") ||
-      (settlement.kind === "REFUND" &&
-        [
-          "REJECTED",
-          "UNRESOLVED_EXHAUSTED",
-          "CURE_EXHAUSTED",
-          "HARD_TIMEOUT",
-        ].includes(settlement.reason)));
+  const executable = isSettlementExecutable(settlement);
   const confirmed =
     dispatched &&
     confirmation?.status === "CONFIRMED" &&
     confirmation.recipientBalanceConfirmed;
   return (
-    <section className="workflow-card settlement-card">
-      <div className="section-heading">
-        <span className="step-number">04</span>
+    <section className={styles.card}>
+      <div className={styles.sectionHeading}>
+        <span className={styles.stepNumber}>04</span>
         <div>
-          <span className="eyebrow">Finality-only transfer</span>
-          <h2>Settlement dispatch</h2>
+          <span className={styles.eyebrow}>Finality-only transfer</span>
+          <h3>Settlement dispatch</h3>
         </div>
       </div>
       {settlement ? (
         <>
-          <div
-            className={dispatched ? "dispatch-state amber" : "dispatch-state"}
-          >
+          <div className={styles.dispatchState} data-dispatched={dispatched}>
             <span>{dispatched ? "Dispatch finalized" : "Intent prepared"}</span>
             <strong>
               {settlement.kind} · {settlement.amount.toString()} wei
             </strong>
           </div>
-          <dl className="compact-dl">
+          <dl className={styles.compactDl}>
             <div>
               <dt>Recipient</dt>
               <dd>
@@ -78,11 +85,7 @@ export function SettlementPanel({
             </div>
           </dl>
           {dispatched && (
-            <div
-              className={
-                confirmed ? "confirmation success" : "confirmation pending"
-              }
-            >
+            <div className={styles.confirmation} data-confirmed={confirmed}>
               <strong>
                 {confirmed ? "Confirmed" : "Recipient confirmation pending"}
               </strong>
@@ -96,13 +99,12 @@ export function SettlementPanel({
               )}
             </div>
           )}
-          <button
-            className="primary-button"
+          <Button
             disabled={!executable || dispatched || busy}
             onClick={onExecute}
           >
             {busy ? "Dispatching…" : "Execute prepared settlement"}
-          </button>
+          </Button>
         </>
       ) : (
         <>
@@ -110,16 +112,12 @@ export function SettlementPanel({
             Finalized APPROVED or REJECTED review readback is required before an
             immutable payout or refund intent can be prepared.
           </p>
-          <button
-            className="primary-button"
-            disabled={!canPrepare || busy}
-            onClick={onPrepare}
-          >
+          <Button disabled={!canPrepare || busy} onClick={onPrepare}>
             Prepare settlement
-          </button>
+          </Button>
         </>
       )}
-      <div className="accounting-strip">
+      <div className={styles.accountingStrip}>
         <span>
           <small>Reserved</small>
           {accounting.reserved.toString()}

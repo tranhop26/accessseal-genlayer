@@ -3,7 +3,7 @@ export function VerdictExplorer({ review }: { review: ReviewRecord }) {
   return (
     <section className="action-card">
       <span className="eyebrow">Decision anatomy</span>
-      <h2>Why validators decided this</h2>
+      <h3>Why validators decided this</h3>
       <p>
         The contract stores the bounded rationale commitment, not unverified
         explanatory prose.

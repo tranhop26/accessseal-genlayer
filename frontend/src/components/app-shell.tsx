@@ -1,38 +1,70 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
+import { Button } from "@/components/ui/button";
+import { AppNavigation, NavigationContractIdentity } from "@/components/navigation/app-navigation";
 import { WalletButton } from "./wallet-button";
+import styles from "./navigation/navigation.module.css";
+
+function pageTitle(pathname: string) {
+  if (pathname === "/cases/new") return "Create case";
+  if (pathname === "/cases") return "Cases";
+  return "Case workspace";
+}
+
+function MarketingHeader() {
+  return (
+    <header className={styles.marketingHeader}>
+      <Link aria-label="AccessSeal home" className={styles.brand} href="/">
+        <span aria-hidden="true" className={styles.brandMark}>A</span>
+        <span>AccessSeal</span>
+      </Link>
+      <nav aria-label="Marketing" className={styles.marketingNav}>
+        <Link href="/cases">Workspace</Link>
+        <Button href="/cases/new" variant="secondary">Create case</Button>
+      </nav>
+    </header>
+  );
+}
+
+function WorkspaceHeader({ pathname }: { pathname: string }) {
+  return (
+    <header className={styles.workspaceHeader}>
+      <div>
+        <p className={styles.workspaceSubtitle}>AccessSeal workspace</p>
+        <p className={styles.workspaceTitle}>{pageTitle(pathname)}</p>
+      </div>
+      <WalletButton />
+    </header>
+  );
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
-  return (
-    <div className="app-frame">
-      <a className="skip-link" href="#main-content">
-        Skip to content
-      </a>
-      <header className="topbar">
-        <Link className="brand" href="/" aria-label="AccessSeal home">
-          <span className="brand-mark" aria-hidden="true">
-            A
-          </span>
-          <span>AccessSeal</span>
-        </Link>
-        <nav aria-label="Primary navigation">
-          <Link href="/cases">Cases</Link>
-          <Link href="/cases/new">Create case</Link>
-        </nav>
-        <WalletButton />
-      </header>
-      <div className="simulation-banner" role="note">
-        <span aria-hidden="true">◇</span>
-        <span>
-          <strong>Simulation environment.</strong> Studionet GEN is simulated
-          value—not real money.
-        </span>
+  const pathname = usePathname();
+  const operational = pathname.startsWith("/cases");
+
+  if (!operational) {
+    return (
+      <div className={styles.marketingFrame}>
+        <a className="skip-link" href="#main-content">Skip to content</a>
+        <MarketingHeader />
+        <main className={styles.marketingMain} id="main-content" tabIndex={-1}>{children}</main>
+        <NavigationContractIdentity />
       </div>
-      <main id="main-content">{children}</main>
-      <footer>
-        <span>Evidence-bound accessibility acceptance</span>
-        <span>Intentionally frozen contract</span>
-      </footer>
+    );
+  }
+
+  return (
+    <div className={styles.operationalFrame}>
+      <a className="skip-link" href="#main-content">Skip to content</a>
+      <AppNavigation pathname={pathname} />
+      <div className={styles.workspace}>
+        <WorkspaceHeader pathname={pathname} />
+        <main className={styles.operationalMain} id="main-content" tabIndex={-1}>{children}</main>
+        <NavigationContractIdentity />
+      </div>
     </div>
   );
 }

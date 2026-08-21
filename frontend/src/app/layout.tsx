@@ -5,6 +5,7 @@ import { WalletProvider } from "@/providers/wallet-provider";
 import { parsePublicConfig } from "@/lib/config";
 
 export const metadata: Metadata = {
+  applicationName: "AccessSeal",
   title: {
     default: "AccessSeal — Evidence-bound acceptance",
     template: "%s · AccessSeal",

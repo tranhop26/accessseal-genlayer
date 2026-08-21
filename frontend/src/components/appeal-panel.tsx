@@ -17,7 +17,7 @@ export function AppealPanel({
   return (
     <section className="action-card">
       <span className="eyebrow">Protocol appeal</span>
-      <h2>Challenge the accepted transaction</h2>
+      <h3>Challenge the accepted transaction</h3>
       <p>
         Eligibility, active round and minimum bond are read directly from the
         GenLayer protocol using the review transaction ID.

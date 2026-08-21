@@ -1,0 +1,54 @@
+.operationalFrame { background: var(--as-bg); display: grid; min-height: 100vh; grid-template-columns: 15.5rem minmax(0, 1fr); }
+.marketingFrame { background: var(--as-bg); min-height: 100vh; }
+.workspace { min-width: 0; }
+.sidebar { background: var(--as-surface); border-right: 1px solid var(--as-border); display: flex; flex-direction: column; gap: 2rem; padding: 1.25rem; }
+.brand { align-items: center; color: var(--as-text); display: inline-flex; font-size: 1.05rem; font-weight: 800; gap: 0.65rem; text-decoration: none; }
+.brandMark { align-items: center; background: var(--as-primary); border-radius: 7px; color: #fff; display: inline-flex; font-size: 0.9rem; height: 1.9rem; justify-content: center; width: 1.9rem; }
+.navigationLinks, .compactLinks { display: grid; gap: 0.35rem; list-style: none; margin: 0; padding: 0; }
+.navigationLink, .activeLink { align-items: center; border-radius: var(--as-radius-sm); color: var(--as-muted); display: flex; font-weight: 650; gap: 0.7rem; min-height: 2.75rem; padding: 0 0.75rem; text-decoration: none; }
+.navigationLink:hover, .activeLink { background: #f0efff; color: var(--as-primary-hover); }
+.icon { height: 1.2rem; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; width: 1.2rem; }
+.tabletRail, .mobileNavigation { display: none; }
+.workspaceHeader { align-items: center; background: var(--as-surface); border-bottom: 1px solid var(--as-border); display: flex; gap: 1rem; justify-content: space-between; min-height: 4.75rem; padding: 0 2rem; }
+.workspaceTitle { margin: 0; font-size: 1.1rem; }
+.workspaceSubtitle, .utilityLabel { color: var(--as-muted); font-size: 0.78rem; font-weight: 700; letter-spacing: 0.04em; margin: 0; text-transform: uppercase; }
+.walletStack { align-items: end; display: grid; gap: 0.4rem; }
+.walletError { color: var(--as-danger); font-size: 0.8rem; max-width: 19rem; }
+.walletButtonConnected { border-color: #9de0c8; color: var(--as-success); }
+.contractIdentity { align-items: center; background: var(--as-surface); border-top: 1px solid var(--as-border); display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; margin-top: 2rem; padding: 1.25rem 2rem; }
+.contractIdentity h2 { font-size: 0.95rem; margin: 0.2rem 0 0; }
+.contractAddress { color: var(--as-text); font-size: 0.9rem; font-weight: 700; }
+.contractActions { display: flex; gap: 0.75rem; }
+.copyButton, .explorerLink { background: transparent; border: 0; color: var(--as-primary); cursor: pointer; font: inherit; font-size: 0.85rem; font-weight: 700; padding: 0; text-decoration: none; }
+.marketingHeader { align-items: center; background: var(--as-surface); border-bottom: 1px solid var(--as-border); display: flex; gap: 1rem; justify-content: space-between; min-height: 4.5rem; padding: 0 5vw; }
+.marketingNav { align-items: center; display: flex; gap: 1rem; }
+.marketingNav a:not([class]) { color: var(--as-muted); font-weight: 650; text-decoration: none; }
+.marketingMain, .operationalMain { margin: 0 auto; max-width: 1200px; padding: 2rem; }
+.operationalMain { max-width: none; }
+
+@media (min-width: 768px) and (max-width: 1099px) {
+  .operationalFrame { grid-template-columns: 4.5rem minmax(0, 1fr); }
+  .sidebar { display: none; }
+  .tabletRail { background: var(--as-surface); border-right: 1px solid var(--as-border); display: block; padding: 1rem 0.65rem; }
+  .compactLinks .navigationLink, .compactLinks .activeLink { justify-content: center; padding: 0; }
+  .compactLinks span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+}
+
+@media (max-width: 767px) {
+  .operationalFrame { display: block; padding-bottom: 5.25rem; }
+  .sidebar, .tabletRail { display: none; }
+  .workspaceHeader { align-items: flex-start; flex-direction: column; gap: 0.75rem; padding: 1rem; }
+  .walletStack { align-items: start; }
+  .mobileNavigation { background: var(--as-surface); border-top: 1px solid var(--as-border); bottom: 0; display: block; left: 0; padding: 0.35rem 0.6rem env(safe-area-inset-bottom); position: fixed; right: 0; z-index: 10; }
+  .mobileNavigation .compactLinks { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .mobileNavigation .navigationLink, .mobileNavigation .activeLink { flex-direction: column; font-size: 0.72rem; gap: 0.18rem; justify-content: center; min-height: 3.65rem; padding: 0.25rem; text-align: center; }
+  .contractIdentity { align-items: flex-start; flex-direction: column; margin-top: 1rem; padding: 1rem; }
+  .marketingHeader { padding: 0 1rem; }
+  .marketingNav > a:not([class]) { display: none; }
+  .marketingMain, .operationalMain { padding: 1rem; }
+}
+
+@media (max-width: 479px) {
+  .workspaceHeader { min-width: 0; }
+  .workspaceHeader > * { min-width: 0; }
+}
