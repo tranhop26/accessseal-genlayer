@@ -615,6 +615,21 @@ class AccessSeal(gl.Contract):
     def _address_text(self, address: Address) -> str:
         return "0x" + address.as_bytes.hex()
 
+    def _runtime_address(self, address: object) -> Address:
+        # Bradbury GenVM v0.2.11 currently delivers ABI `address` calldata as
+        # a hex string while sender/contract addresses remain Address values.
+        # Normalize only the exact 20-byte textual form at the public boundary.
+        if isinstance(address, str):
+            if len(address) != 42 or not address.startswith("0x"):
+                raise gl.vm.UserError("address calldata is invalid")
+            for character in address[2:]:
+                if character not in "0123456789abcdefABCDEF":
+                    raise gl.vm.UserError("address calldata is invalid")
+            return Address(address)
+        if not isinstance(address, Address):
+            raise gl.vm.UserError("address calldata is invalid")
+        return address
+
     def _canonical_hash(self, value: dict[str, object]) -> str:
         canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
         return "0x" + Keccak256(canonical.encode()).hexdigest()
@@ -1005,6 +1020,7 @@ class AccessSeal(gl.Contract):
         max_unresolved_retries: u256,
         escrow_amount: u256,
     ) -> str:
+        vendor = self._runtime_address(vendor)
         buyer = gl.message.sender_address
         buyer_text = self._address_text(buyer)
         vendor_text = self._address_text(vendor)

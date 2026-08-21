@@ -155,6 +155,45 @@ def test_buyer_vendor_funding_handshake(contract, buyer, vendor, outsider):
         assert funded[immutable_field] == draft[immutable_field]
 
 
+def test_create_case_accepts_bradbury_string_vendor_calldata(contract, buyer, vendor):
+    """Bradbury v0.2.11 currently decodes ABI address arguments as strings."""
+    case_id = create_case(
+        contract,
+        buyer,
+        vendor.as_hex,
+        salt="bradbury-string-vendor",
+    )
+
+    draft = contract.get_case_json(case_id)
+    assert draft["vendor"] == vendor.as_hex.lower()
+
+
+@pytest.mark.parametrize(
+    "vendor_text",
+    (
+        "0x1234",
+        "0x" + "gg" * 20,
+        "b9e27f39b58cd8146a1fd435791761e4fe4e84f0",
+        123,
+    ),
+)
+def test_create_case_rejects_malformed_runtime_vendor_strings(
+    contract, buyer, vendor_text
+):
+    contract.as_(buyer).create_case.reverts(
+        "malformed-runtime-vendor",
+        vendor_text,
+        PROFILE_HASH,
+        FLOWS_HASH,
+        ORIGIN,
+        1_800,
+        7_200,
+        2,
+        ESCROW,
+        message="address calldata is invalid",
+    )
+
+
 def test_duplicate_buyer_salt_domain_is_rejected(contract, buyer, vendor):
     create_case(contract, buyer, vendor)
 

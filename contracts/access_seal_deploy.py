@@ -142,6 +142,15 @@ class AccessSeal(gl.Contract):
 	case_ids:DynArray[str];buyers:TreeMap[str,Address];vendors:TreeMap[str,Address];salts:TreeMap[str,str];profile_hashes:TreeMap[str,str];flows_hashes:TreeMap[str,str];subject_origins:TreeMap[str,str];evidence_deadlines:TreeMap[str,u256];hard_deadlines:TreeMap[str,u256];max_unresolved_retries_by_case:TreeMap[str,u256];escrow_amounts:TreeMap[str,u256];terms_hashes:TreeMap[str,str];lifecycles:TreeMap[str,str];vendor_acceptances:TreeMap[str,bool];reserved_by_case:TreeMap[str,u256];chain_ids:TreeMap[str,u256];contract_addresses:TreeMap[str,str];created_at_by_case:TreeMap[str,u256];epochs:TreeMap[str,u256];evidence_counts:TreeMap[str,u256];release_digests:TreeMap[str,str];evidence_envelopes:TreeMap[str,str];evidence_hashes:TreeMap[str,str];used_evidence_hashes:TreeMap[str,bool];used_evidence_nonces:TreeMap[str,bool];review_results:TreeMap[str,str];review_attempt_results:TreeMap[str,str];review_attempt_proof_ids:TreeMap[str,str];review_attempt_finalized:TreeMap[str,bool];review_attempt_decided_at:TreeMap[str,u256];review_attempt_finalized_at:TreeMap[str,u256];review_attempts:TreeMap[str,u256];review_proof_ids:TreeMap[str,str];review_finalized:TreeMap[str,bool];review_decided_at:TreeMap[str,u256];used_retry_ids:TreeMap[str,bool];cure_counts:TreeMap[str,u256];settlement_ids:TreeMap[str,str];settlement_kinds:TreeMap[str,str];settlement_reasons:TreeMap[str,str];settlement_recipients:TreeMap[str,Address];settlement_amounts:TreeMap[str,u256];settlement_epochs:TreeMap[str,u256];settlement_review_proofs:TreeMap[str,str];settlement_statuses:TreeMap[str,str];settlement_executors:TreeMap[str,Address];total_deposits:u256;total_reserved:u256;total_pending_dispatch:u256;total_dispatched_payouts:u256;total_dispatched_refunds:u256
 	def __init__(self)->None:self.total_deposits=u256(0);self.total_reserved=u256(0);self.total_pending_dispatch=u256(0);self.total_dispatched_payouts=u256(0);self.total_dispatched_refunds=u256(0)
 	def _address_text(self,address:Address)->str:return'0x'+address.as_bytes.hex()
+	def _runtime_address(self,address:object)->Address:
+		A=address
+		if isinstance(A,str):
+			if len(A)!=42 or not A.startswith('0x'):raise gl.vm.UserError('address calldata is invalid')
+			for B in A[2:]:
+				if B not in'0123456789abcdefABCDEF':raise gl.vm.UserError('address calldata is invalid')
+			return Address(A)
+		if not isinstance(A,Address):raise gl.vm.UserError('address calldata is invalid')
+		return A
 	def _canonical_hash(self,value:dict[str,object])->str:A=json.dumps(value,sort_keys=True,separators=(',',':'));return'0x'+Keccak256(A.encode()).hexdigest()
 	def _parse_evidence(self,envelope_json:str)->dict[str,object]:
 		D=envelope_json
@@ -267,18 +276,18 @@ class AccessSeal(gl.Contract):
 	def _now(self)->u256:A=datetime.fromisoformat(gl.message_raw['datetime'].replace('Z','+00:00'));return u256(int(A.timestamp()))
 	@gl.public.write
 	def create_case(self,salt:str,vendor:Address,profile_hash:str,flows_hash:str,subject_origin:str,evidence_deadline:u256,hard_deadline:u256,max_unresolved_retries:u256,escrow_amount:u256)->str:
-		M=max_unresolved_retries;I=escrow_amount;H=hard_deadline;G=flows_hash;F=profile_hash;E=evidence_deadline;D=subject_origin;C=vendor;B=salt;J=gl.message.sender_address;N=self._address_text(J);O=self._address_text(C);K=self._address_text(gl.message.contract_address);L=gl.message.chain_id
-		if C.as_bytes==bytes(20):raise gl.vm.UserError('vendor must not be the zero address')
-		if J==C:raise gl.vm.UserError('buyer and vendor must differ')
-		if len(B)==0 or len(B)>128:raise gl.vm.UserError('salt must contain 1 to 128 characters')
+		M=max_unresolved_retries;I=escrow_amount;H=hard_deadline;G=flows_hash;F=profile_hash;E=evidence_deadline;D=subject_origin;C=salt;B=vendor;B=self._runtime_address(B);J=gl.message.sender_address;N=self._address_text(J);O=self._address_text(B);K=self._address_text(gl.message.contract_address);L=gl.message.chain_id
+		if B.as_bytes==bytes(20):raise gl.vm.UserError('vendor must not be the zero address')
+		if J==B:raise gl.vm.UserError('buyer and vendor must differ')
+		if len(C)==0 or len(C)>128:raise gl.vm.UserError('salt must contain 1 to 128 characters')
 		if not self._is_digest(F):raise gl.vm.UserError('profile hash must be a 32-byte hex digest')
 		if not self._is_digest(G):raise gl.vm.UserError('flows hash must be a 32-byte hex digest')
 		if len(D)==0 or len(D)>2048:raise gl.vm.UserError('subject origin must contain 1 to 2048 characters')
 		if E==0 or H<=E:raise gl.vm.UserError('deadlines must be positive and ordered')
 		if I==0:raise gl.vm.UserError('escrow amount must be positive')
-		A=self._canonical_hash({'buyer':N,'chainId':int(L),'contractAddress':K,'salt':B,'schemaVersion':CASE_SCHEMA})
+		A=self._canonical_hash({'buyer':N,'chainId':int(L),'contractAddress':K,'salt':C,'schemaVersion':CASE_SCHEMA})
 		if A in self.buyers:raise gl.vm.UserError('case domain already exists')
-		P=self._canonical_hash({'buyer':N,'caseId':A,'chainId':int(L),'contractAddress':K,'escrowAmount':int(I),'evidenceDeadline':int(E),'flowsHash':G,'hardDeadline':int(H),'maxUnresolvedRetries':int(M),'profileHash':F,'salt':B,'schemaVersion':TERMS_SCHEMA,'subjectOrigin':D,'vendor':O});self.case_ids.append(A);self.buyers[A]=J;self.vendors[A]=C;self.salts[A]=B;self.profile_hashes[A]=F;self.flows_hashes[A]=G;self.subject_origins[A]=D;self.evidence_deadlines[A]=E;self.hard_deadlines[A]=H;self.max_unresolved_retries_by_case[A]=M;self.escrow_amounts[A]=I;self.terms_hashes[A]=P;self.lifecycles[A]=DRAFT;self.vendor_acceptances[A]=False;self.reserved_by_case[A]=u256(0);self.chain_ids[A]=L;self.contract_addresses[A]=K;self.created_at_by_case[A]=self._now();self.epochs[A]=u256(0);self.cure_counts[A]=u256(0);self.review_attempts[self._epoch_key(A,u256(0))]=u256(0);return A
+		P=self._canonical_hash({'buyer':N,'caseId':A,'chainId':int(L),'contractAddress':K,'escrowAmount':int(I),'evidenceDeadline':int(E),'flowsHash':G,'hardDeadline':int(H),'maxUnresolvedRetries':int(M),'profileHash':F,'salt':C,'schemaVersion':TERMS_SCHEMA,'subjectOrigin':D,'vendor':O});self.case_ids.append(A);self.buyers[A]=J;self.vendors[A]=B;self.salts[A]=C;self.profile_hashes[A]=F;self.flows_hashes[A]=G;self.subject_origins[A]=D;self.evidence_deadlines[A]=E;self.hard_deadlines[A]=H;self.max_unresolved_retries_by_case[A]=M;self.escrow_amounts[A]=I;self.terms_hashes[A]=P;self.lifecycles[A]=DRAFT;self.vendor_acceptances[A]=False;self.reserved_by_case[A]=u256(0);self.chain_ids[A]=L;self.contract_addresses[A]=K;self.created_at_by_case[A]=self._now();self.epochs[A]=u256(0);self.cure_counts[A]=u256(0);self.review_attempts[self._epoch_key(A,u256(0))]=u256(0);return A
 	@gl.public.write
 	def accept_terms(self,case_id:str,terms_hash:str)->None:
 		A=case_id;self._require_case(A)
