@@ -48,6 +48,14 @@ async function createCase(page: Page, app: AccessSealRuntime): Promise<string> {
   return caseId;
 }
 
+async function takeWalletRequestMethods(page: Page): Promise<string[]> {
+  return page.evaluate(() =>
+    (window as unknown as {
+      __accessSealWallet: { takeWalletRequestMethods(): string[] };
+    }).__accessSealWallet.takeWalletRequestMethods(),
+  );
+}
+
 test("changes wallet account and invalidates the stale case preview", async ({ page, accessSeal: app }) => {
   const browserErrors: string[] = [];
   const submittedTransactions: unknown[] = [];
@@ -65,6 +73,7 @@ test("changes wallet account and invalidates the stale case preview", async ({ p
   await moveToReview(page, app);
   await expect(page.getByText("Ready for wallet signature", { exact: true })).toBeVisible();
 
+  await takeWalletRequestMethods(page);
   await app.selectNextRole(page, "vendor");
   await page.getByRole("button", { name: "Change wallet" }).click();
 
@@ -74,6 +83,9 @@ test("changes wallet account and invalidates the stale case preview", async ({ p
   await expect(alternateWallet).toBeVisible();
   await expect(alternateWallet).toHaveAttribute("data-wallet-address", app.addresses.vendor);
   await app.connect(page, "vendor");
+  const switchMethods = await takeWalletRequestMethods(page);
+  expect(switchMethods.slice(0, 2)).toEqual(["wallet_requestPermissions", "eth_accounts"]);
+  expect(switchMethods).not.toContain("eth_requestAccounts");
   await expect(page.getByText("Ready for wallet signature", { exact: true })).toBeHidden();
   await expect(page.getByRole("button", { name: "Create case on GenLayer" })).toBeHidden();
   expect(submittedTransactions).toEqual([]);

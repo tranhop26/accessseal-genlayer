@@ -602,10 +602,12 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       let nextRole: Role | undefined;
       let mode = "ready";
       let inFlight = 0;
+      let walletRequestMethods: string[] = [];
       const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
       const emit = (event: string, value?: unknown) => listeners.get(event)?.forEach((listener) => listener(value));
       const provider = {
         async request({ method, params = [] }: { method: string; params?: unknown[] }) {
+          walletRequestMethods.push(method);
           const requestRole = role;
           inFlight += 1;
           try {
@@ -657,6 +659,11 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       Object.defineProperty(window, "ethereum", { value: provider, configurable: true });
       Object.defineProperty(window, "__accessSealWallet", {
         value: {
+          takeWalletRequestMethods() {
+            const methods = walletRequestMethods;
+            walletRequestMethods = [];
+            return methods;
+          },
           selectNextRole(selectedRole: Role) {
             if (inFlight !== 0) throw new Error("wallet account selection configured during an active provider request");
             nextRole = selectedRole;
