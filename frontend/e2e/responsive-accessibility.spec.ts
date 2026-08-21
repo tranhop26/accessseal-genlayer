@@ -48,6 +48,38 @@ async function createCase(page: Page, app: AccessSealRuntime): Promise<string> {
   return caseId;
 }
 
+test("changes wallet account and invalidates the stale case preview", async ({ page, accessSeal: app }) => {
+  const browserErrors: string[] = [];
+  const submittedTransactions: unknown[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") browserErrors.push(message.text());
+  });
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  page.on("request", (request) => {
+    if (request.url() !== app.walletBridgeURL) return;
+    const payload = request.postDataJSON() as { method?: string };
+    if (payload.method === "eth_sendTransaction") submittedTransactions.push(payload);
+  });
+
+  await page.goto(`${app.baseURL}/cases/new`);
+  await moveToReview(page, app);
+  await expect(page.getByText("Ready for wallet signature", { exact: true })).toBeVisible();
+
+  await app.selectNextRole(page, "vendor");
+  await page.getByRole("button", { name: "Change wallet" }).click();
+
+  const alternateWallet = page.getByRole("button", {
+    name: new RegExp(`disconnect wallet ${app.addresses.vendor}`, "i"),
+  });
+  await expect(alternateWallet).toBeVisible();
+  await expect(alternateWallet).toHaveAttribute("data-wallet-address", app.addresses.vendor);
+  await app.connect(page, "vendor");
+  await expect(page.getByText("Ready for wallet signature", { exact: true })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Create case on GenLayer" })).toBeHidden();
+  expect(submittedTransactions).toEqual([]);
+  expect(browserErrors).toEqual([]);
+});
+
 test("audits landing, empty dashboard, review, and readback errors at desktop and mobile sizes", async ({ page, accessSeal: app }) => {
   for (const viewport of [
     { name: "desktop", width: 1440, height: 900 },
