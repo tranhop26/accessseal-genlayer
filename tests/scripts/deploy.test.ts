@@ -326,6 +326,18 @@ test("fails closed when deployed code differs from repository bytes", async () =
   );
 });
 
+test("accepts Studio CRLF serialization while preserving the reviewed LF artifact hash", async () => {
+  const studioSerialized = new TextDecoder()
+    .decode(artifactSource)
+    .replace(/\n/g, "\r\n");
+
+  await verifyDeployment(
+    client({ getContractCode: async () => studioSerialized }),
+    manifest(),
+    { repoRoot: fixtureRepoRoot },
+  );
+});
+
 test("fails closed when deployed schema differs from the source-derived schema", async () => {
   await assert.rejects(
     verifyDeployment(
