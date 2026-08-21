@@ -192,7 +192,8 @@ export async function verifyDeployment(
   if (!(expectedSchema && typeof expectedSchema === "object")) {
     throw new Error("official client source schema response is unavailable");
   }
-  if (sourceHash(new TextEncoder().encode(deployedCode)) !== manifest.deploymentArtifactSha256) {
+  const canonicalDeployedCode = deployedCode.replace(/\r\n/g, "\n");
+  if (sourceHash(new TextEncoder().encode(canonicalDeployedCode)) !== manifest.deploymentArtifactSha256) {
     throw new Error("deployed source does not match deployment artifact");
   }
   const expectedSchemaHash = canonicalJsonHash(expectedSchema);
