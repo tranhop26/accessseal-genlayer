@@ -13,6 +13,7 @@
 .workspaceTitle { margin: 0; font-size: 1.1rem; }
 .workspaceSubtitle, .utilityLabel { color: var(--as-muted); font-size: 0.78rem; font-weight: 700; letter-spacing: 0.04em; margin: 0; text-transform: uppercase; }
 .walletStack { align-items: end; display: grid; gap: 0.4rem; }
+.walletActions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .walletError { color: var(--as-danger); font-size: 0.8rem; max-width: 19rem; }
 .walletButtonConnected { border-color: #9de0c8; color: var(--as-success); }
 .contractIdentity { align-items: center; background: var(--as-surface); border-top: 1px solid var(--as-border); display: flex; flex-wrap: wrap; gap: 0.75rem 1rem; margin-top: 2rem; padding: 1.25rem 2rem; }

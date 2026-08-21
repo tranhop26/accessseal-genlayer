@@ -88,6 +88,7 @@ export type AccessSealRuntime = {
   escrow: string;
   connect(page: Page, role: Role): Promise<void>;
   selectRole(page: Page, role: Role): Promise<void>;
+  selectNextRole(page: Page, role: Role): Promise<void>;
   setWalletMode(page: Page, mode: WalletMode): Promise<void>;
   beginTest(page: Page): Promise<void>;
   setReviewTime(page: Page): Promise<void>;
@@ -498,6 +499,15 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
           await expect.poll(providerAligned).toBe(true);
           await expect(page.getByRole("button", { name: "Connect wallet" })).toBeVisible();
         },
+        async selectNextRole(page, role) {
+          await page.evaluate(
+            (nextRole) =>
+              (window as unknown as {
+                __accessSealWallet: { selectNextRole(role: Role): void };
+              }).__accessSealWallet.selectNextRole(nextRole),
+            role,
+          );
+        },
         async setWalletMode(page, mode) {
            await page.evaluate(
              (nextMode) =>
@@ -589,18 +599,29 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     await runtime.beginTest(page);
     await page.addInitScript(({ bridgeUrl, addresses }) => {
       let role: Role = "buyer";
+      let nextRole: Role | undefined;
       let mode = "ready";
       let inFlight = 0;
+      let walletRequestMethods: string[] = [];
       const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
       const emit = (event: string, value?: unknown) => listeners.get(event)?.forEach((listener) => listener(value));
       const provider = {
         async request({ method, params = [] }: { method: string; params?: unknown[] }) {
+          walletRequestMethods.push(method);
           const requestRole = role;
           inFlight += 1;
           try {
             if (method === "eth_requestAccounts") {
               if (mode === "reject") throw Object.assign(new Error("User rejected request"), { code: 4001 });
               return [addresses[requestRole]];
+            }
+            if (method === "wallet_requestPermissions") {
+              if (mode === "reject") throw Object.assign(new Error("User rejected request"), { code: 4001 });
+              if (!nextRole) throw new Error("wallet account selection was not configured");
+              role = nextRole;
+              nextRole = undefined;
+              emit("accountsChanged", [addresses[role]]);
+              return [{ parentCapability: "eth_accounts" }];
             }
             if (method === "eth_accounts") return [addresses[requestRole]];
             if (method === "eth_chainId") return mode === "wrong-network" ? "0x1" : "0xeec7";
@@ -638,6 +659,15 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       Object.defineProperty(window, "ethereum", { value: provider, configurable: true });
       Object.defineProperty(window, "__accessSealWallet", {
         value: {
+          takeWalletRequestMethods() {
+            const methods = walletRequestMethods;
+            walletRequestMethods = [];
+            return methods;
+          },
+          selectNextRole(selectedRole: Role) {
+            if (inFlight !== 0) throw new Error("wallet account selection configured during an active provider request");
+            nextRole = selectedRole;
+          },
           selectRole(nextRole: Role) {
             if (inFlight !== 0) throw new Error("wallet role switch attempted during an active provider request");
             role = nextRole;
