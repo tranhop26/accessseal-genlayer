@@ -75,6 +75,7 @@ describe("public configuration", () => {
     expect(config).toEqual({
       network: "studionet",
       chainId: 61999,
+      contractChainId: 1,
       contractAddress: realAddress,
       explorerBaseUrl: "https://studio.genlayer.com",
     });
@@ -100,6 +101,7 @@ describe("public configuration", () => {
     expect(config).toEqual({
       network: "testnet_bradbury",
       chainId: 4221,
+      contractChainId: 1,
       contractAddress: realAddress,
       explorerBaseUrl: "https://explorer-bradbury.genlayer.com",
     });
