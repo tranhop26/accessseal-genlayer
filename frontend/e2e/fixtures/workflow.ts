@@ -29,7 +29,7 @@ export async function expectCurrentStage(page: Page, stage: Stage): Promise<void
         .locator('[aria-current="step"]')
         .textContent())?.trim();
     })
-    .toBe(stage.replaceAll("_", " "));
+    .toBe(stage.replaceAll("_", " ").toLowerCase());
 }
 
 async function transactionHash(page: Page): Promise<string> {
@@ -45,7 +45,13 @@ export async function writeAndConfirm(
 ): Promise<void> {
   await failOnVisibleError(page);
   const previousHash = await transactionHash(page);
-  await page.getByRole("button", { name: buttonName }).click();
+  const summaryAction = page
+    .getByRole("region", { name: "Case summary" })
+    .getByRole("button", { name: buttonName, exact: true });
+  const action = (await summaryAction.count()) > 0
+    ? summaryAction
+    : page.getByRole("button", { name: buttonName, exact: true });
+  await action.click();
   const handle = await page.waitForFunction(
     ({ expectedStage, priorHash }) => {
       const visible = (element: Element) => {
@@ -58,15 +64,20 @@ export async function writeAndConfirm(
       if (alert) return { error: alert.textContent!.trim() };
       const current = document.querySelector('[aria-label="Case lifecycle"] [aria-current="step"]')
         ?.textContent?.trim();
-      const status = [...document.querySelectorAll('[role="status"]')].find((element) =>
-        element.querySelector("h3")?.textContent?.trim() === "FINALIZED SUCCESS",
+      const status = [...document.querySelectorAll('[role="status"]')].find(
+        (element) =>
+          element.querySelector('[aria-current="step"]')?.textContent?.trim() ===
+          "Readback confirmed",
       );
       const nextHash = status?.querySelector("code")?.textContent?.trim() ?? "";
       if (current === expectedStage && nextHash && nextHash !== priorHash)
         return { success: true };
       return null;
     },
-    { expectedStage: stage.replaceAll("_", " "), priorHash: previousHash },
+    {
+      expectedStage: stage.replaceAll("_", " ").toLowerCase(),
+      priorHash: previousHash,
+    },
   );
   const result = (await handle.jsonValue()) as { error?: string; success?: boolean };
   if (result.error)
@@ -83,15 +94,17 @@ export async function createFundedCase(
   await page.goto(`${app.baseURL}/cases/new`);
   await app.connect(page, "buyer");
   await page.getByLabel("Vendor wallet").fill(app.addresses.vendor);
+  await page.getByRole("button", { name: "Continue to terms" }).click();
   await page.getByLabel("Website origin").fill(app.subjectOrigin);
   await page.getByLabel("Accessibility profile hash").fill(app.profileHash);
   await page.getByLabel("Critical flow 1").fill("Keyboard checkout");
   await page.getByLabel("Critical flow 2").fill("Labeled account creation");
   await page.getByLabel("Critical flow 3").fill("Order status announcement");
   await page.getByLabel("Simulated escrow (wei)").fill(app.escrow);
-  await page.getByRole("button", { name: "Preview locked terms" }).click();
-  await expect(page.getByRole("heading", { name: "Ready for wallet signature" })).toBeVisible();
-  const caseId = (await page.locator(".terms-preview code").first().textContent())!.trim();
+  await page.getByRole("button", { name: "Review locked terms" }).click();
+  await expect(page.getByRole("heading", { name: "Verify immutable bindings" })).toBeVisible();
+  await expect(page.getByText("Ready for wallet signature", { exact: true })).toBeVisible();
+  const caseId = (await page.locator("details code").first().textContent())!.trim();
   await page.getByRole("button", { name: "Create case on GenLayer" }).click();
   await page.waitForURL(new RegExp(`/cases/${caseId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
   await expectCurrentStage(page, "DRAFT");
@@ -111,13 +124,16 @@ export async function createFundedCase(
     );
     await expect(
       page.getByRole("list", { name: "Case lifecycle" }).locator('[aria-current="step"]'),
-    ).toHaveText("DRAFT");
+    ).toHaveText("draft");
     await page.reload();
     await app.setWalletMode(page, "ready");
     await app.connect(page, "buyer");
   }
   await writeAndConfirm(page, "Fund simulated escrow", "FUNDED", async () => {
-    const reserved = await page.locator(".compact-dl").getByText(`${app.escrow} wei`, { exact: true }).count();
+    const reserved = await page
+      .getByRole("region", { name: "Terms" })
+      .getByText(`${app.escrow} wei`, { exact: true })
+      .count();
     return reserved >= 2;
   });
   return caseId;
@@ -131,12 +147,18 @@ export async function submitRelease(page: Page, app: AccessSealRuntime, caseId: 
     const input = page.getByLabel("Evidence envelope JSON");
     await input.fill(JSON.stringify(envelope));
     await page.getByRole("button", { name: "Validate canonical preview" }).click();
-    await expect(page.locator(".hash-box").getByText("Canonical hash")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Sign and submit evidence" }),
+    ).toBeEnabled();
     await writeAndConfirm(
       page,
       "Sign and submit evidence",
       "EVIDENCE_OPEN",
-      async () => (await page.locator(".evidence-item").count()) === index + 1,
+      async () =>
+        (await page
+          .getByRole("region", { name: "Evidence trail" })
+          .getByRole("article")
+          .count()) === index + 1,
     );
   }
   await expect(page.getByRole("heading", { name: "Request validator consensus" })).toBeVisible();

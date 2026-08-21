@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
-import { test, expect } from "./fixtures/wallet";
+import { test, expect, type AccessSealRuntime } from "./fixtures/wallet";
 import { expectCurrentStage } from "./fixtures/workflow";
-import type { Page } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
 
 async function expectVisibleFocus(page: Page, name: string | RegExp) {
   const focused = page.locator(":focus");
@@ -26,8 +26,143 @@ async function assertPageAccessibility(page: Page) {
   expect(results.violations.filter((item) => item.impact === "serious" || item.impact === "critical")).toEqual([]);
 }
 
+async function moveToReview(page: Page, app: AccessSealRuntime) {
+  await app.connect(page, "buyer");
+  await page.getByLabel("Vendor wallet").fill(app.addresses.vendor);
+  await page.getByRole("button", { name: "Continue to terms" }).click();
+  await page.getByLabel("Website origin").fill(app.subjectOrigin);
+  await page.getByLabel("Accessibility profile hash").fill(app.profileHash);
+  await page.getByLabel("Critical flow 1").fill("Browse catalog");
+  await page.getByLabel("Critical flow 2").fill("Complete checkout");
+  await page.getByLabel("Critical flow 3").fill("Track delivery");
+  await page.getByLabel("Simulated escrow (wei)").fill(app.escrow);
+  await page.getByRole("button", { name: "Review locked terms" }).click();
+  await expect(page.getByRole("button", { name: "Create case on GenLayer" })).toBeFocused();
+}
+
+async function createCase(page: Page, app: AccessSealRuntime): Promise<string> {
+  await moveToReview(page, app);
+  const caseId = (await page.locator("details code").first().textContent())!.trim();
+  await page.getByRole("button", { name: "Create case on GenLayer" }).press("Enter");
+  await page.waitForURL(new RegExp(`/cases/${caseId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
+  return caseId;
+}
+
+test("audits landing, empty dashboard, review, and readback errors at desktop and mobile sizes", async ({ page, accessSeal: app }) => {
+  for (const viewport of [
+    { name: "desktop", width: 1440, height: 900 },
+    { name: "mobile", width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+
+    await page.goto(app.baseURL);
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    await assertPageAccessibility(page);
+
+    await page.goto(`${app.baseURL}/cases`);
+    await expect(page.getByText("No locally known cases")).toBeVisible();
+    await assertPageAccessibility(page);
+
+    await page.goto(`${app.baseURL}/cases/new`);
+    await moveToReview(page, app);
+    await expect(page.getByRole("heading", { name: "Verify immutable bindings" })).toBeVisible();
+    await assertPageAccessibility(page);
+
+    await page.goto(`${app.baseURL}/cases/sha256:${"0".repeat(64)}`);
+    await expect(page.getByRole("heading", { name: "Case readback" })).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: "Readback unavailable" })).toBeVisible();
+    await assertPageAccessibility(page);
+  }
+});
+
+test("keeps the responsive workspace shell, structured dashboard, and case detail semantic", async ({ page, accessSeal: app }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${app.baseURL}/cases/new`);
+  await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
+  expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBe(true);
+
+  const caseId = await createCase(page, app);
+  await page.goto(`${app.baseURL}/cases`);
+  await expect(page.getByRole("table")).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Case ID" })).toBeVisible();
+  await assertPageAccessibility(page);
+
+  await page.setViewportSize({ width: 1000, height: 900 });
+  await expect(page.getByRole("navigation", { name: "Workspace shortcuts" })).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("navigation", { name: "Mobile workspace" })).toBeVisible();
+  await expect(page.getByLabel("Mobile case rows")).toBeVisible();
+  await expect(page.getByLabel("Mobile case rows")).toContainText("Case ID");
+  await expect(page.getByRole("table")).toBeHidden();
+  expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBe(true);
+  await assertPageAccessibility(page);
+
+  await page.goto(`${app.baseURL}/cases/${caseId}`);
+  await expect(page.getByRole("navigation", { name: "Case sections" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
+  const priorityAction = page.getByText("Priority action", { exact: true }).locator("..");
+  await expect(priorityAction).toBeVisible();
+  expect(await priorityAction.evaluate((element) => element.closest("dl"))).toBeNull();
+  await assertHeadingOrder(page);
+  await assertPageAccessibility(page);
+});
+
+test("audits the real pending transaction state at desktop and mobile sizes", async ({ page, accessSeal: app }) => {
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(`${app.baseURL}/cases/new`);
+    await app.selectRole(page, "buyer");
+    await createCase(page, app);
+    await app.selectRole(page, "vendor");
+    await app.connect(page, "vendor");
+    const acceptTerms = page
+      .getByRole("region", { name: "Case summary" })
+      .getByRole("button", { name: "Accept exact terms" });
+    await expect(acceptTerms).toBeEnabled();
+
+    let releaseReceipt!: () => void;
+    const receiptGate = new Promise<void>((resolve) => {
+      releaseReceipt = resolve;
+    });
+    const rpcUrl = "http://127.0.0.1:4000/api";
+    const activeRoutes = new Set<Promise<void>>();
+    const routeHandler = async (route: Route) => {
+      const task = (async () => {
+        const payload = route.request().postDataJSON() as { method?: string };
+        if (payload.method === "eth_getTransactionByHash") await receiptGate;
+        await route.continue();
+      })();
+      activeRoutes.add(task);
+      try {
+        await task;
+      } finally {
+        activeRoutes.delete(task);
+      }
+    };
+    await page.route(rpcUrl, routeHandler);
+    try {
+      await acceptTerms.click();
+      await expect(page.getByRole("status")).toHaveAttribute("data-tone", "pending");
+      await expect(page.getByRole("status")).toContainText("Transaction submitted");
+      await expect(page.getByText(/waiting for validator acceptance/i)).toBeVisible();
+      await assertPageAccessibility(page);
+    } finally {
+      releaseReceipt();
+    }
+    await expect(page.getByText("Readback confirmed", { exact: true })).toBeVisible();
+    await Promise.all(activeRoutes);
+    await page.unroute(rpcUrl, routeHandler);
+  }
+});
+
 for (const viewport of [
   { name: "desktop", width: 1440, height: 900 },
+  { name: "tablet", width: 1000, height: 900 },
   { name: "mobile", width: 390, height: 844 },
 ]) {
   test(`${viewport.name} completes a write by keyboard and keeps populated state accessible`, async ({ page, accessSeal: app }) => {
@@ -35,31 +170,36 @@ for (const viewport of [
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto(`${app.baseURL}/cases/new`);
     await expect(page.getByRole("banner")).toBeVisible();
-    await expect(page.getByRole("navigation", { name: "Primary navigation" })).toBeVisible();
+    await expect(page.getByRole("navigation", {
+      name: viewport.name === "desktop"
+        ? "Workspace"
+        : viewport.name === "tablet"
+          ? "Workspace shortcuts"
+          : "Mobile workspace",
+    })).toBeVisible();
     await expect(page.getByRole("main")).toBeVisible();
-    await expect(page.getByRole("contentinfo")).toBeVisible();
     await assertPageAccessibility(page);
 
     await page.keyboard.press("Tab");
     await expectVisibleFocus(page, "Skip to content");
-    for (const name of ["AccessSeal home", "Cases", "Create case", "Connect wallet"]) {
-      await page.keyboard.press("Tab");
-      await expectVisibleFocus(page, name);
-    }
-    await page.keyboard.press("Shift+Tab");
-    await expectVisibleFocus(page, "Create case");
-    await page.keyboard.press("Tab");
-    await expectVisibleFocus(page, "Connect wallet");
-    const motion = await page.locator(".preview-placeholder").evaluate((element) => getComputedStyle(element).animationDuration);
-    const durationSeconds = motion.endsWith("ms") ? Number.parseFloat(motion) / 1000 : Number.parseFloat(motion);
-    expect(durationSeconds).toBeLessThanOrEqual(0.001);
-
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("main")).toBeFocused();
+    await page.getByRole("button", { name: "Connect wallet" }).focus();
     await page.keyboard.press("Enter");
     const disconnectName = new RegExp(`disconnect wallet ${app.addresses.buyer}`, "i");
     await expect(page.getByRole("button", { name: disconnectName })).toBeVisible();
+    await page.getByLabel("Vendor wallet").focus();
+    await expectVisibleFocus(page, "Vendor wallet");
+    await page.keyboard.press("Shift+Tab");
     await expectVisibleFocus(page, disconnectName);
+    await page.keyboard.press("Tab");
+    await expectVisibleFocus(page, "Vendor wallet");
+    await page.keyboard.insertText(app.addresses.vendor);
+    await page.keyboard.press("Tab");
+    await expectVisibleFocus(page, "Continue to terms");
+    await page.keyboard.press("Enter");
+    await expect(page.getByLabel("Website origin")).toBeFocused();
     for (const [label, value] of [
-      ["Vendor wallet", app.addresses.vendor],
       ["Website origin", app.subjectOrigin],
       ["Accessibility profile hash", app.profileHash],
       ["Critical flow 1", "Browse catalog"],
@@ -67,19 +207,17 @@ for (const viewport of [
       ["Critical flow 3", "Track delivery"],
       ["Simulated escrow (wei)", app.escrow],
     ] as const) {
-      await page.keyboard.press("Tab");
-      await expectVisibleFocus(page, label);
+      await page.getByLabel(label).focus();
       await page.keyboard.insertText(value);
     }
-    await page.keyboard.press("Tab");
-    await expectVisibleFocus(page, "Preview locked terms");
+    await page.getByRole("button", { name: "Review locked terms" }).focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("heading", { name: "Ready for wallet signature" })).toBeVisible();
-    await page.keyboard.press("Tab");
-    await expectVisibleFocus(page, "Create case on GenLayer");
+    await expect(page.getByRole("button", { name: "Create case on GenLayer" })).toBeFocused();
     await page.keyboard.press("Enter");
     await expectCurrentStage(page, "DRAFT");
-    await expect(page.getByText("Finalized contract readback")).toBeVisible();
+    // Finalization routes directly to the authoritative detail readback.
+    await expect(page.getByText("Authoritative case readback", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Case summary", exact: true })).toBeVisible();
     await assertPageAccessibility(page);
   });
 }

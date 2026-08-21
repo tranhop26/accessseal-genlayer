@@ -6,6 +6,8 @@ import { StatusPanel } from "@/components/status-panel";
 import { useWallet } from "@/providers/wallet-provider";
 import { trackTransaction, type TransactionState } from "@/lib/transactions";
 import { finalizeCreatedCase } from "@/lib/case-cache";
+import { InlineNotice } from "@/components/ui/panel";
+import styles from "../cases-page.module.css";
 export default function NewCasePage() {
   const wallet = useWallet();
   const router = useRouter();
@@ -67,10 +69,10 @@ export default function NewCasePage() {
     }
   }
   return (
-    <div className="page-shell narrow">
-      <header className="page-header">
-        <div>
-          <span className="eyebrow">New acceptance</span>
+    <div className={`${styles.shell} ${styles.narrow}`}>
+      <header className={styles.header}>
+        <div className={styles.headerCopy}>
+          <span className={styles.eyebrow}>Three-step case creation</span>
           <h1>Define what “accessible” means before work begins.</h1>
           <p>
             These terms become immutable contract state. Review every hash
@@ -78,11 +80,7 @@ export default function NewCasePage() {
           </p>
         </div>
       </header>
-      {error && (
-        <div className="error-state" role="alert">
-          {error}
-        </div>
-      )}
+      {error && <InlineNotice tone="danger">{error}</InlineNotice>}
       {tx && <StatusPanel state={tx} />}
       <CaseComposer
         onCreate={create}

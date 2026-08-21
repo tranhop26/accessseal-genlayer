@@ -1,4 +1,5 @@
 import type { EvidenceRecord } from "@/lib/access-seal";
+import styles from "./cases/case-detail.module.css";
 export function EvidenceInspector({
   evidence,
   now,
@@ -7,42 +8,42 @@ export function EvidenceInspector({
   now: number;
 }) {
   return (
-    <section className="workflow-card" aria-labelledby="evidence-title">
-      <div className="section-heading">
-        <span className="step-number">02</span>
+    <section className={styles.card} aria-labelledby="evidence-title">
+      <div className={styles.sectionHeading}>
+        <span className={styles.stepNumber}>02</span>
         <div>
-          <span className="eyebrow">Bound artifacts</span>
-          <h2 id="evidence-title">Evidence trail</h2>
+          <span className={styles.eyebrow}>Bound artifacts</span>
+          <h3 id="evidence-title">Evidence trail</h3>
         </div>
       </div>
-      <p className="trust-note">
+      <p className={styles.trustNote}>
         Vendor-submitted envelopes bind claims and payload locations.{" "}
         <strong>Validators independently fetch and hash payloads</strong> before
         semantic review.
       </p>
-      <div className="evidence-list">
+      <div className={styles.evidenceList}>
         {evidence.envelopes.map((item, index) => {
           const hash = evidence.hashes[index] ?? "unavailable";
           const stale = item.expiresAt <= now;
           return (
             <article
-              className="evidence-item"
+              className={styles.evidenceItem}
               id={`evidence-${hash}`}
               key={hash}
             >
-              <div className="evidence-top">
-                <span className="type-chip">
+              <div className={styles.evidenceTop}>
+                <span className={styles.typeChip}>
                   {item.evidenceType.replaceAll("_", " ")}
                 </span>
-                <span className={stale ? "stale-chip" : "fresh-chip"}>
+                <span className={stale ? styles.staleChip : styles.freshChip}>
                   {stale ? "Expired" : "Fresh"}
                 </span>
               </div>
-              <h3>Vendor-submitted envelope</h3>
+              <h4>Vendor-submitted envelope</h4>
               <a href={item.payloadUri} target="_blank" rel="noreferrer">
                 {item.payloadUri}
               </a>
-              <dl className="compact-dl">
+              <dl className={styles.compactDl}>
                 <div>
                   <dt>Issuer</dt>
                   <dd>

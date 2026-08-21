@@ -5,7 +5,9 @@ import { ReviewTracker } from "@/components/review-tracker";
 import { AppealPanel } from "@/components/appeal-panel";
 import { SettlementPanel } from "@/components/settlement-panel";
 import { RecoveryPanel } from "@/components/recovery-panel";
+import { StatusPanel } from "@/components/status-panel";
 import type { EvidenceEnvelopeV1 } from "@/lib/evidence";
+import type { TransactionPhase } from "@/lib/transactions";
 
 const envelope: EvidenceEnvelopeV1 = {
   schemaVersion: "accessseal-evidence/1",
@@ -29,6 +31,48 @@ const envelope: EvidenceEnvelopeV1 = {
 };
 
 describe("evidence-to-settlement truth", () => {
+  it.each([
+    ["PENDING", "Submitted"],
+    ["ACCEPTED", "Accepted"],
+    ["RECONCILING", "Finalized"],
+    ["FINALIZED_SUCCESS", "Readback confirmed"],
+  ] as const)(
+    "maps %s to the exact visible transaction phase %s",
+    (phase, label) => {
+      render(
+        <StatusPanel
+          state={{
+            phase: phase as TransactionPhase,
+            hash: `0x${"f".repeat(64)}`,
+            message: "Authoritative transaction state.",
+          }}
+        />,
+      );
+      expect(screen.getByText(label)).toHaveAttribute("aria-current", "step");
+    },
+  );
+
+  it("keeps execution errors explicit without a completed transaction timeline", () => {
+    const hash = `0x${"e".repeat(64)}` as const;
+    render(
+      <StatusPanel
+        state={{
+          phase: "EXECUTION_ERROR",
+          hash,
+          message: "The accepted transaction execution failed.",
+        }}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveAttribute("data-tone", "danger");
+    expect(
+      screen.getByRole("heading", { name: "Transaction execution error" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("list", { name: "Transaction progress" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(hash)).toBeVisible();
+  });
+
   it("labels vendor declarations separately from validator-fetched verification and blocks stale evidence", () => {
     render(
       <EvidenceInspector

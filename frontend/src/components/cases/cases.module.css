@@ -1,0 +1,178 @@
+.dashboard {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.importForm {
+  background: var(--as-surface);
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-md);
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem;
+}
+
+.importForm label,
+.filters label {
+  color: var(--as-text);
+  display: grid;
+  font-size: 0.8rem;
+  font-weight: 700;
+  gap: 0.35rem;
+}
+
+.importControls {
+  display: flex;
+  gap: 0.65rem;
+}
+
+.importControls input,
+.filters select {
+  background: var(--as-surface);
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-sm);
+  color: var(--as-text);
+  font: inherit;
+  min-height: 44px;
+  padding: 0.65rem 0.75rem;
+}
+
+.importControls input {
+  flex: 1;
+  min-width: 0;
+}
+
+.primaryLink,
+.secondaryButton {
+  align-items: center;
+  border-radius: var(--as-radius-sm);
+  display: inline-flex;
+  font: inherit;
+  font-weight: 700;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0.65rem 1rem;
+  text-decoration: none;
+}
+
+.primaryLink {
+  background: var(--as-primary);
+  border: 1px solid transparent;
+  color: #fff;
+}
+
+.primaryLink:hover {
+  background: var(--as-primary-hover);
+}
+
+.secondaryButton {
+  background: var(--as-surface);
+  border: 1px solid var(--as-border);
+  color: var(--as-text);
+}
+
+.importForm p {
+  color: var(--as-danger);
+  margin: 0;
+}
+
+.metrics {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.metrics > * {
+  background: var(--as-surface);
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-md);
+  box-shadow: var(--as-shadow);
+  padding: 1rem;
+}
+
+.disclosure {
+  color: var(--as-muted);
+  font-size: 0.8rem;
+  margin: -0.75rem 0 0;
+}
+
+.filters {
+  display: flex;
+  gap: 1rem;
+}
+
+.filters label {
+  min-width: 13rem;
+}
+
+.parties {
+  display: grid;
+  gap: 0.25rem;
+  max-width: 15rem;
+  overflow-wrap: anywhere;
+}
+
+.parties span:last-child {
+  color: var(--as-muted);
+}
+
+.readError {
+  color: var(--as-danger);
+  display: grid;
+  gap: 0.25rem;
+}
+
+.readError small {
+  font-size: 0.75rem;
+}
+
+.mobileRows {
+  display: none;
+}
+
+.mobileCard {
+  background: var(--as-surface);
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-md);
+  padding: 0 1rem;
+}
+
+@media (max-width: 767px) {
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .desktopTable {
+    display: none;
+  }
+
+  .mobileRows {
+    display: grid;
+    gap: 1rem;
+  }
+}
+
+@media (max-width: 479px) {
+  .importControls,
+  .filters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard * {
+    min-width: 0;
+  }
+
+  .importControls button {
+    width: 100%;
+  }
+
+  .emptyCaseAction > a {
+    display: flex;
+    width: 100%;
+  }
+}

@@ -19,10 +19,18 @@ test("buyer, vendor and third party complete a real approved GLSim workflow", as
   });
   const release = await submitRelease(page, app, caseId);
   await review(page, app, release, "APPROVED");
-  await expect(page.getByText("APPROVED", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("region", { name: "Review decision" })
+      .getByText("APPROVED", { exact: true }),
+  ).toBeVisible();
 
   await page.reload();
-  await expect(page.getByText("APPROVED", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("region", { name: "Review decision" })
+      .getByText("APPROVED", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("FINALIZED", { exact: true })).toBeVisible();
   await app.selectRole(page, "outsider");
   await app.connect(page, "outsider");
@@ -40,11 +48,20 @@ test("wallet rejection and wrong network remain distinct", async ({ page, access
   await page.goto(`${app.baseURL}/cases/new`);
   await app.setWalletMode(page, "reject");
   await page.getByRole("button", { name: "Connect wallet" }).click();
-  await expect(page.locator(".wallet-error")).toHaveText("Wallet connection was rejected. No transaction was sent.");
+  await expect(
+    page.getByText("Wallet connection was rejected. No transaction was sent.", {
+      exact: true,
+    }),
+  ).toBeVisible();
 
   await app.setWalletMode(page, "wrong-network");
   await page.getByRole("button", { name: /connect wallet|switch network/i }).click();
-  await expect(page.locator(".wallet-error")).toContainText("wrong network");
+  await expect(
+    page.getByText(
+      "Wallet is on the wrong network. Switch to the configured GenLayer network.",
+      { exact: true },
+    ),
+  ).toBeVisible();
   await expect(page.getByRole("button", { name: "Switch network" })).toBeVisible();
 
   await app.setWalletMode(page, "ready");

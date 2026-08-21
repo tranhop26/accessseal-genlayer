@@ -1,0 +1,240 @@
+.landing {
+  display: grid;
+  gap: clamp(3rem, 7vw, 6rem);
+  margin: 0 auto;
+  max-width: 1180px;
+  overflow: hidden;
+  padding: clamp(2rem, 5vw, 5rem) clamp(1rem, 4vw, 2rem) 5rem;
+}
+.hero {
+  align-items: center;
+  display: grid;
+  gap: clamp(2rem, 5vw, 5rem);
+  grid-template-columns: minmax(0, 1.05fr) minmax(420px, 0.95fr);
+}
+.heroCopy {
+  background: linear-gradient(135deg, rgb(99 91 255 / 12%), transparent 68%);
+  border-radius: var(--as-radius-md);
+  padding: clamp(1.5rem, 4vw, 3rem);
+}
+.eyebrow,
+.cardLabel {
+  color: var(--as-primary-hover);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  margin: 0 0 0.75rem;
+  text-transform: uppercase;
+}
+.hero h1,
+.section h2,
+.finalCta h2 {
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+  margin: 0;
+}
+.hero h1 {
+  font-size: clamp(2.4rem, 5vw, 4.6rem);
+  max-width: 12ch;
+}
+.lede {
+  color: var(--as-muted);
+  font-size: 1.1rem;
+  line-height: 1.65;
+  margin: 1.5rem 0 0;
+  max-width: 62ch;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+.preview {
+  min-width: 0;
+}
+.previewHeader,
+.decision {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: space-between;
+}
+.previewHeader > span {
+  color: var(--as-muted);
+  font-size: 0.85rem;
+}
+.metrics {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 1.5rem 0;
+}
+.evidence {
+  background: #f6f9fc;
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-sm);
+  display: grid;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  padding: 0.85rem;
+}
+.evidence span {
+  color: var(--as-muted);
+  font-size: 0.8rem;
+}
+.evidence strong {
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.decision {
+  border-bottom: 1px solid var(--as-border);
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+}
+.decision span {
+  font-size: 0.85rem;
+}
+.trustStrip {
+  border-bottom: 1px solid var(--as-border);
+  border-top: 1px solid var(--as-border);
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 1.5rem 0;
+}
+.trustStrip p {
+  color: var(--as-muted);
+  line-height: 1.55;
+  margin: 0;
+}
+.trustStrip strong {
+  color: var(--as-text);
+  display: block;
+}
+.section {
+  display: grid;
+  gap: 2rem;
+}
+.sectionIntro {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 720px;
+}
+.section h2,
+.finalCta h2 {
+  font-size: clamp(1.8rem, 3.5vw, 3rem);
+}
+.stepGrid,
+.comparison {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.stepGrid li,
+.comparisonCard {
+  background: var(--as-surface);
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-md);
+  padding: 1.5rem;
+}
+.stepGrid span {
+  color: var(--as-primary-hover);
+  font-size: 0.85rem;
+  font-weight: 800;
+}
+.stepGrid h3,
+.comparisonCard h3 {
+  font-size: 1.2rem;
+  margin: 1.5rem 0 0.75rem;
+}
+.stepGrid p,
+.comparisonCard p {
+  color: var(--as-muted);
+  line-height: 1.55;
+  margin: 0;
+}
+.comparison {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.authoritative {
+  border-color: rgb(99 91 255 / 45%);
+  box-shadow: var(--as-shadow);
+}
+.authoritative .cardLabel {
+  color: var(--as-success);
+}
+.finalCta {
+  align-items: end;
+  background: #f0f5ff;
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-md);
+  color: var(--as-text);
+  display: flex;
+  gap: 2rem;
+  justify-content: space-between;
+  padding: clamp(1.5rem, 4vw, 3rem);
+}
+.finalCta h2 {
+  max-width: 20ch;
+}
+.finalCta .eyebrow {
+  color: var(--as-primary-hover);
+}
+.finalCtaAction {
+  flex: 0 0 auto;
+}
+@media (max-width: 900px) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+  .preview {
+    max-width: 680px;
+  }
+  .trustStrip {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 767px) {
+  .landing {
+    gap: 3rem;
+    padding-bottom: 3rem;
+  }
+  .heroCopy {
+    padding: 1.5rem;
+  }
+  .metrics,
+  .stepGrid,
+  .comparison {
+    grid-template-columns: 1fr;
+  }
+  .actions > *,
+  .finalCtaAction > * {
+    width: 100%;
+  }
+  .finalCta {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 640px) {
+  .actions > *,
+  .finalCtaAction > * {
+    width: 100%;
+  }
+}
+
+@media (max-width: 479px) {
+  .landing * {
+    min-width: 0;
+  }
+  .actions > *,
+  .finalCtaAction > * {
+    width: 100%;
+  }
+}

@@ -24,7 +24,7 @@ export function RecoveryPanel({
   return (
     <section className="action-card">
       <span className="eyebrow">Safe recovery</span>
-      <h2>Cure, retry, expiry or timeout</h2>
+      <h3>Cure, retry, expiry or timeout</h3>
       <p>
         Vendor cure is actor-restricted. Unresolved retry and exhausted expiry
         are permissionless only when the finalized attempt readback proves

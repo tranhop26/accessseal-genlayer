@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/components/app-shell";
@@ -6,20 +6,44 @@ import { StatusPanel } from "@/components/status-panel";
 import { CaseComposer } from "@/components/case-composer";
 import { CaseSkeleton } from "@/components/skeletons";
 
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/cases",
+}));
+
+vi.mock("@/providers/wallet-provider", () => ({
+  useWallet: () => ({
+    config: {
+      network: "testnet_bradbury",
+      chainId: 4221,
+      contractAddress: "0x814726d7a3a2cbc52c8ea622b49af1d6fda300a7",
+      explorerBaseUrl: "https://explorer-bradbury.genlayer.com",
+    },
+    status: "disconnected",
+    address: null,
+    error: null,
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  }),
+}));
+
 describe("accessible core experience", () => {
-  it("uses semantic navigation and always discloses simulated Studionet value", () => {
+  it("uses semantic workspace navigation and discloses configured Bradbury simulation value", () => {
     render(
       <AppShell>
         <p>Case content</p>
       </AppShell>,
     );
     expect(
-      screen.getByRole("navigation", { name: /primary/i }),
+      screen.getByRole("navigation", { name: "Workspace" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Studionet GEN is simulated/i)).toBeInTheDocument();
+    expect(
+      screen.getByText("Bradbury Testnet · Simulated GEN"),
+    ).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveTextContent("Case content");
     expect(screen.getByRole("link", { name: "Cases" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "Create case" })).toBeVisible();
+    expect(
+      screen.getAllByRole("link", { name: "Create case" }),
+    ).not.toHaveLength(0);
   });
 
   it("does not style ACCEPTED as terminal success", () => {
@@ -32,7 +56,7 @@ describe("accessible core experience", () => {
         }}
       />,
     );
-    expect(screen.getByRole("status")).toHaveAttribute("data-tone", "pending");
+    expect(screen.getByRole("status")).toHaveAttribute("data-tone", "warning");
     expect(screen.getByText(/not final/i)).toBeInTheDocument();
     rerender(
       <StatusPanel
@@ -55,7 +79,10 @@ describe("accessible core experience", () => {
     ).toBeInTheDocument();
     rerender(<CaseComposer onCreate={onCreate} authority={null} />);
     await user.click(
-      screen.getByRole("button", { name: /preview locked terms/i }),
+      screen.getByRole("button", { name: /continue to terms/i }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /review locked terms/i }),
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
       /complete the required/i,
@@ -79,34 +106,34 @@ describe("accessible core experience", () => {
     const { rerender } = render(
       <CaseComposer onCreate={onCreate} authority={authority} />,
     );
-    await user.type(
-      screen.getByLabelText(/vendor wallet/i),
-      "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    );
-    await user.type(
-      screen.getByLabelText(/website origin/i),
-      "https://product.example",
-    );
-    await user.type(
-      screen.getByLabelText(/profile hash/i),
-      `0x${"c".repeat(64)}`,
-    );
-    for (const input of screen.getAllByLabelText(/critical flow/i))
-      await user.type(input, "flow");
-    await user.type(screen.getByLabelText(/simulated escrow/i), "1");
+    fireEvent.change(screen.getByLabelText(/vendor wallet/i), {
+      target: { value: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+    });
     await user.click(
-      screen.getByRole("button", { name: /preview locked terms/i }),
+      screen.getByRole("button", { name: /continue to terms/i }),
+    );
+    fireEvent.change(screen.getByLabelText(/website origin/i), {
+      target: { value: "https://product.example" },
+    });
+    fireEvent.change(screen.getByLabelText(/profile hash/i), {
+      target: { value: `0x${"c".repeat(64)}` },
+    });
+    for (const input of screen.getAllByLabelText(/critical flow/i))
+      fireEvent.change(input, { target: { value: "flow" } });
+    fireEvent.change(screen.getByLabelText(/simulated escrow/i), {
+      target: { value: "1" },
+    });
+    await user.click(
+      screen.getByRole("button", { name: /review locked terms/i }),
     );
     expect(
       await screen.findByText(/ready for wallet signature/i),
     ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /back to terms/i }));
     await user.type(screen.getByLabelText(/website origin/i), "x");
     expect(
       screen.queryByText(/ready for wallet signature/i),
     ).not.toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: /preview locked terms/i }),
-    );
     rerender(
       <CaseComposer
         onCreate={onCreate}
@@ -137,20 +164,25 @@ describe("accessible core experience", () => {
           }}
         />,
       );
-      await user.type(screen.getByLabelText(/vendor wallet/i), vendor);
-      await user.type(
-        screen.getByLabelText(/website origin/i),
-        "https://product.example",
-      );
-      await user.type(
-        screen.getByLabelText(/profile hash/i),
-        `0x${"c".repeat(64)}`,
-      );
-      for (const input of screen.getAllByLabelText(/critical flow/i))
-        await user.type(input, "flow");
-      await user.type(screen.getByLabelText(/simulated escrow/i), escrow);
+      fireEvent.change(screen.getByLabelText(/vendor wallet/i), {
+        target: { value: vendor },
+      });
       await user.click(
-        screen.getByRole("button", { name: /preview locked terms/i }),
+        screen.getByRole("button", { name: /continue to terms/i }),
+      );
+      fireEvent.change(screen.getByLabelText(/website origin/i), {
+        target: { value: "https://product.example" },
+      });
+      fireEvent.change(screen.getByLabelText(/profile hash/i), {
+        target: { value: `0x${"c".repeat(64)}` },
+      });
+      for (const input of screen.getAllByLabelText(/critical flow/i))
+        fireEvent.change(input, { target: { value: "flow" } });
+      fireEvent.change(screen.getByLabelText(/simulated escrow/i), {
+        target: { value: escrow },
+      });
+      await user.click(
+        screen.getByRole("button", { name: /review locked terms/i }),
       );
       expect(screen.getByRole("alert")).toBeInTheDocument();
       expect(
