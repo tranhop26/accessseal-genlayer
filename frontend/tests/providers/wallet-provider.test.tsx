@@ -172,6 +172,50 @@ describe("WalletProvider account changes", () => {
     expect(screen.getByTestId("status")).toHaveTextContent("connected");
     expect(screen.getByTestId("sdk")).toHaveTextContent("fresh");
     expect(newSdk.connect).toHaveBeenCalledWith("studionet");
+    expect(createClientMock).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ account: NEXT_ADDRESS }),
+    );
+  });
+
+  it("keeps the selected account connected when accountsChanged arrives before listener handoff", async () => {
+    const freshConnection = deferred<void>();
+    const readSdk = sdk();
+    const oldSdk = sdk();
+    const newSdk = { connect: vi.fn().mockReturnValue(freshConnection.promise) };
+    createClientMock
+      .mockReturnValueOnce(readSdk)
+      .mockReturnValueOnce(oldSdk)
+      .mockReturnValueOnce(newSdk);
+    const provider = eventProvider(async ({ method }) => {
+      if (method === "eth_requestAccounts") return [ADDRESS];
+      if (method === "wallet_requestPermissions") return undefined;
+      if (method === "eth_accounts") return [NEXT_ADDRESS];
+      throw new Error(`unexpected method: ${method}`);
+    });
+    vi.stubGlobal("ethereum", provider);
+
+    renderWallet(oldSdk);
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("connected"),
+    );
+    await waitFor(() =>
+      expect(provider.removeListener).toHaveBeenCalledTimes(3),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
+    await waitFor(() => expect(newSdk.connect).toHaveBeenCalledWith("studionet"));
+
+    await act(async () => {
+      freshConnection.resolve();
+      await Promise.resolve();
+      provider.emit("accountsChanged", [NEXT_ADDRESS]);
+    });
+
+    expect(screen.getByTestId("status")).toHaveTextContent("connected");
+    expect(screen.getByTestId("address")).toHaveTextContent(NEXT_ADDRESS);
+    expect(screen.getByTestId("sdk")).toHaveTextContent("fresh");
   });
 
   it("restores the prior signer when an account change is cancelled", async () => {

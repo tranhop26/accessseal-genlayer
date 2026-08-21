@@ -235,7 +235,11 @@ for (const viewport of [
     await page.getByLabel("Vendor wallet").focus();
     await expectVisibleFocus(page, "Vendor wallet");
     await page.keyboard.press("Shift+Tab");
+    await expectVisibleFocus(page, "Change wallet");
+    await page.keyboard.press("Shift+Tab");
     await expectVisibleFocus(page, disconnectName);
+    await page.keyboard.press("Tab");
+    await expectVisibleFocus(page, "Change wallet");
     await page.keyboard.press("Tab");
     await expectVisibleFocus(page, "Vendor wallet");
     await page.keyboard.insertText(app.addresses.vendor);

@@ -139,6 +139,7 @@ export function WalletProvider({
   const switchVersion = useRef(0);
   const switching = useRef(false);
   const switchCandidate = useRef<`0x${string}` | null>(null);
+  const activeAddress = useRef<`0x${string}` | null>(null);
   const connect = useCallback(async () => {
     setStatus("connecting");
     setError(null);
@@ -152,6 +153,7 @@ export function WalletProvider({
         provider: provider as never,
       });
       await next.connect(sdkNetworkName(config.network));
+      activeAddress.current = account;
       setSdk(next);
       setAddress(account);
       setStatus("connected");
@@ -183,6 +185,7 @@ export function WalletProvider({
       });
       await next.connect(sdkNetworkName(config.network));
       if (switchVersion.current !== version) return;
+      activeAddress.current = account;
       switching.current = false;
       switchCandidate.current = null;
       setSdk(next);
@@ -190,6 +193,7 @@ export function WalletProvider({
       setStatus("connected");
     } catch (cause) {
       if (switchVersion.current !== version) return;
+      activeAddress.current = previousAddress;
       switching.current = false;
       switchCandidate.current = null;
       setSdk(previousSdk);
@@ -211,6 +215,7 @@ export function WalletProvider({
   }, [address, chain, config.network, sdk]);
   const disconnect = useCallback(() => {
     switchVersion.current += 1;
+    activeAddress.current = null;
     switching.current = false;
     switchCandidate.current = null;
     setSdk(null);
@@ -235,7 +240,10 @@ export function WalletProvider({
           invalidate();
         return;
       }
-      if (typeof next !== "string" || next.toLowerCase() !== address)
+      if (
+        typeof next !== "string" ||
+        next.toLowerCase() !== activeAddress.current
+      )
         invalidate();
     };
     return subscribeWalletProvider(provider, accountsChanged, invalidate);
