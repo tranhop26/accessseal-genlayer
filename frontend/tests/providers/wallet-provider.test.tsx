@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   requestWalletAccount,
@@ -31,6 +31,22 @@ function deferred<T>() {
 
 function sdk() {
   return { connect: vi.fn().mockResolvedValue(undefined) };
+}
+
+function eventProvider(
+  request: (args: { method: string }) => Promise<unknown>,
+) {
+  const listeners = new Map<string, (...args: unknown[]) => void>();
+  return {
+    request: vi.fn(request),
+    on: vi.fn((event: string, listener: (...args: unknown[]) => void) =>
+      listeners.set(event, listener),
+    ),
+    removeListener: vi.fn((event: string) => listeners.delete(event)),
+    emit(event: string, ...args: unknown[]) {
+      listeners.get(event)?.(...args);
+    },
+  };
 }
 
 function WalletHarness({ oldSdk }: { oldSdk: unknown }) {
@@ -187,4 +203,94 @@ describe("WalletProvider account changes", () => {
     expect(screen.getByTestId("address")).toHaveTextContent(ADDRESS);
     expect(screen.getByTestId("sdk")).toHaveTextContent("old");
   });
+
+  it("retains the prior signer when account selection emits accountsChanged before cancellation", async () => {
+    const permission = deferred<void>();
+    const readSdk = sdk();
+    const oldSdk = sdk();
+    createClientMock.mockReturnValueOnce(readSdk).mockReturnValueOnce(oldSdk);
+    const provider = eventProvider(async ({ method }) => {
+      if (method === "eth_requestAccounts") return [ADDRESS];
+      if (method === "wallet_requestPermissions") return permission.promise;
+      throw new Error(`unexpected method: ${method}`);
+    });
+    vi.stubGlobal("ethereum", provider);
+
+    renderWallet(oldSdk);
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("connected"),
+    );
+    await waitFor(() =>
+      expect(provider.removeListener).toHaveBeenCalledTimes(3),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Change" }));
+    act(() => provider.emit("accountsChanged", [NEXT_ADDRESS]));
+
+    expect(screen.getByTestId("status")).toHaveTextContent("switching");
+    expect(screen.getByTestId("address")).toHaveTextContent(ADDRESS);
+    expect(screen.getByTestId("sdk")).toHaveTextContent("old");
+
+    permission.reject({ code: 4001 });
+    await waitFor(() =>
+      expect(screen.getByTestId("error")).toHaveTextContent(
+        "Wallet change was cancelled. The previous wallet remains connected.",
+      ),
+    );
+    expect(screen.getByTestId("status")).toHaveTextContent("connected");
+    expect(screen.getByTestId("address")).toHaveTextContent(ADDRESS);
+    expect(screen.getByTestId("sdk")).toHaveTextContent("old");
+  });
+
+  it.each(["chainChanged", "disconnect"])(
+    "does not restore a signer after %s invalidates a pending replacement",
+    async (event) => {
+      const permission = deferred<void>();
+      const freshConnection = deferred<void>();
+      const readSdk = sdk();
+      const oldSdk = sdk();
+      const newSdk = { connect: vi.fn().mockReturnValue(freshConnection.promise) };
+      createClientMock
+        .mockReturnValueOnce(readSdk)
+        .mockReturnValueOnce(oldSdk)
+        .mockReturnValueOnce(newSdk);
+      const provider = eventProvider(async ({ method }) => {
+        if (method === "eth_requestAccounts") return [ADDRESS];
+        if (method === "wallet_requestPermissions") return permission.promise;
+        if (method === "eth_accounts") return [NEXT_ADDRESS];
+        throw new Error(`unexpected method: ${method}`);
+      });
+      vi.stubGlobal("ethereum", provider);
+
+      renderWallet(oldSdk);
+      fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+      await waitFor(() =>
+        expect(screen.getByTestId("status")).toHaveTextContent("connected"),
+      );
+      await waitFor(() =>
+        expect(provider.removeListener).toHaveBeenCalledTimes(3),
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Change" }));
+      permission.resolve();
+      await waitFor(() => expect(newSdk.connect).toHaveBeenCalledWith("studionet"));
+
+      act(() =>
+        provider.emit(event, event === "chainChanged" ? "0x1" : undefined),
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("status")).toHaveTextContent("disconnected"),
+      );
+      expect(screen.getByTestId("address")).toHaveTextContent("unavailable");
+      expect(screen.getByTestId("sdk")).toHaveTextContent("unavailable");
+
+      freshConnection.resolve();
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+      expect(screen.getByTestId("status")).toHaveTextContent("disconnected");
+      expect(screen.getByTestId("address")).toHaveTextContent("unavailable");
+      expect(screen.getByTestId("sdk")).toHaveTextContent("unavailable");
+    },
+  );
 });

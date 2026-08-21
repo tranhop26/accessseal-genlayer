@@ -6,6 +6,7 @@ import {
   useMemo,
   useState,
   useEffect,
+  useRef,
   type ReactNode,
 } from "react";
 import { createClient } from "genlayer-js";
@@ -135,6 +136,8 @@ export function WalletProvider({
   const [address, setAddress] = useState<`0x${string}` | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sdk, setSdk] = useState<ReturnType<typeof createClient> | null>(null);
+  const switchVersion = useRef(0);
+  const switching = useRef(false);
   const connect = useCallback(async () => {
     setStatus("connecting");
     setError(null);
@@ -160,22 +163,30 @@ export function WalletProvider({
   const changeAccount = useCallback(async () => {
     const previousSdk = sdk;
     const previousAddress = address;
+    const version = switchVersion.current + 1;
+    switchVersion.current = version;
+    switching.current = true;
     setStatus("switching");
     setError(null);
     try {
       const provider = (window as unknown as { ethereum?: Provider }).ethereum;
       if (!provider) throw new Error("wallet provider unavailable");
       const account = await requestWalletAccount(provider, "change");
+      if (switchVersion.current !== version) return;
       const next = createClient({
         chain,
         account,
         provider: provider as never,
       });
       await next.connect(sdkNetworkName(config.network));
+      if (switchVersion.current !== version) return;
+      switching.current = false;
       setSdk(next);
       setAddress(account);
       setStatus("connected");
     } catch (cause) {
+      if (switchVersion.current !== version) return;
+      switching.current = false;
       setSdk(previousSdk);
       setAddress(previousAddress);
       if (
@@ -194,6 +205,8 @@ export function WalletProvider({
     }
   }, [address, chain, config.network, sdk]);
   const disconnect = useCallback(() => {
+    switchVersion.current += 1;
+    switching.current = false;
     setSdk(null);
     setAddress(null);
     setError(null);
@@ -204,6 +217,7 @@ export function WalletProvider({
     if (!provider?.on) return;
     const invalidate = () => disconnect();
     const accountsChanged = (value: unknown) => {
+      if (switching.current) return;
       const accounts = Array.isArray(value) ? value : [];
       const next = accounts[0];
       if (typeof next !== "string" || next.toLowerCase() !== address)
