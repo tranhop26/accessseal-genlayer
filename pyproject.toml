@@ -8,8 +8,7 @@ version = "0.1.0"
 description = "Evidence-bound accessibility release acceptance on GenLayer"
 requires-python = ">=3.12"
 dependencies = [
-  "fastapi==0.138.1",
-  "genlayer-test==0.29.2",
+  "genlayer-test[sim]==0.29.2",
   "genvm-linter==0.11.0",
   "python-minifier==3.2.0",
 ]

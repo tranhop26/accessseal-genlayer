@@ -47,8 +47,10 @@ test("every CI job that runs root lint installs frontend dependencies first", ()
 });
 
 test("clean CI installs the GLSim HTTP server runtime", () => {
-  assert.match(pythonProject, /^\s*"fastapi==0\.138\.1",\s*$/m);
+  assert.match(pythonProject, /^\s*"genlayer-test\[sim\]==0\.29\.2",\s*$/m);
   assert.match(pythonLock, /^fastapi==0\.138\.1 \\/m);
+  assert.match(pythonLock, /^httpx==\d+\.\d+\.\d+ \\/m);
+  assert.match(pythonLock, /^uvicorn==\d+\.\d+\.\d+ \\/m);
 });
 
 test("public repository excludes generated agent guardrails", () => {
