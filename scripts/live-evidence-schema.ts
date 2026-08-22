@@ -11,7 +11,7 @@ export const LIVE_EVIDENCE_BINDING = Object.freeze({
   profileHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   flowsHash: "0xda495da7b1f1f3f0881882ba88190021186496bde65a56fed260393152481e6e",
   releaseId: "2026-08-22-live-v1",
-  sourceCommit: "8854517fcb0a55b92acc0e9ea41bb38efb47f1ed",
+  sourceCommit: "6d3c933e05e1747d7f9b3b3e1d1ac41212165a61",
 });
 
 export const PAYLOAD_SPECS = Object.freeze({

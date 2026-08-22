@@ -1,0 +1,149 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import test, { afterEach } from "node:test";
+
+import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS } from "../../scripts/live-evidence-schema.ts";
+
+const roots: string[] = [];
+const observedAt = 1_787_400_000;
+const urls = [
+  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`,
+  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`,
+  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`,
+];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+async function fixture(): Promise<{ root: string; input: string; output: string }> {
+  const root = await mkdtemp(join(tmpdir(), "accessseal-live-generator-"));
+  roots.push(root);
+  const input = join(root, "capture");
+  const output = join(root, "public");
+  await mkdir(input, { recursive: true });
+  const domFacts = {
+    schemaVersion: "accessseal-dom-facts/1",
+    observedAt,
+    pages: urls.map((url) => ({ url, landmarks: ["navigation", "main"], labelledControls: true })),
+  };
+  const scannerReport = {
+    schemaVersion: "accessseal-scanner-report/1",
+    tool: { name: "axe-core", version: "4.13.0" },
+    observedAt,
+    scans: urls.map((url) => ({ url, violations: [], incomplete: [], passes: 40 })),
+  };
+  const criticalFlowTrace = {
+    schemaVersion: "accessseal-critical-flow-trace/1",
+    caseId: LIVE_EVIDENCE_BINDING.caseId,
+    flowsHash: LIVE_EVIDENCE_BINDING.flowsHash,
+    observedAt,
+    flows: ["workspace-navigation", "create-case-preview", "case-section-navigation"].map((id) => ({
+      id,
+      steps: [{ action: "Tab", expected: "visible focus", actual: "visible focus", passed: true }],
+      passed: true,
+    })),
+    materialBlockers: {
+      "focus-obscured": false,
+      "inoperable-critical-flow": false,
+      "keyboard-trap": false,
+      "meaningless-alt-text": false,
+      "missing-form-label": false,
+    },
+  };
+  await Promise.all([
+    writeFile(join(input, "release.html"), "<main><h1>AccessSeal case</h1></main>"),
+    writeFile(join(input, "screenshot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+    writeFile(join(input, "dom-facts.json"), canonical(domFacts)),
+    writeFile(join(input, "scanner-report.json"), canonical(scannerReport)),
+    writeFile(join(input, "critical-flow-trace.json"), canonical(criticalFlowTrace)),
+  ]);
+  return { root, input, output };
+}
+
+function run(input: string, output: string) {
+  return spawnSync(process.execPath, ["--import", "tsx", "scripts/generate-live-evidence.ts", "--input", input, "--public", output], {
+    cwd: resolve("."),
+    encoding: "utf8",
+  });
+}
+
+async function listedFiles(root: string, relative = ""): Promise<string[]> {
+  const directory = join(root, relative);
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = await Promise.all(entries.map((entry) => entry.isDirectory()
+    ? listedFiles(root, join(relative, entry.name))
+    : Promise.resolve([join(relative, entry.name).replaceAll("\\", "/")])));
+  return files.flat().sort();
+}
+
+test("publishes only the five immutable payload routes and canonical manifest", async () => {
+  const { input, output } = await fixture();
+  const result = run(input, output);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(await listedFiles(output), [
+    ".well-known/accessseal/release-manifest.json",
+    "evidence/releases/2026-08-22-live-v1/critical-flow-trace.json",
+    "evidence/releases/2026-08-22-live-v1/dom-facts.json",
+    "evidence/releases/2026-08-22-live-v1/release.html",
+    "evidence/releases/2026-08-22-live-v1/scanner-report.json",
+    "evidence/releases/2026-08-22-live-v1/screenshot.png",
+  ]);
+
+  const manifestBytes = await readFile(join(output, ".well-known/accessseal/release-manifest.json"));
+  const manifest = JSON.parse(manifestBytes.toString("utf8")) as { files: Array<{ evidenceType: keyof typeof PAYLOAD_SPECS; path: string; sha256: string }> };
+  assert.equal(manifestBytes.toString("utf8"), canonical(manifest));
+  for (const file of manifest.files) {
+    const published = await readFile(join(output, file.path.slice(1)));
+    const captured = await readFile(join(input, file.path.split("/").at(-1)!));
+    assert.deepEqual(published, captured);
+    assert.equal(file.sha256, `sha256:${createHash("sha256").update(published).digest("hex")}`);
+  }
+  const summary = JSON.parse(result.stdout) as { releaseDigest: string; sourceCommit: string };
+  assert.equal(summary.releaseDigest, `sha256:${createHash("sha256").update(manifestBytes).digest("hex")}`);
+  assert.equal(summary.sourceCommit, "6d3c933e05e1747d7f9b3b3e1d1ac41212165a61");
+});
+
+test("is idempotent for identical bytes", async () => {
+  const { input, output } = await fixture();
+  assert.equal(run(input, output).status, 0);
+  const first = await readFile(join(output, ".well-known/accessseal/release-manifest.json"));
+  const result = run(input, output);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(await readFile(join(output, ".well-known/accessseal/release-manifest.json")), first);
+});
+
+test("rejects a conflicting release before writing any other output", async () => {
+  const { input, output } = await fixture();
+  const conflict = join(output, PAYLOAD_SPECS.HTML_BUNDLE.path.slice(1));
+  await mkdir(dirname(conflict), { recursive: true });
+  await writeFile(conflict, "different immutable release");
+
+  const result = run(input, output);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /refus|overwrite|different|immutable/i);
+  assert.deepEqual(await listedFiles(output), ["evidence/releases/2026-08-22-live-v1/release.html"]);
+  assert.equal(await readFile(conflict, "utf8"), "different immutable release");
+});
+
+test("rejects a missing capture member without creating the public tree", async () => {
+  const { input, output } = await fixture();
+  await rm(join(input, "scanner-report.json"));
+  const result = run(input, output);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /scanner-report|missing|ENOENT/i);
+  await assert.rejects(readdir(output), /ENOENT/);
+});

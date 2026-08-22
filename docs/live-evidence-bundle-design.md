@@ -16,7 +16,7 @@ This design covers artifact production, same-origin hosting, envelope generation
 - Vendor issuer: `0x35c9979d30992b13ef6df7036bc745e2e1cd76a2`
 - Profile version: `accessseal-static/1`
 - Profile hash: `0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
-- Functional release source: Git commit `8854517fcb0a55b92acc0e9ea41bb38efb47f1ed`
+- Audited production source: Git commit `6d3c933e05e1747d7f9b3b3e1d1ac41212165a61`
 - Artifact release ID: `2026-08-22-live-v1`
 
 All envelope timestamps are generated immediately before preview and submission. `observedAt <= submittedAt < expiresAt`; observations must remain within the case evidence window. Nonces are unique per case, epoch, action, and evidence type.
