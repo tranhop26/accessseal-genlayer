@@ -18,8 +18,10 @@ This design covers artifact production, same-origin hosting, envelope generation
 - Profile hash: `0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
 - Audited production source: Git commit `6d3c933e05e1747d7f9b3b3e1d1ac41212165a61`
 - Artifact release ID: `2026-08-22-live-v1`
+- Finalized create-case transaction: `0xcb160381a10aef9864c849524c59507d6c7c94b4a9612ef1ed0dfde83f4a07ac`
+- Authoritative case creation timestamp: `1787332650`; evidence cutoff: `1787419050`; hard deadline: `1787937450`
 
-All envelope timestamps are generated immediately before preview and submission. `observedAt <= submittedAt < expiresAt`; observations must remain within the case evidence window. Nonces are unique per case, epoch, action, and evidence type.
+All envelope timestamps are generated immediately before preview and submission. `observedAt <= submittedAt < expiresAt`; observations and submissions must remain within the absolute case evidence window, and expiry cannot exceed the absolute hard deadline. Nonces are unique per generation as well as per case, epoch, action, and evidence type so a same-second retry cannot reuse a nonce.
 
 ## Critical Flows
 

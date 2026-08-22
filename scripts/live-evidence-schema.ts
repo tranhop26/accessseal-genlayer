@@ -12,6 +12,10 @@ export const LIVE_EVIDENCE_BINDING = Object.freeze({
   flowsHash: "0xda495da7b1f1f3f0881882ba88190021186496bde65a56fed260393152481e6e",
   releaseId: "2026-08-22-live-v1",
   sourceCommit: "6d3c933e05e1747d7f9b3b3e1d1ac41212165a61",
+  createCaseTransactionHash: "0xcb160381a10aef9864c849524c59507d6c7c94b4a9612ef1ed0dfde83f4a07ac",
+  caseCreatedAt: 1_787_332_650,
+  evidenceDeadlineSeconds: 86_400,
+  hardDeadlineSeconds: 604_800,
 });
 
 export const PAYLOAD_SPECS = Object.freeze({

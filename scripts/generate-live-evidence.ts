@@ -6,8 +6,11 @@ import {
   LIVE_EVIDENCE_BINDING,
   PAYLOAD_SPECS,
   buildReleaseManifest,
+  sha256,
+  verifyEvidenceBundle,
   type EvidencePayloads,
   type EvidenceType,
+  type ReleaseManifestV1,
 } from "./live-evidence-schema.ts";
 
 const CAPTURE_FILES: Readonly<Record<EvidenceType, string>> = Object.freeze({
@@ -43,6 +46,20 @@ async function safePublicRoot(publicDirectory: string): Promise<string> {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       }
     }
+    const currentStat = await lstat(current);
+    if (currentStat.isSymbolicLink() || !currentStat.isDirectory()) {
+      throw new Error(`public root ancestor must be a real directory, not a symbolic link or junction: ${current}`);
+    }
+  }
+  return realpath(root);
+}
+
+async function safeExistingPublicRoot(publicDirectory: string): Promise<string> {
+  const root = resolve(publicDirectory);
+  const parsed = parse(root);
+  let current = parsed.root;
+  for (const part of root.slice(parsed.root.length).split(sep).filter(Boolean)) {
+    current = join(current, part);
     const currentStat = await lstat(current);
     if (currentStat.isSymbolicLink() || !currentStat.isDirectory()) {
       throw new Error(`public root ancestor must be a real directory, not a symbolic link or junction: ${current}`);
@@ -193,6 +210,35 @@ export async function generateLiveEvidenceBundle(inputDirectory: string, publicD
   };
 }
 
+export type VerifiedPublicEvidence = {
+  manifest: ReleaseManifestV1;
+  manifestBytes: Buffer;
+  payloads: EvidencePayloads;
+  releaseDigest: `sha256:${string}`;
+};
+
+export async function verifyPublicEvidence(publicDirectory: string): Promise<VerifiedPublicEvidence> {
+  const publicRoot = await safeExistingPublicRoot(publicDirectory);
+  const manifestPath = join(publicRoot, MANIFEST_PATH.slice(1));
+  await assertSafeOutputPath(publicRoot, manifestPath);
+  const payloads = {} as EvidencePayloads;
+  for (const [evidenceType, spec] of Object.entries(PAYLOAD_SPECS) as Array<
+    [EvidenceType, (typeof PAYLOAD_SPECS)[EvidenceType]]
+  >) {
+    const payloadPath = join(publicRoot, spec.path.slice(1));
+    await assertSafeOutputPath(publicRoot, payloadPath);
+    payloads[evidenceType] = await readFile(payloadPath);
+  }
+  const manifestBytes = await readFile(manifestPath);
+  const manifest = verifyEvidenceBundle(manifestBytes, payloads);
+  return {
+    manifest,
+    manifestBytes,
+    payloads,
+    releaseDigest: `sha256:${sha256(manifestBytes)}`,
+  };
+}
+
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
   const value = process.argv[index + 1];
@@ -201,7 +247,13 @@ function argument(name: string): string {
 }
 
 async function main(): Promise<void> {
-  const result = await generateLiveEvidenceBundle(argument("--input"), argument("--public"));
+  const publicDirectory = argument("--public");
+  const verified = process.argv.includes("--verify")
+    ? await verifyPublicEvidence(publicDirectory)
+    : undefined;
+  const result = verified === undefined
+    ? await generateLiveEvidenceBundle(argument("--input"), publicDirectory)
+    : { releaseDigest: verified.releaseDigest, fileCount: verified.manifest.files.length };
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 

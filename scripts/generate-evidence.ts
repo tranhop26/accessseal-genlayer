@@ -68,14 +68,14 @@ const STRING_FIELDS = [
   "subjectOrigin",
 ] as const satisfies readonly (keyof EvidenceEnvelopeV1)[];
 
-const MEDIA_TYPES: Readonly<Record<string, string>> = {
+export const MEDIA_TYPES: Readonly<Record<string, string>> = Object.freeze({
   RELEASE_MANIFEST: "application/json",
   HTML_BUNDLE: "text/html",
   SCREENSHOT: "image/png",
   DOM_FACTS: "application/json",
   SCANNER_REPORT: "application/json",
   CRITICAL_FLOW_TRACE: "application/json",
-};
+});
 
 function validateNonce(nonce: string): void {
   for (let index = 0; index < nonce.length; index += 1) {

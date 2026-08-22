@@ -81,6 +81,13 @@ function run(input: string, output: string) {
   });
 }
 
+function runVerify(output: string) {
+  return spawnSync(process.execPath, ["--import", "tsx", "scripts/generate-live-evidence.ts", "--verify", "--public", output], {
+    cwd: resolve("."),
+    encoding: "utf8",
+  });
+}
+
 async function listedFiles(root: string, relative = ""): Promise<string[]> {
   const directory = join(root, relative);
   const entries = await readdir(directory, { withFileTypes: true });
@@ -124,6 +131,30 @@ test("is idempotent for identical bytes", async () => {
   const result = run(input, output);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(await readFile(join(output, ".well-known/accessseal/release-manifest.json")), first);
+});
+
+test("verification CLI reports only a compact release summary", async () => {
+  const { input, output } = await fixture();
+  assert.equal(run(input, output).status, 0);
+  const result = runVerify(output);
+  assert.equal(result.status, 0, result.stderr);
+  const summary = JSON.parse(result.stdout) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(summary).sort(), ["fileCount", "releaseDigest"]);
+  assert.equal(summary.fileCount, 5);
+  assert.match(String(summary.releaseDigest), /^sha256:[0-9a-f]{64}$/);
+  assert.ok(result.stdout.length < 256);
+});
+
+test("verification rejects a symbolic link or junction in an ancestor of the public root", async () => {
+  const { root, input } = await fixture();
+  const outside = join(root, "outside-verify");
+  const publicRoot = join(outside, "public");
+  assert.equal(run(input, publicRoot).status, 0);
+  const redirect = join(root, "verify-redirect");
+  await symlink(outside, redirect, process.platform === "win32" ? "junction" : "dir");
+  const result = runVerify(join(redirect, "public"));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /ancestor|symbolic|symlink|junction/i);
 });
 
 test("rejects a conflicting release before writing any other output", async () => {

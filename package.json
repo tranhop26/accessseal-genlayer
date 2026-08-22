@@ -16,6 +16,8 @@
     "test:integration": "node scripts/orchestrate.mjs test:integration",
     "test:scripts": "node --import tsx --test tests/scripts/*.test.ts",
     "evidence:publish": "tsx scripts/generate-live-evidence.ts --input work/evidence/live-capture --public frontend/public",
+    "evidence:verify": "tsx scripts/generate-live-evidence.ts --verify --public frontend/public",
+    "evidence:envelopes": "tsx scripts/generate-live-envelopes.ts --public-dir frontend/public --output-dir work/evidence/live-envelopes",
     "proof:collect": "tsx scripts/collect-proof.ts",
     "audit:secrets": "tsx scripts/scan-secrets.ts",
     "verify:deployment": "tsx deploy/999_verify_access_seal.ts",
