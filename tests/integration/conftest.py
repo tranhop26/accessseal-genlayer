@@ -151,7 +151,10 @@ class FixtureSite:
 
 def glsim_startup_error(message: str, log_path: Path) -> RuntimeError:
     try:
-        tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:].strip()
+        with log_path.open("rb") as stream:
+            stream.seek(0, 2)
+            stream.seek(max(0, stream.tell() - 8192))
+            tail = stream.read(8192).decode("utf-8", errors="replace")[-4000:].strip()
     except (OSError, TypeError) as error:
         tail = f"unable to read child log: {error}"
     return RuntimeError(f"{message}\nGLSim child log tail:\n{tail or '<empty>'}")
