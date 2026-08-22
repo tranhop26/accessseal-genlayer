@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -14,4 +14,10 @@ test("root orchestration invokes the frontend package on modern Windows Node", {
   });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /accessseal-frontend@0\.1\.0 typecheck/);
+});
+
+test("direct-test orchestration is native and does not require a WSL distro", () => {
+  const source = readFileSync("scripts/orchestrate.mjs", "utf8");
+  assert.doesNotMatch(source, /wsl\.exe|runDirectTestsInWsl/);
+  assert.match(source, /run\("gltest", \[directory\]\)/);
 });
