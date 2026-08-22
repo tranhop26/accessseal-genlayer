@@ -11,7 +11,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from scripts.glsim_support import scoped_fd0_injection
+from scripts.glsim_support import GENVM_VERSION, scoped_fd0_injection
 
 
 if sys.platform == "win32":
@@ -109,7 +109,9 @@ def contract(direct_deploy: Callable[..., Any], direct_vm: Any) -> ContractHarne
     # direct_vm creates its default sender before the pinned SDK path is installed.
     # That probe can leave the empty compatibility `genlayer` package cached.
     sys.modules.pop("genlayer", None)
-    return ContractHarness(direct_deploy(CONTRACT_PATH), direct_vm)
+    return ContractHarness(
+        direct_deploy(CONTRACT_PATH, sdk_version=GENVM_VERSION), direct_vm
+    )
 
 
 @pytest.fixture

@@ -19,6 +19,7 @@ RUNNER_FINGERPRINT = {
     "validators": 5,
     "chainId": 61127,
 }
+GENVM_VERSION = "v0.2.16"
 LIVE_NETWORK_CHAIN_IDS = {
     "studionet": 61999,
     "testnet_asimov": 4221,

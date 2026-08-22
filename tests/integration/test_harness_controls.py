@@ -8,6 +8,7 @@ import conftest as harness
 from gltest.types import TransactionStatus
 
 from scripts.glsim_support import (
+    GENVM_VERSION,
     GenLayerSettlementReader,
     assert_validator_callbacks,
     decode_binary_web_mocks,
@@ -25,6 +26,14 @@ EXPECTED_FINGERPRINT = {
     "chainId": 61127,
     "sessionId": "expected-session",
 }
+
+
+def test_direct_and_glsim_harnesses_pin_the_reviewed_genvm_release():
+    assert GENVM_VERSION == "v0.2.16"
+    direct_source = Path("tests/direct/conftest.py").read_text(encoding="utf-8")
+    glsim_source = Path("scripts/run-glsim-integration.py").read_text(encoding="utf-8")
+    assert "sdk_version=GENVM_VERSION" in direct_source
+    assert "version=GENVM_VERSION" in glsim_source
 
 
 def test_auto_agree_receipt_without_callback_telemetry_is_rejected():
