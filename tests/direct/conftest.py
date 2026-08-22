@@ -19,13 +19,28 @@ if sys.platform == "win32":
     # Windows forbids that unlink, so keep the SDK behavior and suppress only
     # the expected cleanup error for the exact injection tempfile.
     from gltest.direct import loader as direct_loader
+    from gltest.direct.vm import VMContext
 
     _sdk_inject_message_to_fd0 = direct_loader._inject_message_to_fd0
+    _sdk_cleanup_after_deactivate = VMContext._cleanup_after_deactivate
 
     def _inject_message_to_fd0_on_windows(vm: Any) -> None:
-        scoped_fd0_injection(_sdk_inject_message_to_fd0, vm)
+        paths = scoped_fd0_injection(_sdk_inject_message_to_fd0, vm)
+        pending = getattr(vm, "_accessseal_fd0_temp_paths", [])
+        pending.extend(paths)
+        vm._accessseal_fd0_temp_paths = pending
+
+    def _cleanup_after_deactivate_on_windows(vm: Any) -> None:
+        try:
+            _sdk_cleanup_after_deactivate(vm)
+        finally:
+            paths = getattr(vm, "_accessseal_fd0_temp_paths", [])
+            vm._accessseal_fd0_temp_paths = []
+            for path in paths:
+                Path(path).unlink(missing_ok=True)
 
     direct_loader._inject_message_to_fd0 = _inject_message_to_fd0_on_windows
+    VMContext._cleanup_after_deactivate = _cleanup_after_deactivate_on_windows
 
 
 CONTRACT_PATH = "contracts/access_seal_deploy.py"

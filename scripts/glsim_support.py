@@ -67,12 +67,13 @@ def scoped_fd0_injection(
     *,
     os_module: Any = os,
     tempfile_module: Any = tempfile,
-) -> None:
+) -> tuple[str, ...]:
     """Suppress only Windows' unlink of the exact fd0 injection tempfile."""
 
     original_unlink = os_module.unlink
     original_mkstemp = tempfile_module.mkstemp
     injection_paths: set[str] = set()
+    deferred_cleanup_paths: set[str] = set()
 
     def tracked_mkstemp(*args: Any, **kwargs: Any):
         fd, path = original_mkstemp(*args, **kwargs)
@@ -87,6 +88,7 @@ def scoped_fd0_injection(
                 os_module.path.abspath(path) if hasattr(os_module, "path") else path
             )
             if os_module.name == "nt" and normalized in injection_paths:
+                deferred_cleanup_paths.add(normalized)
                 return
             raise
 
@@ -97,6 +99,7 @@ def scoped_fd0_injection(
     finally:
         os_module.unlink = original_unlink
         tempfile_module.mkstemp = original_mkstemp
+    return tuple(sorted(deferred_cleanup_paths))
 
 
 def read_and_verify_settlement_proof(

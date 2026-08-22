@@ -177,13 +177,14 @@ def test_scoped_fd0_unlink_patch_restores_and_rethrows_unrelated_permission_erro
         with pytest.raises(PermissionError, match="unrelated"):
             fake_os.unlink("unrelated.tmp")
 
-    scoped_fd0_injection(
+    deferred_paths = scoped_fd0_injection(
         injector,
         object(),
         os_module=fake_os,
         tempfile_module=fake_tempfile,
     )
 
+    assert deferred_paths == ("known-fd0.tmp",)
     assert fake_os.unlink == original_unlink
     assert fake_tempfile.mkstemp == original_mkstemp
 
