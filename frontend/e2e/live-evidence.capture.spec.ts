@@ -18,15 +18,20 @@ const outputNames = [
 ] as const;
 const stagingDirectory = resolve("../work/evidence/live-capture.staging");
 
-test.beforeEach(() => {
+function clearCaptureDirectories() {
   rmSync(captureDirectory, { force: true, recursive: true });
   rmSync(stagingDirectory, { force: true, recursive: true });
+}
+
+test.beforeEach(() => {
+  clearCaptureDirectories();
 });
 
 test.afterEach(async ({}, testInfo) => {
   if (testInfo.status !== "passed") {
-    rmSync(stagingDirectory, { force: true, recursive: true });
+    clearCaptureDirectories();
     expect(existsSync(captureDirectory)).toBe(false);
+    expect(existsSync(stagingDirectory)).toBe(false);
   }
 });
 
@@ -366,16 +371,16 @@ test("captures the approved production accessibility evidence without wallet wri
   writeFileSync(resolve(stagingDirectory, "scanner-report.json"), scannerReportJson, "utf8");
   writeFileSync(resolve(stagingDirectory, "critical-flow-trace.json"), criticalFlowTraceJson, "utf8");
   expect(readdirSync(stagingDirectory).sort()).toEqual([...outputNames].sort());
+  for (const name of outputNames)
+    expect(existsSync(resolve(stagingDirectory, name))).toBe(true);
+  expect(statSync(resolve(stagingDirectory, "release.html")).size).toBeLessThan(32_768);
+  expect(statSync(resolve(stagingDirectory, "screenshot.png")).size).toBeLessThan(65_536);
+  for (const name of outputNames.slice(2))
+    expect(statSync(resolve(stagingDirectory, name)).size).toBeLessThan(16_384);
+  expect(outputNames.reduce((total, name) => total + statSync(resolve(stagingDirectory, name)).size, 0)).toBeLessThan(131_072);
   rmSync(captureDirectory, { force: true, recursive: true });
   renameSync(stagingDirectory, captureDirectory);
 
-  for (const name of outputNames) {
-    expect(existsSync(resolve(captureDirectory, name))).toBe(true);
-  }
-  expect(readdirSync(captureDirectory).sort()).toEqual([...outputNames].sort());
-  expect(statSync(resolve(captureDirectory, "release.html")).size).toBeLessThan(32_768);
-  expect(statSync(resolve(captureDirectory, "screenshot.png")).size).toBeLessThan(65_536);
-  for (const name of outputNames.slice(2))
-    expect(statSync(resolve(captureDirectory, name)).size).toBeLessThan(16_384);
-  expect(outputNames.reduce((total, name) => total + statSync(resolve(captureDirectory, name)).size, 0)).toBeLessThan(131_072);
+  expect(existsSync(captureDirectory)).toBe(true);
+  expect(existsSync(stagingDirectory)).toBe(false);
 });
