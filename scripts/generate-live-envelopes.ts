@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
-import { basename, join, parse, resolve, sep } from "node:path";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rmdir, unlink } from "node:fs/promises";
+import { dirname, join, parse, resolve, sep } from "node:path";
 
 import {
   MEDIA_TYPES,
@@ -217,6 +217,12 @@ function envelopeFilename(index: number, evidenceType: string): string {
   return `${String(index + 1).padStart(2, "0")}-${evidenceType.toLowerCase()}.json`;
 }
 
+const OUTPUT_FILENAMES = [
+  ...EVIDENCE_ORDER.map((evidenceType, index) => envelopeFilename(index, evidenceType)),
+  "summary.json",
+] as const;
+const OUTPUT_FILENAME_SET = new Set<string>(OUTPUT_FILENAMES);
+
 async function stat(path: string) {
   try {
     return await lstat(path);
@@ -247,6 +253,101 @@ async function ensureRealDirectory(path: string): Promise<string> {
   return realpath(absolute);
 }
 
+async function inspectSafeOutputDirectory(path: string, requireComplete: boolean): Promise<boolean> {
+  const rootStat = await stat(path);
+  if (rootStat === undefined) return false;
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(`live envelope staging and output roots must be real directories, not symbolic links or junctions: ${path}`);
+  }
+  const names = await readdir(path);
+  for (const name of names) {
+    if (!OUTPUT_FILENAME_SET.has(name)) {
+      throw new Error(`live envelope directory contains a path outside the fixed output allowlist: ${name}`);
+    }
+    const entry = await lstat(join(path, name));
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      throw new Error(`live envelope output must be a regular file, not a symbolic link: ${join(path, name)}`);
+    }
+    if (entry.nlink !== 1) throw new Error(`live envelope output has multiple hard links: ${join(path, name)}`);
+  }
+  if (requireComplete) {
+    const sortedNames = [...names].sort();
+    const expectedNames = [...OUTPUT_FILENAMES].sort();
+    if (canonicalJson(sortedNames) !== canonicalJson(expectedNames)) {
+      throw new Error("live envelope directory is not a complete fixed output set");
+    }
+  }
+  return true;
+}
+
+async function removeSafeOutputDirectory(path: string): Promise<void> {
+  if (!await inspectSafeOutputDirectory(path, false)) return;
+  for (const name of await readdir(path)) await unlink(join(path, name));
+  await rmdir(path);
+}
+
+function envelopeSummary(set: readonly BuiltEnvelope[]) {
+  return set.map((item) => ({
+    evidenceType: item.envelope.evidenceType,
+    action: item.envelope.action,
+    evidenceHash: item.evidenceHash,
+    payloadUri: item.envelope.payloadUri,
+    releaseDigest: item.envelope.releaseDigest,
+  }));
+}
+
+async function validateInstalledEnvelopeDirectory(
+  path: string,
+  verified: VerifiedPublicEvidence,
+): Promise<void> {
+  if (!await inspectSafeOutputDirectory(path, true)) {
+    throw new Error("live envelope directory is missing");
+  }
+  const set: BuiltEnvelope[] = [];
+  for (const [index, evidenceType] of EVIDENCE_ORDER.entries()) {
+    const bytes = await readFile(join(path, envelopeFilename(index, evidenceType)));
+    const canonical = bytes.toString("utf8");
+    let envelope: EvidenceEnvelopeV1;
+    try {
+      envelope = JSON.parse(canonical) as EvidenceEnvelopeV1;
+    } catch {
+      throw new Error("installed live envelope must contain JSON");
+    }
+    if (canonicalJson(envelope) !== canonical) {
+      throw new Error("installed live envelope is not canonical JSON");
+    }
+    set.push({ envelope, canonicalJson: canonical, evidenceHash: hashEvidence(envelope) });
+  }
+  validateLiveEnvelopeSet(set, verified);
+  const expectedSummary = canonicalJson(envelopeSummary(set));
+  if ((await readFile(join(path, "summary.json"), "utf8")) !== expectedSummary) {
+    throw new Error("installed live envelope summary does not match its envelope set");
+  }
+}
+
+async function recoverEnvelopeSwap(
+  outputRoot: string,
+  stagingRoot: string,
+  backupRoot: string,
+  verified: VerifiedPublicEvidence,
+): Promise<void> {
+  const hasOutput = await inspectSafeOutputDirectory(outputRoot, false);
+  if (hasOutput) await validateInstalledEnvelopeDirectory(outputRoot, verified);
+  const hasBackup = await inspectSafeOutputDirectory(backupRoot, false);
+  if (hasBackup) {
+    if (!hasOutput) {
+      await validateInstalledEnvelopeDirectory(backupRoot, verified);
+      await rename(backupRoot, outputRoot);
+    } else {
+      await removeSafeOutputDirectory(backupRoot);
+    }
+  }
+
+  if (await inspectSafeOutputDirectory(stagingRoot, false)) {
+    await removeSafeOutputDirectory(stagingRoot);
+  }
+}
+
 export async function writeLiveEnvelopeSet(
   set: readonly BuiltEnvelope[],
   publicDirectory: string,
@@ -256,15 +357,14 @@ export async function writeLiveEnvelopeSet(
   if (requestedOutput !== resolve("work/evidence/live-envelopes")) {
     throw new Error("live envelopes may only be written under the approved ignored output directory");
   }
-  validateLiveEnvelopeSet(set, await verifyPublicEvidence(publicDirectory));
-  const outputRoot = await ensureRealDirectory(requestedOutput);
-  const summary = set.map((item) => ({
-    evidenceType: item.envelope.evidenceType,
-    action: item.envelope.action,
-    evidenceHash: item.evidenceHash,
-    payloadUri: item.envelope.payloadUri,
-    releaseDigest: item.envelope.releaseDigest,
-  }));
+  const verified = await verifyPublicEvidence(publicDirectory);
+  validateLiveEnvelopeSet(set, verified);
+  const outputParent = await ensureRealDirectory(dirname(requestedOutput));
+  const outputRoot = join(outputParent, "live-envelopes");
+  const stagingRoot = join(outputParent, ".live-envelopes.staging");
+  const backupRoot = join(outputParent, ".live-envelopes.backup");
+  await recoverEnvelopeSwap(outputRoot, stagingRoot, backupRoot, verified);
+  const summary = envelopeSummary(set);
   const writes = [
     ...set.map((item, index) => ({
       path: join(outputRoot, envelopeFilename(index, item.envelope.evidenceType)),
@@ -289,29 +389,37 @@ export async function writeLiveEnvelopeSet(
     if (current.nlink !== 1) throw new Error(`live envelope output has multiple hard links: ${write.path}`);
   }
 
-  const staged: Array<{ temporary: string; destination: string }> = [];
+  await mkdir(stagingRoot);
   try {
     for (const write of writes) {
-      const temporary = join(outputRoot, `.${basename(write.path)}.${process.pid}.${randomUUID()}.tmp`);
-      const handle = await open(temporary, "wx", 0o600);
+      const destination = join(stagingRoot, write.path.slice(outputRoot.length + 1));
+      const handle = await open(destination, "wx", 0o600);
       try {
         await handle.writeFile(write.bytes);
         await handle.sync();
       } finally {
         await handle.close();
       }
-      staged.push({ temporary, destination: write.path });
     }
-    for (const item of staged) {
-      await unlink(item.destination).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-      });
-      await rename(item.temporary, item.destination);
+    await validateInstalledEnvelopeDirectory(stagingRoot, verified);
+    if (await stat(outputRoot) !== undefined) {
+      await rename(outputRoot, backupRoot);
     }
-  } finally {
-    await Promise.all(staged.map((item) => unlink(item.temporary).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-    })));
+    try {
+      await rename(stagingRoot, outputRoot);
+    } catch (error) {
+      if (await stat(outputRoot) === undefined && await stat(backupRoot) !== undefined) {
+        await rename(backupRoot, outputRoot);
+      }
+      throw error;
+    }
+    await removeSafeOutputDirectory(backupRoot);
+  } catch (error) {
+    if (await stat(outputRoot) === undefined && await stat(backupRoot) !== undefined) {
+      await rename(backupRoot, outputRoot);
+    }
+    await removeSafeOutputDirectory(stagingRoot);
+    throw error;
   }
 }
 

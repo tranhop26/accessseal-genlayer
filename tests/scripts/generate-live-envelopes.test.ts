@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { afterEach } from "node:test";
@@ -240,5 +240,140 @@ test("writer rejects a junction at the fixed approved output root", async () => 
   } finally {
     await rm(approved, { recursive: true, force: true });
     if (hadExisting) await rename(backup, approved);
+  }
+});
+
+test("writer recovers an interrupted directory swap without retaining mixed generations", async () => {
+  const approved = resolve("work/evidence/live-envelopes");
+  const parent = resolve("work/evidence");
+  const saved = join(parent, ".live-envelopes.test-saved");
+  const backup = join(parent, ".live-envelopes.backup");
+  const staging = join(parent, ".live-envelopes.staging");
+  const oldSet = await built();
+  const newSet = await buildLiveEnvelopeSet({
+    publicDir,
+    submittedAt,
+    expiresAt,
+    generationId: "ffeeddccbbaa99887766554433221100",
+  });
+  await rm(saved, { recursive: true, force: true });
+  await rm(backup, { recursive: true, force: true });
+  await rm(staging, { recursive: true, force: true });
+  let hadExisting = false;
+  try {
+    await rename(approved, saved);
+    hadExisting = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    await writeLiveEnvelopeSet(oldSet, publicDir, approved);
+    await rename(approved, backup);
+    await mkdir(staging);
+    await writeFile(join(staging, "01-release_manifest.json"), newSet[0]!.canonicalJson);
+
+    await writeLiveEnvelopeSet(newSet, publicDir, approved);
+
+    const names = (await readdir(approved)).sort();
+    assert.deepEqual(names, [
+      "01-release_manifest.json",
+      "02-html_bundle.json",
+      "03-screenshot.json",
+      "04-dom_facts.json",
+      "05-scanner_report.json",
+      "06-critical_flow_trace.json",
+      "summary.json",
+    ]);
+    const envelopes = await Promise.all(names.slice(0, 6).map(async (name) => JSON.parse(await readFile(join(approved, name), "utf8"))));
+    assert.equal(new Set(envelopes.map((envelope) => envelope.nonce.slice(-32))).size, 1);
+    assert.equal(envelopes[0]!.nonce.slice(-32), "ffeeddccbbaa99887766554433221100");
+    await assert.rejects(readdir(backup), /ENOENT/);
+    await assert.rejects(readdir(staging), /ENOENT/);
+  } finally {
+    await rm(approved, { recursive: true, force: true });
+    await rm(backup, { recursive: true, force: true });
+    await rm(staging, { recursive: true, force: true });
+    if (hadExisting) await rename(saved, approved);
+  }
+});
+
+test("writer fails closed on an unsafe abandoned stage and preserves the complete installed set", async () => {
+  const approved = resolve("work/evidence/live-envelopes");
+  const parent = resolve("work/evidence");
+  const saved = join(parent, ".live-envelopes.test-saved");
+  const staging = join(parent, ".live-envelopes.staging");
+  const outside = await mkdtemp(join(tmpdir(), "accessseal-live-envelope-stage-"));
+  roots.push(outside);
+  const oldSet = await built();
+  const newSet = await buildLiveEnvelopeSet({
+    publicDir,
+    submittedAt,
+    expiresAt,
+    generationId: "ffeeddccbbaa99887766554433221100",
+  });
+  await rm(saved, { recursive: true, force: true });
+  await rm(staging, { recursive: true, force: true });
+  let hadExisting = false;
+  try {
+    await rename(approved, saved);
+    hadExisting = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    await writeLiveEnvelopeSet(oldSet, publicDir, approved);
+    const before = await Promise.all((await readdir(approved)).sort().map((name) => readFile(join(approved, name))));
+    await symlink(outside, staging, process.platform === "win32" ? "junction" : "dir");
+
+    await assert.rejects(writeLiveEnvelopeSet(newSet, publicDir, approved), /staging|symbolic|junction|real directory/i);
+
+    const names = (await readdir(approved)).sort();
+    const after = await Promise.all(names.map((name) => readFile(join(approved, name))));
+    assert.equal(after.length, before.length);
+    after.forEach((bytes, index) => assert.deepEqual(bytes, before[index]));
+    assert.deepEqual(await readdir(outside), []);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+    await rm(approved, { recursive: true, force: true });
+    if (hadExisting) await rename(saved, approved);
+  }
+});
+
+test("writer recovers when interruption leaves a complete output beside a partially removed backup", async () => {
+  const approved = resolve("work/evidence/live-envelopes");
+  const parent = resolve("work/evidence");
+  const saved = join(parent, ".live-envelopes.test-saved");
+  const backup = join(parent, ".live-envelopes.backup");
+  const set = await built();
+  await rm(saved, { recursive: true, force: true });
+  await rm(backup, { recursive: true, force: true });
+  let hadExisting = false;
+  try {
+    await rename(approved, saved);
+    hadExisting = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    await writeLiveEnvelopeSet(set, publicDir, approved);
+    await mkdir(backup);
+    await writeFile(join(backup, "01-release_manifest.json"), set[0]!.canonicalJson);
+
+    await writeLiveEnvelopeSet(set, publicDir, approved);
+
+    assert.deepEqual((await readdir(approved)).sort(), [
+      "01-release_manifest.json",
+      "02-html_bundle.json",
+      "03-screenshot.json",
+      "04-dom_facts.json",
+      "05-scanner_report.json",
+      "06-critical_flow_trace.json",
+      "summary.json",
+    ]);
+    await assert.rejects(readdir(backup), /ENOENT/);
+  } finally {
+    await rm(approved, { recursive: true, force: true });
+    await rm(backup, { recursive: true, force: true });
+    if (hadExisting) await rename(saved, approved);
   }
 });
