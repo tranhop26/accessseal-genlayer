@@ -33,6 +33,7 @@ from scripts.glsim_support import (
 
 
 RPC_URL = "http://127.0.0.1:4000/api"
+GLSIM_STARTUP_TIMEOUT_SECONDS = 120
 ORIGIN = "https://fixture.accessseal.local"
 PROFILE_HASH = "0x" + "11" * 32
 FLOWS_HASH = "0x" + "22" * 32
@@ -207,7 +208,7 @@ def glsim_server():
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             env=child_env,
         )
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + GLSIM_STARTUP_TIMEOUT_SECONDS
         while True:
             try:
                 rpc("ping", [])

@@ -36,6 +36,10 @@ def test_direct_and_glsim_harnesses_pin_the_reviewed_genvm_release():
     assert "version=GENVM_VERSION" in glsim_source
 
 
+def test_glsim_cold_start_budget_covers_the_pinned_sdk_download():
+    assert harness.GLSIM_STARTUP_TIMEOUT_SECONDS >= 120
+
+
 def test_auto_agree_receipt_without_callback_telemetry_is_rejected():
     receipt = {
         "status": 7,
@@ -132,7 +136,7 @@ def test_owned_runner_is_terminated_and_log_closed_when_readiness_fails(monkeypa
 
     process = FakeProcess()
     log = FakeLog()
-    clock = iter((0.0, 16.0))
+    clock = iter((0.0, harness.GLSIM_STARTUP_TIMEOUT_SECONDS + 1.0))
     child_env = {}
 
     def fake_popen(*_args, **kwargs):
