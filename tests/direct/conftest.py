@@ -1,10 +1,46 @@
 import json
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
 from gltest.direct import create_address
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from scripts.glsim_support import GENVM_VERSION, scoped_fd0_injection
+
+
+if sys.platform == "win32":
+    # genlayer-test 0.29.2 replaces fd0 with an open tempfile, then unlinks it.
+    # Windows forbids that unlink, so keep the SDK behavior and suppress only
+    # the expected cleanup error for the exact injection tempfile.
+    from gltest.direct import loader as direct_loader
+    from gltest.direct.vm import VMContext
+
+    _sdk_inject_message_to_fd0 = direct_loader._inject_message_to_fd0
+    _sdk_cleanup_after_deactivate = VMContext._cleanup_after_deactivate
+
+    def _inject_message_to_fd0_on_windows(vm: Any) -> None:
+        paths = scoped_fd0_injection(_sdk_inject_message_to_fd0, vm)
+        pending = getattr(vm, "_accessseal_fd0_temp_paths", [])
+        pending.extend(paths)
+        vm._accessseal_fd0_temp_paths = pending
+
+    def _cleanup_after_deactivate_on_windows(vm: Any) -> None:
+        try:
+            _sdk_cleanup_after_deactivate(vm)
+        finally:
+            paths = getattr(vm, "_accessseal_fd0_temp_paths", [])
+            vm._accessseal_fd0_temp_paths = []
+            for path in paths:
+                Path(path).unlink(missing_ok=True)
+
+    direct_loader._inject_message_to_fd0 = _inject_message_to_fd0_on_windows
+    VMContext._cleanup_after_deactivate = _cleanup_after_deactivate_on_windows
 
 
 CONTRACT_PATH = "contracts/access_seal_deploy.py"
@@ -73,7 +109,9 @@ def contract(direct_deploy: Callable[..., Any], direct_vm: Any) -> ContractHarne
     # direct_vm creates its default sender before the pinned SDK path is installed.
     # That probe can leave the empty compatibility `genlayer` package cached.
     sys.modules.pop("genlayer", None)
-    return ContractHarness(direct_deploy(CONTRACT_PATH), direct_vm)
+    return ContractHarness(
+        direct_deploy(CONTRACT_PATH, sdk_version=GENVM_VERSION), direct_vm
+    )
 
 
 @pytest.fixture

@@ -15,7 +15,7 @@ from glsim import server as glsim_server
 from glsim.server import create_app, run_server
 from gltest.direct.sdk_loader import setup_sdk_paths
 
-from glsim_support import RUNNER_FINGERPRINT, scoped_fd0_injection
+from glsim_support import GENVM_VERSION, RUNNER_FINGERPRINT, scoped_fd0_injection
 from glsim_support import decode_binary_web_mocks
 
 
@@ -75,7 +75,7 @@ app = create_app(
     verbose=False,
     seed="accessseal-task-6",
 )
-setup_sdk_paths(Path("contracts/access_seal_deploy.py"))
+setup_sdk_paths(Path("contracts/access_seal_deploy.py"), version=GENVM_VERSION)
 for module_name in list(sys.modules):
     if module_name == "genlayer" or module_name.startswith("genlayer."):
         sys.modules.pop(module_name, None)

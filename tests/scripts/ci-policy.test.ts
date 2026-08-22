@@ -4,15 +4,28 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workflow = await readFile(".github/workflows/ci.yml", "utf8");
+const pythonProject = await readFile("pyproject.toml", "utf8");
+const pythonLock = await readFile("requirements.txt", "utf8");
+const addressPattern =
+  /^[ \t]*NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS:[ \t]*(?:"(0x[0-9a-f]{40})"|'(0x[0-9a-f]{40})'|(0x[0-9a-f]{40}))(?:[ \t]+#.*)?[ \t]*$/m;
+
+function extractAddress(source: string): string | undefined {
+  const match = source.match(addressPattern);
+  return match?.[1] ?? match?.[2] ?? match?.[3];
+}
 
 test("Windows CI supplies a validated non-secret local build configuration", () => {
   const network = workflow.match(/NEXT_PUBLIC_GENLAYER_NETWORK:\s*([^\s]+)/)?.[1];
-  const address = workflow.match(
-    /NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS:\s*([^\s]+)/,
-  )?.[1];
+  const address = extractAddress(workflow);
   assert.equal(network, "localnet");
   assert.match(address ?? "", /^0x[0-9a-f]{40}$/);
   assert.doesNotMatch(address ?? "", /^0x([0-9a-f])\1{39}$/);
+});
+
+test("CI address extraction rejects an unmatched trailing quote", () => {
+  const malformed =
+    "NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS: 0x7216c4492b0266a630265f92c9489e9511086e4a\"\n";
+  assert.equal(extractAddress(malformed), undefined);
 });
 
 test("integration CI has no repository-secret signer dependency", () => {
@@ -20,6 +33,24 @@ test("integration CI has no repository-secret signer dependency", () => {
   assert.doesNotMatch(workflow, /must be configured as a repository secret/i);
   assert.doesNotMatch(workflow, /glsim\s+--no-browser/);
   assert.match(workflow, /run:\s+npm run test:integration/);
+});
+
+test("every CI job that runs root lint installs frontend dependencies first", () => {
+  const jobs = workflow.split(/^  (?=[a-z][a-z0-9_-]*:\s*$)/m).slice(1);
+  const lintJobs = jobs.filter((job) => /^\s*-[ \t]+run:[ \t]+npm run lint\s*$/m.test(job));
+  assert.notEqual(lintJobs.length, 0);
+  for (const job of lintJobs) {
+    const install = job.search(/npm --prefix frontend ci/);
+    const lint = job.search(/^\s*-[ \t]+run:[ \t]+npm run lint\s*$/m);
+    assert(install >= 0 && install < lint, "frontend dependencies must be installed before root lint");
+  }
+});
+
+test("clean CI installs the GLSim HTTP server runtime", () => {
+  assert.match(pythonProject, /^\s*"genlayer-test\[sim\]==0\.29\.2",\s*$/m);
+  assert.match(pythonLock, /^fastapi==0\.138\.1 \\/m);
+  assert.match(pythonLock, /^httpx==\d+\.\d+\.\d+ \\/m);
+  assert.match(pythonLock, /^uvicorn==\d+\.\d+\.\d+ \\/m);
 });
 
 test("public repository excludes generated agent guardrails", () => {

@@ -8,6 +8,7 @@ import conftest as harness
 from gltest.types import TransactionStatus
 
 from scripts.glsim_support import (
+    GENVM_VERSION,
     GenLayerSettlementReader,
     assert_validator_callbacks,
     decode_binary_web_mocks,
@@ -25,6 +26,77 @@ EXPECTED_FINGERPRINT = {
     "chainId": 61127,
     "sessionId": "expected-session",
 }
+
+
+def test_direct_and_glsim_harnesses_pin_the_reviewed_genvm_release():
+    assert GENVM_VERSION == "v0.2.16"
+    direct_source = Path("tests/direct/conftest.py").read_text(encoding="utf-8")
+    glsim_source = Path("scripts/run-glsim-integration.py").read_text(encoding="utf-8")
+    assert "sdk_version=GENVM_VERSION" in direct_source
+    assert "version=GENVM_VERSION" in glsim_source
+
+
+def test_glsim_cold_start_budget_covers_the_pinned_sdk_download():
+    assert harness.GLSIM_STARTUP_TIMEOUT_SECONDS == 120
+
+
+def test_glsim_cold_start_does_not_abort_at_the_old_fifteen_second_deadline(
+    monkeypatch,
+):
+    class FakeProcess:
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout):
+            return 0
+
+        def kill(self):
+            raise AssertionError("graceful termination should have succeeded")
+
+    class FakeLog:
+        def close(self):
+            return None
+
+    process = FakeProcess()
+    child_env = {}
+    readiness_attempts = 0
+
+    def fake_popen(*_args, **kwargs):
+        child_env.update(kwargs["env"])
+        return process
+
+    def fake_rpc(method, _params):
+        nonlocal readiness_attempts
+        if not child_env:
+            raise OSError("no existing server")
+        if method == "ping":
+            readiness_attempts += 1
+            if readiness_attempts == 1:
+                raise OSError("still downloading")
+            return "pong"
+        return {
+            **EXPECTED_FINGERPRINT,
+            "sessionId": child_env["ACCESSSEAL_GLSIM_SESSION_ID"],
+        }
+
+    clock = iter((0.0, 16.0))
+    monkeypatch.setattr(harness, "rpc", fake_rpc)
+    monkeypatch.setattr(harness.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(harness.Path, "mkdir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(harness.Path, "open", lambda *_args, **_kwargs: FakeLog())
+    monkeypatch.setattr(harness.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    fixture = harness.glsim_server.__wrapped__()
+    assert next(fixture)["sessionId"] == child_env["ACCESSSEAL_GLSIM_SESSION_ID"]
+    fixture.close()
+    assert process.terminated is True
 
 
 def test_auto_agree_receipt_without_callback_telemetry_is_rejected():
@@ -123,10 +195,15 @@ def test_owned_runner_is_terminated_and_log_closed_when_readiness_fails(monkeypa
 
     process = FakeProcess()
     log = FakeLog()
-    clock = iter((0.0, 16.0))
+    clock = iter((0.0, harness.GLSIM_STARTUP_TIMEOUT_SECONDS + 1.0))
+    child_env = {}
+
+    def fake_popen(*_args, **kwargs):
+        child_env.update(kwargs["env"])
+        return process
 
     monkeypatch.setattr(harness, "rpc", lambda *_args: (_ for _ in ()).throw(OSError("offline")))
-    monkeypatch.setattr(harness.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(harness.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(harness.Path, "mkdir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(harness.Path, "open", lambda *_args, **_kwargs: log)
     monkeypatch.setattr(harness.time, "monotonic", lambda: next(clock))
@@ -137,6 +214,20 @@ def test_owned_runner_is_terminated_and_log_closed_when_readiness_fails(monkeypa
     assert process.terminated is True
     assert process.waited is True
     assert log.closed is True
+    assert child_env["TEMP"] == child_env["TMP"]
+    assert not Path(child_env["TEMP"]).exists()
+
+
+def test_startup_failure_surfaces_a_bounded_child_log_tail(tmp_path, monkeypatch):
+    log_path = tmp_path / "glsim.log"
+    log_path.write_text("prefix\n" + ("x" * 5000) + "\nROOT CAUSE\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "read_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not read the whole log")))
+
+    error = harness.glsim_startup_error("GLSim exited before becoming ready", log_path)
+
+    assert "ROOT CAUSE" in str(error)
+    assert "prefix" not in str(error)
+    assert len(str(error)) < 4300
 
 
 def test_scoped_fd0_unlink_patch_restores_and_rethrows_unrelated_permission_error():
@@ -165,13 +256,14 @@ def test_scoped_fd0_unlink_patch_restores_and_rethrows_unrelated_permission_erro
         with pytest.raises(PermissionError, match="unrelated"):
             fake_os.unlink("unrelated.tmp")
 
-    scoped_fd0_injection(
+    deferred_paths = scoped_fd0_injection(
         injector,
         object(),
         os_module=fake_os,
         tempfile_module=fake_tempfile,
     )
 
+    assert deferred_paths == ("known-fd0.tmp",)
     assert fake_os.unlink == original_unlink
     assert fake_tempfile.mkstemp == original_mkstemp
 

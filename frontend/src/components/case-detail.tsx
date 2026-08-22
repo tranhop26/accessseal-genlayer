@@ -1,5 +1,12 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type MouseEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useWallet } from "@/providers/wallet-provider";
 import {
   reconcileCase,
@@ -314,6 +321,22 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     canExecuteSettlement,
   });
 
+  function focusSectionAfterPrimaryActivation(
+    event: MouseEvent<HTMLAnchorElement>,
+  ) {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    )
+      return;
+    const target = document.getElementById(event.currentTarget.hash.slice(1));
+    window.requestAnimationFrame(() => target?.focus());
+  }
+
   function acceptTerms() {
     if (wallet.contract && data)
       void run(() => wallet.contract!.acceptTerms(caseId, data.case.termsHash));
@@ -504,16 +527,27 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       <nav className={styles.sectionNav} aria-label="Case sections">
         <ul>
           <li>
-            <a href="#terms">Terms</a>
+            <a href="#terms" onClick={focusSectionAfterPrimaryActivation}>
+              Terms
+            </a>
           </li>
           <li>
-            <a href="#evidence">Evidence</a>
+            <a href="#evidence" onClick={focusSectionAfterPrimaryActivation}>
+              Evidence
+            </a>
           </li>
           <li>
-            <a href="#decision">AI decision</a>
+            <a href="#decision" onClick={focusSectionAfterPrimaryActivation}>
+              AI decision
+            </a>
           </li>
           <li>
-            <a href="#settlement">Settlement</a>
+            <a
+              href="#settlement"
+              onClick={focusSectionAfterPrimaryActivation}
+            >
+              Settlement
+            </a>
           </li>
         </ul>
       </nav>
@@ -521,6 +555,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         className={styles.workflowSection}
         id="terms"
         aria-labelledby="terms-heading"
+        tabIndex={-1}
       >
         <header className={styles.workflowHeading}>
           <span className={styles.stepNumber}>01</span>
@@ -627,6 +662,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         className={styles.workflowSection}
         id="evidence"
         aria-labelledby="evidence-heading"
+        tabIndex={-1}
       >
         <header className={styles.workflowHeading}>
           <span className={styles.stepNumber}>02</span>
@@ -701,6 +737,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         className={styles.workflowSection}
         id="decision"
         aria-labelledby="decision-heading"
+        tabIndex={-1}
       >
         <header className={styles.workflowHeading}>
           <span className={styles.stepNumber}>03</span>
@@ -790,6 +827,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         className={styles.workflowSection}
         id="settlement"
         aria-labelledby="settlement-heading"
+        tabIndex={-1}
       >
         <header className={styles.workflowHeading}>
           <span className={styles.stepNumber}>04</span>

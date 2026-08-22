@@ -24,31 +24,6 @@ function runNode(args) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
-function shellQuote(value) {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-function windowsPathToWsl(value) {
-  const match = /^([A-Za-z]):[\\/](.*)$/.exec(value);
-  if (!match) throw new Error(`Cannot translate Windows path to WSL: ${value}`);
-  return `/mnt/${match[1].toLowerCase()}/${match[2].replaceAll("\\", "/")}`;
-}
-
-function runDirectTestsInWsl(directory) {
-  const env = { ...process.env };
-  env.WSLENV = [env.WSLENV, "GENLAYER_LOCALNET_ACCOUNT_0/u"]
-    .filter(Boolean)
-    .join(":");
-  const command = `cd ${shellQuote(windowsPathToWsl(process.cwd()))} && gltest ${shellQuote(directory)}`;
-  const result = spawnSync("wsl.exe", ["bash", "-lc", command], {
-    env,
-    shell: false,
-    stdio: "inherit",
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) process.exit(result.status ?? 1);
-}
-
 function filesWithExtension(directory, extension) {
   if (!existsSync(directory)) return [];
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -77,12 +52,6 @@ function runContractTests(directory, label) {
   }
   if (!process.env.GENLAYER_LOCALNET_ACCOUNT_0) {
     process.env.GENLAYER_LOCALNET_ACCOUNT_0 = randomBytes(32).toString("hex");
-  }
-  if (windows && directory === "tests/direct") {
-    // Pinned genlayer-test 0.29.2 cannot unlink its open fd0 injection temp
-    // file on Windows. Its supported POSIX path is reproducible under WSL.
-    runDirectTestsInWsl(directory);
-    return;
   }
   run("gltest", [directory]);
 }

@@ -20,6 +20,7 @@ jobs:
           cache: npm
       - run: python -m pip install --require-hashes -r requirements.txt
       - run: npm ci
+      - run: npm --prefix frontend ci
       - run: npm run contract:check
       - run: npm run lint
       - run: npm run test:direct
@@ -30,7 +31,7 @@ jobs:
     env:
       # Ephemeral address proven by the local deployment/readback harness; CI never publishes this build.
       NEXT_PUBLIC_GENLAYER_NETWORK: localnet
-      NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS: 0x7216c4492b0266a630265f92c9489e9511086e4a
+      NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS: "0x7216c4492b0266a630265f92c9489e9511086e4a"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
