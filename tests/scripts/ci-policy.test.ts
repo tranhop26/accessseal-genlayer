@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workflow = await readFile(".github/workflows/ci.yml", "utf8");
+const pythonProject = await readFile("pyproject.toml", "utf8");
+const pythonLock = await readFile("requirements.txt", "utf8");
 const addressPattern =
   /^[ \t]*NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS:[ \t]*(?:"(0x[0-9a-f]{40})"|'(0x[0-9a-f]{40})'|(0x[0-9a-f]{40}))(?:[ \t]+#.*)?[ \t]*$/m;
 
@@ -42,6 +44,11 @@ test("every CI job that runs root lint installs frontend dependencies first", ()
     const lint = job.search(/^\s*-[ \t]+run:[ \t]+npm run lint\s*$/m);
     assert(install >= 0 && install < lint, "frontend dependencies must be installed before root lint");
   }
+});
+
+test("clean CI installs the GLSim HTTP server runtime", () => {
+  assert.match(pythonProject, /^\s*"fastapi==0\.138\.1",\s*$/m);
+  assert.match(pythonLock, /^fastapi==0\.138\.1 \\/m);
 });
 
 test("public repository excludes generated agent guardrails", () => {
