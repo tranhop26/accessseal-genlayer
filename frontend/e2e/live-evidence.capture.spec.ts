@@ -24,6 +24,47 @@ type FlowStep = {
   passed: true;
 };
 
+type ScannerReport = {
+  schemaVersion: "accessseal-scanner-report/1";
+  tool: { name: "axe-core"; version: "4.13.0" };
+  observedAt: number;
+  scans: Array<{ url: string; violations: unknown[]; incomplete: unknown[]; passes: number }>;
+};
+
+type CriticalFlowTrace = {
+  schemaVersion: "accessseal-critical-flow-trace/1";
+  caseId: string;
+  flowsHash: string;
+  observedAt: number;
+  flows: Array<{
+    id: "workspace-navigation" | "create-case-preview" | "case-section-navigation";
+    steps: FlowStep[];
+    passed: true;
+  }>;
+  materialBlockers: Record<
+    "focus-obscured" | "inoperable-critical-flow" | "keyboard-trap" | "meaningless-alt-text" | "missing-form-label",
+    false
+  >;
+};
+
+function exactProductionUrl(page: Page, expected: string): string {
+  const actual = page.url();
+  expect(actual).toBe(expected);
+  const expectedUrl = new URL(expected);
+  const actualUrl = new URL(actual);
+  expect(actualUrl.origin).toBe(LIVE_EVIDENCE_BINDING.subjectOrigin);
+  expect(actualUrl.pathname).toBe(expectedUrl.pathname);
+  expect(actualUrl.search).toBe(expectedUrl.search);
+  expect(actualUrl.hash).toBe(expectedUrl.hash);
+  return actual;
+}
+
+function evidenceUrl(page: Page, expected: string): string {
+  const observed = new URL(exactProductionUrl(page, expected));
+  observed.hash = "";
+  return observed.href;
+}
+
 async function visibleFocus(page: Page): Promise<string> {
   return page.evaluate(() => {
     const element = document.activeElement;
@@ -58,8 +99,16 @@ async function visibleFocus(page: Page): Promise<string> {
 async function assertNoMeaninglessAltText(page: Page): Promise<void> {
   const invalidAlt = await page.locator("img").evaluateAll((images) =>
     images
-      .filter((image) => !image.hasAttribute("alt") || image.getAttribute("alt")?.trim() === "")
-      .filter((image) => image.getAttribute("role") !== "presentation" && !image.getAttribute("aria-hidden"))
+      .filter((image) => {
+        const alt = image.getAttribute("alt")?.trim() || "";
+        const filename = (image.getAttribute("src") || "").split("/").pop()?.replace(/\.[a-z0-9]+$/i, "") || "";
+        const decorative = image.getAttribute("role") === "presentation" || image.getAttribute("aria-hidden") === "true";
+        return !image.hasAttribute("alt") || (!decorative && (
+          alt === "" ||
+          /^(image|photo|picture|graphic|icon|logo|img)([-_ ]?\d+)?$/i.test(alt) ||
+          alt.toLowerCase() === filename.toLowerCase()
+        ));
+      })
       .map((image) => image.getAttribute("src") || "missing src"),
   );
   expect(invalidAlt).toEqual([]);
@@ -110,7 +159,7 @@ async function sanitizedCaseMain(page: Page): Promise<string> {
   });
 }
 
-async function scan(page: Page, url: string) {
+async function scan(page: Page, url: string): Promise<ScannerReport["scans"][number]> {
   const results = await new AxeBuilder({ page }).analyze();
   expect(
     results.violations.filter((item) => ["serious", "critical"].includes(item.impact ?? "")),
@@ -138,25 +187,30 @@ test("captures the approved production accessibility evidence without wallet wri
 
   await page.setViewportSize({ width: 960, height: 540 });
   await page.goto(urls.cases);
+  evidenceUrl(page, urls.cases);
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
   workspaceSteps.push({ action: "Tab", expected: "Skip to content receives focus", actual: await visibleFocus(page), passed: true });
   await page.getByRole("link", { name: "Skip to content" }).press("Enter");
+  const casesUrl = evidenceUrl(page, `${urls.cases}#main-content`);
   await expect(page.locator("main")).toBeFocused();
   workspaceSteps.push({ action: "Enter", expected: "main receives focus", actual: await visibleFocus(page), passed: true });
-  const casesScan = await scan(page, urls.cases);
-  const casesFacts = await domFacts(page, urls.cases);
+  const casesScan = await scan(page, casesUrl);
+  const casesFacts = await domFacts(page, casesUrl);
   expect(casesFacts.labelledControls).toBe(true);
 
   await page.goto(urls.create);
+  evidenceUrl(page, urls.create);
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
   createSteps.push({ action: "Tab", expected: "Skip link receives focus", actual: await visibleFocus(page), passed: true });
   await page.getByRole("link", { name: "Skip to content" }).press("Enter");
+  const createUrl = evidenceUrl(page, `${urls.create}#main-content`);
   await expect(page.locator("main")).toBeFocused();
   createSteps.push({ action: "Enter", expected: "main receives focus", actual: await visibleFocus(page), passed: true });
   const vendor = page.getByLabel("Vendor wallet");
-  await vendor.focus();
+  await page.keyboard.press("Tab");
+  await expect(vendor).toBeFocused();
   await page.keyboard.insertText(LIVE_EVIDENCE_BINDING.vendor);
   createSteps.push({ action: "Type", expected: "labelled Vendor wallet accepts keyboard input", actual: await visibleFocus(page), passed: true });
   await page.keyboard.press("Tab");
@@ -165,43 +219,75 @@ test("captures the approved production accessibility evidence without wallet wri
   await page.keyboard.press("Shift+Tab");
   await expect(vendor).toBeFocused();
   createSteps.push({ action: "Shift+Tab", expected: "focus can leave and return to the labelled field", actual: await visibleFocus(page), passed: true });
-  await page.getByRole("button", { name: "Continue to terms" }).focus();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "Continue to terms" })).toBeFocused();
+  createSteps.push({ action: "Tab", expected: "focus returns to Continue to terms", actual: await visibleFocus(page), passed: true });
   await page.keyboard.press("Enter");
   await expect(page.getByLabel("Website origin")).toBeFocused();
   createSteps.push({ action: "Enter", expected: "terms form receives focus", actual: await visibleFocus(page), passed: true });
-  for (const [label, value] of [
+  const fields = [
     ["Website origin", LIVE_EVIDENCE_BINDING.subjectOrigin],
     ["Accessibility profile hash", LIVE_EVIDENCE_BINDING.profileHash],
     ["Critical flow 1", "Navigate the workspace"],
     ["Critical flow 2", "Preview immutable terms"],
     ["Critical flow 3", "Review case sections"],
     ["Simulated escrow (wei)", "1"],
-  ] as const) {
-    await page.getByLabel(label).focus();
+  ] as const;
+  for (const [index, [label, value]] of fields.entries()) {
+    await expect(page.getByLabel(label)).toBeFocused();
     await page.keyboard.insertText(value);
     createSteps.push({ action: "Type", expected: `${label} has a meaningful label`, actual: await visibleFocus(page), passed: true });
+    await page.keyboard.press("Tab");
+    const next = index + 1 === fields.length
+      ? page.getByRole("button", { name: "Back to parties" })
+      : page.getByLabel(fields[index + 1]![0]);
+    await expect(next).toBeFocused();
+    createSteps.push({ action: "Tab", expected: `focus advances from ${label}`, actual: await visibleFocus(page), passed: true });
   }
-  await page.getByRole("button", { name: "Review locked terms" }).focus();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "Review locked terms" })).toBeFocused();
+  createSteps.push({ action: "Tab", expected: "focus advances from Back to parties to Review locked terms", actual: await visibleFocus(page), passed: true });
   await page.keyboard.press("Enter");
   await expect(page.getByText("Connect the signing buyer wallet before creating a canonical preview.")).toBeVisible();
   createSteps.push({ action: "Enter", expected: "preview requires a wallet and does not send a transaction", actual: "wallet requirement shown", passed: true });
-  const createScan = await scan(page, urls.create);
-  const createFacts = await domFacts(page, urls.create);
+  const createScan = await scan(page, createUrl);
+  const createFacts = await domFacts(page, createUrl);
   expect(createFacts.labelledControls).toBe(true);
 
-  await page.goto(urls.detail);
-  await expect(page.getByText("FUNDED", { exact: true })).toBeVisible();
-  detailSteps.push({ action: "Read", expected: "authoritative lifecycle is FUNDED", actual: "FUNDED", passed: true });
-  const sections = page.getByRole("navigation", { name: "Case sections" });
-  for (const name of ["Terms", "Evidence", "AI decision", "Settlement"] as const) {
-    const link = sections.getByRole("link", { name });
-    await link.focus();
+  const sectionLinks = [
+    ["Terms", "terms"],
+    ["Evidence", "evidence"],
+    ["AI decision", "decision"],
+    ["Settlement", "settlement"],
+  ] as const;
+  for (const [index, [name, targetId]] of sectionLinks.entries()) {
+    await page.goto(urls.detail);
+    evidenceUrl(page, urls.detail);
+    await expect(page.getByText("FUNDED", { exact: true })).toBeVisible();
+    detailSteps.push({ action: "Read", expected: "authoritative lifecycle is FUNDED", actual: "FUNDED", passed: true });
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
     await page.keyboard.press("Enter");
-    await expect(page).toHaveURL(new RegExp(`#${name === "AI decision" ? "decision" : name.toLowerCase()}$`));
-    detailSteps.push({ action: "Enter", expected: `${name} section link updates the document location`, actual: `${name} section location updated; focus is ${await visibleFocus(page)}`, passed: true });
+    evidenceUrl(page, `${urls.detail}#main-content`);
+    await expect(page.locator("main")).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(page.getByRole("list", { name: "Case lifecycle" })).toBeFocused();
+    for (let step = 0; step <= index; step += 1) {
+      await page.keyboard.press("Tab");
+      await expect(page.getByRole("navigation", { name: "Case sections" }).getByRole("link", { name: sectionLinks[step]![0] })).toBeFocused();
+    }
+    await page.keyboard.press("Enter");
+    evidenceUrl(page, `${urls.detail}#${targetId}`);
+    const target = page.locator(`#${targetId}`);
+    await expect(target).toBeFocused();
+    detailSteps.push({ action: "Enter", expected: `${name} link moves focus to its section`, actual: await visibleFocus(page), passed: true });
+    await page.keyboard.press("Tab");
+    await expect(page.locator("body")).not.toBeFocused();
+    detailSteps.push({ action: "Tab", expected: `${name} section focus has an escape path`, actual: await visibleFocus(page), passed: true });
   }
-  const detailScan = await scan(page, urls.detail);
-  const detailFacts = await domFacts(page, urls.detail);
+  const detailUrl = evidenceUrl(page, `${urls.detail}#settlement`);
+  const detailScan = await scan(page, detailUrl);
+  const detailFacts = await domFacts(page, detailUrl);
   expect(detailFacts.labelledControls).toBe(true);
 
   const observedAt = Math.floor(Date.now() / 1000);
@@ -216,7 +302,12 @@ test("captures the approved production accessibility evidence without wallet wri
         detailFacts,
       ],
     },
-    scannerReport: { schemaVersion: "accessseal-scanner-report/1", tool: { name: "axe-core", version: "4.13.0" }, observedAt, scans: [casesScan, createScan, detailScan] },
+    scannerReport: {
+      schemaVersion: "accessseal-scanner-report/1",
+      tool: { name: "axe-core", version: "4.13.0" },
+      observedAt,
+      scans: [casesScan, createScan, detailScan],
+    } satisfies ScannerReport,
     criticalFlowTrace: {
       schemaVersion: "accessseal-critical-flow-trace/1",
       caseId: LIVE_EVIDENCE_BINDING.caseId,
@@ -228,7 +319,7 @@ test("captures the approved production accessibility evidence without wallet wri
         { id: "case-section-navigation", steps: detailSteps, passed: true },
       ],
       materialBlockers: { "focus-obscured": false, "inoperable-critical-flow": false, "keyboard-trap": false, "meaningless-alt-text": false, "missing-form-label": false },
-    },
+    } satisfies CriticalFlowTrace,
   };
   validateLiveCapture(capture);
   const domFactsJson = JSON.stringify(capture.domFacts);
@@ -239,6 +330,7 @@ test("captures the approved production accessibility evidence without wallet wri
   expect(Buffer.byteLength(criticalFlowTraceJson)).toBeLessThan(16_384);
 
   await page.goto(`${urls.detail}#evidence`);
+  evidenceUrl(page, `${urls.detail}#evidence`);
   await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible();
   const releaseHtml = await sanitizedCaseMain(page);
   expect(releaseHtml).not.toMatch(/reconciling|simulated escrow|total deposits|<small>reserved|<small>pending dispatch|<small>dispatched/i);
