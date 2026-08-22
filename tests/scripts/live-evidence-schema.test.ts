@@ -142,6 +142,19 @@ test("rejects individual and aggregate payload size overflow", () => {
   assert.throws(() => buildReleaseManifest(oversizedAggregate), /aggregate|total|size|bytes/i);
 });
 
+test("rejects an aggregate exactly at the exclusive 131072-byte boundary", () => {
+  const exactBoundary = {
+    ...payloadsFromCapture(),
+    HTML_BUNDLE: Buffer.alloc(32768, 0x61),
+    SCREENSHOT: Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(65528, 0x61)]),
+    DOM_FACTS: Buffer.alloc(16384, 0x61),
+    SCANNER_REPORT: Buffer.alloc(8192, 0x61),
+    CRITICAL_FLOW_TRACE: Buffer.alloc(8192, 0x61),
+  };
+  assert.equal(Object.values(exactBoundary).reduce((total, payload) => total + payload.byteLength, 0), 131072);
+  assert.throws(() => buildReleaseManifest(exactBoundary), /aggregate|total|size|bytes/i);
+});
+
 test("rejects a screenshot without the PNG signature", () => {
   const payloads = payloadsFromCapture();
   const changed = { ...payloads, SCREENSHOT: Buffer.from("not-a-png") };

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { afterEach } from "node:test";
@@ -146,4 +146,94 @@ test("rejects a missing capture member without creating the public tree", async 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /scanner-report|missing|ENOENT/i);
   await assert.rejects(readdir(output), /ENOENT/);
+});
+
+test("rejects a redirected output parent without writing outside the public root", async () => {
+  const { root, input, output } = await fixture();
+  const outside = join(root, "outside");
+  await mkdir(output, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, join(output, "evidence"), process.platform === "win32" ? "junction" : "dir");
+
+  const result = run(input, output);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /symbolic|symlink|junction|redirect|unsafe/i);
+  assert.deepEqual(await listedFiles(outside), []);
+});
+
+test("rejects a public root that is itself a symbolic link or junction", async () => {
+  const { root, input, output } = await fixture();
+  const outside = join(root, "outside-root");
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, output, process.platform === "win32" ? "junction" : "dir");
+  const result = run(input, output);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /public root|symbolic|symlink|junction/i);
+  assert.deepEqual(await listedFiles(outside), []);
+});
+
+test("rejects a symbolic link or junction in an ancestor of the requested public root", async () => {
+  const { root, input } = await fixture();
+  const outside = join(root, "outside-ancestor");
+  const redirect = join(root, "redirect");
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, redirect, process.platform === "win32" ? "junction" : "dir");
+  const result = run(input, join(redirect, "nested-public"));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /ancestor|symbolic|symlink|junction|unsafe/i);
+  assert.deepEqual(await listedFiles(outside), []);
+});
+
+test("rejects an existing final destination hard-linked outside the public root", async () => {
+  const { root, input, output } = await fixture();
+  const outside = join(root, "outside-release.html");
+  const destination = join(output, PAYLOAD_SPECS.HTML_BUNDLE.path.slice(1));
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(outside, await readFile(join(input, "release.html")));
+  await link(outside, destination);
+  const result = run(input, output);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /hard link|multiple links|unsafe|immutable/i);
+  assert.deepEqual(await readFile(outside), await readFile(join(input, "release.html")));
+});
+
+test("recovers an abandoned atomic staging file without publishing partial bytes", async () => {
+  const { input, output } = await fixture();
+  const releaseDirectory = dirname(join(output, PAYLOAD_SPECS.HTML_BUNDLE.path.slice(1)));
+  const abandoned = join(releaseDirectory, ".release.html.999999999.00000000-0000-4000-8000-000000000000.tmp");
+  await mkdir(releaseDirectory, { recursive: true });
+  await writeFile(abandoned, "truncated staged bytes");
+
+  const result = run(input, output);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(await listedFiles(output), [
+    ".well-known/accessseal/release-manifest.json",
+    "evidence/releases/2026-08-22-live-v1/critical-flow-trace.json",
+    "evidence/releases/2026-08-22-live-v1/dom-facts.json",
+    "evidence/releases/2026-08-22-live-v1/release.html",
+    "evidence/releases/2026-08-22-live-v1/scanner-report.json",
+    "evidence/releases/2026-08-22-live-v1/screenshot.png",
+  ]);
+  assert.deepEqual(await readFile(join(output, PAYLOAD_SPECS.HTML_BUNDLE.path.slice(1))), await readFile(join(input, "release.html")));
+});
+
+test("recovers a crash after the final hard link was installed but before staging cleanup", async () => {
+  const { input, output } = await fixture();
+  const destination = join(output, PAYLOAD_SPECS.HTML_BUNDLE.path.slice(1));
+  const abandoned = join(dirname(destination), ".release.html.999999999.00000000-0000-4000-8000-000000000000.tmp");
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(abandoned, await readFile(join(input, "release.html")));
+  await link(abandoned, destination);
+
+  const result = run(input, output);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(await listedFiles(output), [
+    ".well-known/accessseal/release-manifest.json",
+    "evidence/releases/2026-08-22-live-v1/critical-flow-trace.json",
+    "evidence/releases/2026-08-22-live-v1/dom-facts.json",
+    "evidence/releases/2026-08-22-live-v1/release.html",
+    "evidence/releases/2026-08-22-live-v1/scanner-report.json",
+    "evidence/releases/2026-08-22-live-v1/screenshot.png",
+  ]);
+  assert.deepEqual(await readFile(destination), await readFile(join(input, "release.html")));
 });

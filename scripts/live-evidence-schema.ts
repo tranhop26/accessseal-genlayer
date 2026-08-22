@@ -245,7 +245,7 @@ function validatePayloadBytes(payloads: EvidencePayloads): void {
     if (evidenceType === "HTML_BUNDLE" && payload.byteLength === 0) throw new Error("HTML_BUNDLE is empty");
     if (evidenceType === "SCREENSHOT" && !Buffer.from(payload).subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) throw new Error("SCREENSHOT has an invalid PNG signature");
   }
-  if (total > MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
+  if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
 }
 
 function validatePayloadSemantics(payloads: EvidencePayloads): void {
@@ -317,7 +317,7 @@ export function verifyEvidenceBundle(manifestBytes: Uint8Array, payloads: Eviden
     total += payload.byteLength;
     if (file.sha256 !== `sha256:${sha256(payload)}`) throw new Error(`payload digest mismatch for ${file.evidenceType}`);
   }
-  if (total > MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
+  if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
   validatePayloadSemantics(payloads);
   return manifest;
 }
