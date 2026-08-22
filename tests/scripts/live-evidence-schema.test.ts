@@ -26,6 +26,43 @@ const blockerCodes = [
   "missing-form-label",
 ] as const;
 
+const flowCheckpoints = {
+  "workspace-navigation": ["skip-focused", "main-focused", "overview-navigation", "cases-navigation"],
+  "create-case-preview": ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"],
+  "case-section-navigation": ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"],
+} as const;
+
+function pageFacts(url: string) {
+  return {
+    url,
+    landmarks: ["navigation:Workspace", "main"],
+    headings: [{ level: 1, name: "Acceptance cases" }],
+    accessibleNames: [{ role: "link", name: "Skip to content" }],
+    formLabels: url.endsWith("/cases/new") ? [
+      "Vendor wallet", "Website origin", "Accessibility profile hash", "Critical flow 1", "Critical flow 2", "Critical flow 3", "Simulated escrow (wei)",
+    ].map((label) => ({ control: "input", label })) : [],
+    imageAlternatives: [],
+    skipLinkTarget: "#main-content",
+    focusableControlOrder: ["link:Skip to content"],
+    disabledStates: [{ name: "New case", disabled: false }],
+  };
+}
+
+function flows() {
+  return Object.entries(flowCheckpoints).map(([id, checkpoints], flowIndex) => ({
+    id,
+    steps: checkpoints.map((checkpoint, stepIndex) => ({
+      checkpoint,
+      page: urls[Math.min(flowIndex, urls.length - 1)],
+      action: stepIndex === 0 ? "Tab" : "Enter",
+      expected: `${checkpoint} expected result`,
+      actual: `${checkpoint} observed result`,
+      passed: true,
+    })),
+    passed: true,
+  }));
+}
+
 function json(value: unknown): Buffer {
   return Buffer.from(canonicalJson(value));
 }
@@ -36,7 +73,7 @@ function makeCapture(overrides: Partial<LiveCapture> = {}): LiveCapture {
     domFacts: {
       schemaVersion: "accessseal-dom-facts/1",
       observedAt,
-      pages: urls.map((url) => ({ url, landmarks: ["main", "navigation"], labelledControls: true })),
+      pages: urls.map(pageFacts),
     },
     scannerReport: {
       schemaVersion: "accessseal-scanner-report/1",
@@ -49,11 +86,7 @@ function makeCapture(overrides: Partial<LiveCapture> = {}): LiveCapture {
       caseId: LIVE_EVIDENCE_BINDING.caseId,
       flowsHash: LIVE_EVIDENCE_BINDING.flowsHash,
       observedAt,
-      flows: ["workspace-navigation", "create-case-preview", "case-section-navigation"].map((id) => ({
-        id,
-        steps: [{ action: "Tab", expected: "visible focus", actual: "visible focus", passed: true }],
-        passed: true,
-      })),
+      flows: flows(),
       materialBlockers: Object.fromEntries(blockerCodes.map((code) => [code, false])),
     },
     ...overrides,
@@ -142,6 +175,19 @@ test("rejects individual and aggregate payload size overflow", () => {
   assert.throws(() => buildReleaseManifest(oversizedAggregate), /aggregate|total|size|bytes/i);
 });
 
+test("rejects an aggregate exactly at the exclusive 131072-byte boundary", () => {
+  const exactBoundary = {
+    ...payloadsFromCapture(),
+    HTML_BUNDLE: Buffer.alloc(32768, 0x61),
+    SCREENSHOT: Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(65528, 0x61)]),
+    DOM_FACTS: Buffer.alloc(16384, 0x61),
+    SCANNER_REPORT: Buffer.alloc(8192, 0x61),
+    CRITICAL_FLOW_TRACE: Buffer.alloc(8192, 0x61),
+  };
+  assert.equal(Object.values(exactBoundary).reduce((total, payload) => total + payload.byteLength, 0), 131072);
+  assert.throws(() => buildReleaseManifest(exactBoundary), /aggregate|total|size|bytes/i);
+});
+
 test("rejects a screenshot without the PNG signature", () => {
   const payloads = payloadsFromCapture();
   const changed = { ...payloads, SCREENSHOT: Buffer.from("not-a-png") };
@@ -153,6 +199,73 @@ test("accepts a complete live capture and rejects missing Axe URL coverage", () 
   const scannerReport = makeCapture().scannerReport as Record<string, unknown>;
   const scans = (scannerReport.scans as unknown[]).slice(1);
   assert.throws(() => validateLiveCapture(makeCapture({ scannerReport: { ...scannerReport, scans } })), /URL|coverage/i);
+});
+
+test("requires the exact three audited pages and complete useful DOM facts", () => {
+  const capture = makeCapture();
+  const domFacts = capture.domFacts as Record<string, unknown>;
+  const pages = domFacts.pages as Array<Record<string, unknown>>;
+  assert.throws(() => validateLiveCapture(makeCapture({ domFacts: { ...domFacts, pages: pages.slice(0, 2) } })), /three|page|URL/i);
+  assert.throws(() => validateLiveCapture(makeCapture({ domFacts: { ...domFacts, pages: [pages[1], pages[0], pages[2]] } })), /order|page|URL/i);
+  assert.throws(() => validateLiveCapture(makeCapture({ domFacts: { ...domFacts, pages: [{ ...pages[0], landmarks: [] }, ...pages.slice(1)] } })), /landmark/i);
+  assert.throws(() => validateLiveCapture(makeCapture({ domFacts: { ...domFacts, pages: [pages[0], { ...pages[1], formLabels: [] }, pages[2]] } })), /form.?label/i);
+  const createLabels = pages[1].formLabels as Array<Record<string, unknown>>;
+  assert.throws(() => validateLiveCapture(makeCapture({ domFacts: { ...domFacts, pages: [pages[0], { ...pages[1], formLabels: createLabels.slice(1) }, pages[2]] } })), /form.?label|Vendor/i);
+  for (const field of ["headings", "accessibleNames", "formLabels", "imageAlternatives", "skipLinkTarget", "focusableControlOrder", "disabledStates"]) {
+    const incomplete = { ...pages[0] };
+    delete incomplete[field];
+    assert.throws(
+      () => validateLiveCapture(makeCapture({ domFacts: { ...domFacts, pages: [incomplete, ...pages.slice(1)] } })),
+      new RegExp(`${field}|field`, "i"),
+      `accepted DOM facts without ${field}`,
+    );
+  }
+});
+
+test("requires exact critical flow IDs, order, checkpoints, and page-bound steps", () => {
+  const capture = makeCapture();
+  const trace = capture.criticalFlowTrace as Record<string, unknown>;
+  const currentFlows = trace.flows as Array<Record<string, unknown>>;
+  assert.throws(() => validateLiveCapture(makeCapture({ criticalFlowTrace: { ...trace, flows: currentFlows.slice(0, 2) } })), /three|flow|order/i);
+  assert.throws(() => validateLiveCapture(makeCapture({ criticalFlowTrace: { ...trace, flows: [currentFlows[1], currentFlows[0], currentFlows[2]] } })), /flow|order/i);
+  const firstSteps = currentFlows[0].steps as Array<Record<string, unknown>>;
+  const incompleteFirst = { ...currentFlows[0], steps: firstSteps.slice(0, -1) };
+  assert.throws(() => validateLiveCapture(makeCapture({ criticalFlowTrace: { ...trace, flows: [incompleteFirst, ...currentFlows.slice(1)] } })), /checkpoint|coverage|step/i);
+  const wrongPageFirst = { ...currentFlows[0], steps: firstSteps.map((step, index) => index === 0 ? { ...step, page: urls[2] } : step) };
+  assert.throws(() => validateLiveCapture(makeCapture({ criticalFlowTrace: { ...trace, flows: [wrongPageFirst, ...currentFlows.slice(1)] } })), /page|URL/i);
+});
+
+test("rejects unsafe or semantically empty HTML snapshots", () => {
+  const base = payloadsFromCapture();
+  for (const html of [
+    "<div><h1>Missing main</h1></div>",
+    "<main><p>Missing heading</p></main>",
+    "<main><h1>   </h1></main>",
+    "<h1>Outside</h1><main><p>Heading is not in main</p></main>",
+    "<main><h1>Case</h1><script>alert(1)</script></main>",
+    "<main><h1>Case</h1><button onclick=\"alert(1)\">Go</button></main>",
+    "<main><h1>Case</h1><a href=\"javascript:alert(1)\">Go</a></main>",
+    "<main><h1>Case</h1><a href=\"java&#x73;cript:alert(1)\">Go</a></main>",
+    "<main><h1>Case</h1><a href=\"java&Tab;script:alert(1)\">Go</a></main>",
+    "<main><h1>Case</h1><a href=\"java&NewLine;script:alert(1)\">Go</a></main>",
+    "<main><h1>Case</h1><p>document.cookie</p></main>",
+    "<main><h1>Case</h1><p>localStorage</p></main>",
+    "<main><h1>Case</h1><p>sessionStorage</p></main>",
+    "<main><h1>Case</h1><p>window.ethereum</p></main>",
+    "<main><h1>Case</h1><p>document&period;cookie</p></main>",
+    "<main><h1>Case</h1><p>window&period;ethereum</p></main>",
+    "<main><h1>Case</h1><p>MetaMask</p></main>",
+    "<main><h1>Case</h1><p>Imported Account</p></main>",
+    "<main><h1>Case</h1><p>private key</p></main>",
+    "<main><h1>Case</h1><p>seed phrase</p></main>",
+    "<main><h1>Case</h1><p>mnemonic</p></main>",
+    "<main><h1>Case</h1><p>browser session</p></main>",
+    "<main><h1>Case</h1><p>Connected wallet</p></main>",
+    "<main><h1>Case</h1><p>Connected <span>wal</span><span>let</span></p></main>",
+  ]) {
+    assert.throws(() => buildReleaseManifest({ ...base, HTML_BUNDLE: Buffer.from(html) }), /HTML|semantic|unsafe|sensitive|main|heading/i, `accepted ${html}`);
+  }
+  assert.doesNotThrow(() => buildReleaseManifest({ ...base, HTML_BUNDLE: Buffer.from(`<main tabindex="-1"><h1>Case summary</h1><code>${LIVE_EVIDENCE_BINDING.contract}</code></main>`) }));
 });
 
 test("rejects same-origin URLs whose literal path is not normalized", () => {

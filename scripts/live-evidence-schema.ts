@@ -11,7 +11,11 @@ export const LIVE_EVIDENCE_BINDING = Object.freeze({
   profileHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   flowsHash: "0xda495da7b1f1f3f0881882ba88190021186496bde65a56fed260393152481e6e",
   releaseId: "2026-08-22-live-v1",
-  sourceCommit: "8854517fcb0a55b92acc0e9ea41bb38efb47f1ed",
+  sourceCommit: "6d3c933e05e1747d7f9b3b3e1d1ac41212165a61",
+  createCaseTransactionHash: "0xcb160381a10aef9864c849524c59507d6c7c94b4a9612ef1ed0dfde83f4a07ac",
+  caseCreatedAt: 1_787_332_650,
+  evidenceDeadlineSeconds: 86_400,
+  hardDeadlineSeconds: 604_800,
 });
 
 export const PAYLOAD_SPECS = Object.freeze({
@@ -61,6 +65,24 @@ const MANIFEST_KEYS = ["caseId", "epoch", "files", "profileHash", "schemaVersion
 const FILE_KEYS = ["evidenceType", "mediaType", "path", "sha256"];
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const MAX_TOTAL_BYTES = 131072;
+const AUDITED_PAGE_URLS = [
+  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`,
+  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`,
+  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`,
+] as const;
+const DOM_PAGE_KEYS = [
+  "accessibleNames", "disabledStates", "focusableControlOrder", "formLabels", "headings",
+  "imageAlternatives", "landmarks", "skipLinkTarget", "url",
+] as const;
+const FLOW_IDS = ["workspace-navigation", "create-case-preview", "case-section-navigation"] as const;
+const CREATE_FORM_LABELS = [
+  "Vendor wallet", "Website origin", "Accessibility profile hash", "Critical flow 1", "Critical flow 2", "Critical flow 3", "Simulated escrow (wei)",
+] as const;
+const FLOW_CHECKPOINTS = Object.freeze({
+  "workspace-navigation": ["skip-focused", "main-focused", "overview-navigation", "cases-navigation"],
+  "create-case-preview": ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"],
+  "case-section-navigation": ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"],
+});
 
 function record(value: unknown, label: string): JsonRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -86,6 +108,27 @@ function integer(value: unknown, label: string): number {
 
 function sameString(value: unknown, expected: string, label: string): void {
   if (value !== expected) throw new Error(`${label} does not match live binding`);
+}
+
+function nonEmptyString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${label} must be a non-empty string`);
+  return value;
+}
+
+function stringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim().length === 0)) {
+    throw new Error(`${label} must be an array of non-empty strings`);
+  }
+  return value;
+}
+
+function objectArray(value: unknown, label: string, keys: readonly string[]): JsonRecord[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return value.map((item, index) => {
+    const parsed = record(item, `${label}[${index}]`);
+    exactKeys(parsed, keys, `${label}[${index}]`);
+    return parsed;
+  });
 }
 
 function validateNormalizedPageUrl(value: unknown): string {
@@ -166,14 +209,49 @@ function validateDomFacts(value: unknown, observedAt: number): string[] {
   sameString(facts.schemaVersion, "accessseal-dom-facts/1", "DOM facts schema version");
   integer(facts.observedAt, "DOM facts observedAt");
   if (facts.observedAt !== observedAt) throw new Error("DOM facts timestamp does not match capture");
-  if (!Array.isArray(facts.pages) || facts.pages.length === 0) throw new Error("DOM facts pages are required");
+  if (!Array.isArray(facts.pages) || facts.pages.length !== AUDITED_PAGE_URLS.length) throw new Error("DOM facts must contain exactly three audited pages");
   const urls: string[] = [];
-  for (const pageValue of facts.pages) {
+  for (const [index, pageValue] of facts.pages.entries()) {
     const page = record(pageValue, "DOM facts page");
+    exactKeys(page, DOM_PAGE_KEYS, "DOM facts page");
     const url = validateNormalizedPageUrl(page.url);
-    if (!Array.isArray(page.landmarks) || page.landmarks.some((item) => typeof item !== "string")) throw new Error("DOM facts landmarks are invalid");
-    if (typeof page.labelledControls !== "boolean") throw new Error("DOM facts labelledControls is invalid");
-    if (urls.includes(url)) throw new Error("DOM facts page URLs must be unique");
+    sameString(url, AUDITED_PAGE_URLS[index]!, "DOM facts page URL/order");
+    if (stringArray(page.landmarks, "DOM facts landmarks").length === 0) throw new Error("DOM facts landmarks are required");
+    const headings = objectArray(page.headings, "DOM facts headings", ["level", "name"]);
+    if (headings.length === 0) throw new Error("DOM facts headings are required");
+    for (const heading of headings) {
+      const level = integer(heading.level, "DOM facts heading level");
+      if (level < 1 || level > 6) throw new Error("DOM facts heading level is invalid");
+      nonEmptyString(heading.name, "DOM facts heading name");
+    }
+    const accessibleNames = objectArray(page.accessibleNames, "DOM facts accessibleNames", ["name", "role"]);
+    if (accessibleNames.length === 0) throw new Error("DOM facts accessibleNames are required");
+    for (const named of accessibleNames) {
+      nonEmptyString(named.role, "DOM facts accessible role");
+      nonEmptyString(named.name, "DOM facts accessible name");
+    }
+    const formLabels = objectArray(page.formLabels, "DOM facts formLabels", ["control", "label"]);
+    for (const labelled of formLabels) {
+      nonEmptyString(labelled.control, "DOM facts labelled control");
+      nonEmptyString(labelled.label, "DOM facts form label");
+    }
+    if (url === AUDITED_PAGE_URLS[1]) {
+      const observedLabels = new Set(formLabels.map((item) => item.label));
+      if (CREATE_FORM_LABELS.some((label) => !observedLabels.has(label))) throw new Error("DOM facts formLabels omit a required Create Case label");
+    }
+    for (const image of objectArray(page.imageAlternatives, "DOM facts imageAlternatives", ["alt", "decorative", "src"])) {
+      nonEmptyString(image.src, "DOM facts image source");
+      if (typeof image.alt !== "string" || typeof image.decorative !== "boolean") throw new Error("DOM facts image alternative is invalid");
+      if (!image.decorative && image.alt.trim().length === 0) throw new Error("DOM facts image alternative is missing");
+    }
+    sameString(page.skipLinkTarget, "#main-content", "DOM facts skipLinkTarget");
+    if (stringArray(page.focusableControlOrder, "DOM facts focusableControlOrder").length === 0) throw new Error("DOM facts focusableControlOrder is required");
+    const disabledStates = objectArray(page.disabledStates, "DOM facts disabledStates", ["disabled", "name"]);
+    if (disabledStates.length === 0) throw new Error("DOM facts disabledStates are required");
+    for (const state of disabledStates) {
+      nonEmptyString(state.name, "DOM facts disabled control name");
+      if (typeof state.disabled !== "boolean") throw new Error("DOM facts disabled state is invalid");
+    }
     urls.push(url);
   }
   return urls;
@@ -211,18 +289,60 @@ function validateFlowTrace(value: unknown, observedAt: number): void {
   sameString(trace.flowsHash, LIVE_EVIDENCE_BINDING.flowsHash, "critical-flow hash");
   integer(trace.observedAt, "critical-flow observedAt");
   if (trace.observedAt !== observedAt) throw new Error("critical-flow timestamp does not match capture");
-  if (!Array.isArray(trace.flows) || trace.flows.length === 0) throw new Error("critical-flow flows are required");
-  for (const flowValue of trace.flows) {
+  if (!Array.isArray(trace.flows) || trace.flows.length !== FLOW_IDS.length) throw new Error("critical-flow trace must contain exactly three flows");
+  for (const [flowIndex, flowValue] of trace.flows.entries()) {
     const flow = record(flowValue, "critical flow");
-    if (typeof flow.id !== "string" || flow.id.length === 0 || !Array.isArray(flow.steps) || flow.steps.length === 0 || flow.passed !== true) throw new Error("critical-flow failed flow");
-    for (const stepValue of flow.steps) {
+    const flowId = FLOW_IDS[flowIndex]!;
+    sameString(flow.id, flowId, "critical-flow ID/order");
+    const expectedCheckpoints = FLOW_CHECKPOINTS[flowId];
+    if (!Array.isArray(flow.steps) || flow.steps.length !== expectedCheckpoints.length || flow.passed !== true) throw new Error("critical-flow checkpoint coverage is incomplete");
+    for (const [stepIndex, stepValue] of flow.steps.entries()) {
       const step = record(stepValue, "critical-flow step");
-      if (typeof step.action !== "string" || typeof step.expected !== "string" || typeof step.actual !== "string" || step.passed !== true) throw new Error("critical-flow failed step");
+      sameString(step.checkpoint, expectedCheckpoints[stepIndex]!, "critical-flow checkpoint/order");
+      const stepUrl = validateNormalizedPageUrl(step.page);
+      sameString(stepUrl, AUDITED_PAGE_URLS[flowIndex]!, "critical-flow page URL");
+      nonEmptyString(step.action, "critical-flow action");
+      nonEmptyString(step.expected, "critical-flow expected result");
+      nonEmptyString(step.actual, "critical-flow actual result");
+      if (step.passed !== true) throw new Error("critical-flow failed step");
     }
   }
   const blockers = record(trace.materialBlockers, "material blockers");
   exactKeys(blockers, BLOCKER_CODES, "material blockers");
   for (const code of BLOCKER_CODES) if (blockers[code] !== false) throw new Error(`material blocker: ${code}`);
+}
+
+function validateHtmlSnapshot(payload: Uint8Array): void {
+  const html = Buffer.from(payload).toString("utf8");
+  const main = html.match(/<main\b[^>]*>([\s\S]*)<\/main\s*>/i);
+  if (!main) throw new Error("HTML snapshot requires a semantic main element");
+  const heading = main[1]!.match(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]\s*>/i);
+  if (!heading || heading[1]!.replace(/<[^>]*>/g, "").trim().length === 0) throw new Error("HTML snapshot requires a named semantic heading inside main");
+  const safetyText = html
+    .replace(/&#(\d+);?/g, (_match, decimal: string) => String.fromCodePoint(Number.parseInt(decimal, 10)))
+    .replace(/&#x([0-9a-f]+);?/gi, (_match, hexadecimal: string) => String.fromCodePoint(Number.parseInt(hexadecimal, 16)))
+    .replace(/&(colon|period|tab|newline);/gi, (_match, name: string) => ({ colon: ":", period: ".", tab: "\t", newline: "\n" })[name.toLowerCase()]!);
+  const renderedText = safetyText.replace(/<[^>]*>/g, "");
+  const hasJavascriptUrl = [...safetyText.matchAll(/\b(?:href|src|action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)]
+    .some((match) => (match[1] ?? match[2] ?? match[3] ?? "").replace(/[\t\n\f\r]/g, "").trimStart().toLowerCase().startsWith("javascript:"));
+  const unsafe = [
+    /<script\b/i,
+    /\son[a-z]+\s*=/i,
+    /\b(?:href|src)\s*=\s*["']?\s*javascript:/i,
+    /\bdocument\.cookie\b/i,
+    /\b(?:localStorage|sessionStorage)\b/i,
+    /\bwindow\.ethereum\b/i,
+    /\bMetaMask\b/i,
+    /\bImported Account\b/i,
+    /\bprivate[- ]key\b/i,
+    /\bseed(?: phrase)?\b/i,
+    /\bmnemonic\b/i,
+    /\bwallet\b/i,
+    /\baccount\b/i,
+    /\bsession\b/i,
+    /\bdata-wallet(?:-[a-z0-9_-]+)?\s*=/i,
+  ];
+  if (hasJavascriptUrl || unsafe.some((pattern) => pattern.test(safetyText) || pattern.test(renderedText))) throw new Error("HTML snapshot contains unsafe or sensitive state");
 }
 
 export function validateLiveCapture(capture: LiveCapture): void {
@@ -245,11 +365,12 @@ function validatePayloadBytes(payloads: EvidencePayloads): void {
     if (evidenceType === "HTML_BUNDLE" && payload.byteLength === 0) throw new Error("HTML_BUNDLE is empty");
     if (evidenceType === "SCREENSHOT" && !Buffer.from(payload).subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) throw new Error("SCREENSHOT has an invalid PNG signature");
   }
-  if (total > MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
+  if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
 }
 
 function validatePayloadSemantics(payloads: EvidencePayloads): void {
   const value = payloads as unknown as Record<string, Uint8Array>;
+  validateHtmlSnapshot(value.HTML_BUNDLE);
   const domFacts = jsonPayload(value.DOM_FACTS, "DOM facts");
   const scannerReport = jsonPayload(value.SCANNER_REPORT, "scanner report");
   const criticalFlowTrace = jsonPayload(value.CRITICAL_FLOW_TRACE, "critical-flow trace");
@@ -317,7 +438,7 @@ export function verifyEvidenceBundle(manifestBytes: Uint8Array, payloads: Eviden
     total += payload.byteLength;
     if (file.sha256 !== `sha256:${sha256(payload)}`) throw new Error(`payload digest mismatch for ${file.evidenceType}`);
   }
-  if (total > MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
+  if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
   validatePayloadSemantics(payloads);
   return manifest;
 }
