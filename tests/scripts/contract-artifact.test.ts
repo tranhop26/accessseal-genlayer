@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
@@ -25,6 +25,40 @@ function run(root: string, mode: "--write" | "--check") {
   return spawnSync("python", [builder, "--repo-root", root, mode], {
     encoding: "utf8",
   });
+}
+
+function runGit(root: string, args: string[]) {
+  return spawnSync("git", args, { cwd: root, encoding: "utf8" });
+}
+
+async function ciCheckoutFixture(): Promise<string> {
+  const source = await fixture();
+  assert.equal(run(source, "--write").status, 0);
+
+  try {
+    await access(resolve(".gitattributes"));
+    await copyFile(resolve(".gitattributes"), join(source, ".gitattributes"));
+  } catch {
+    // The fixture mirrors the repository as it exists, including no attributes file.
+  }
+
+  assert.equal(runGit(source, ["init", "--quiet"]).status, 0);
+  assert.equal(runGit(source, ["add", "."]).status, 0);
+  const commit = runGit(source, [
+    "-c", "user.name=AccessSeal Test",
+    "-c", "user.email=accessseal-test@example.invalid",
+    "commit",
+    "--quiet",
+    "-m",
+    "fixture",
+  ]);
+  assert.equal(commit.status, 0, commit.stderr);
+
+  const checkout = await mkdtemp(join(tmpdir(), "accessseal-ci-checkout-"));
+  fixtures.push(checkout);
+  const clone = runGit(source, ["-c", "core.autocrlf=true", "clone", "--quiet", source, checkout]);
+  assert.equal(clone.status, 0, clone.stderr);
+  return checkout;
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -74,6 +108,12 @@ test("check rejects missing and stale artifacts without rewriting them", async (
 
   await unlink(artifactPath);
   assert.match(run(root, "--check").stderr, /missing/i);
+});
+
+test("CI checkout with autocrlf preserves the tracked deployment artifact bytes", async () => {
+  const checkout = await ciCheckoutFixture();
+  const result = run(checkout, "--check");
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("refuses an artifact whose encoded source exceeds 48000 bytes", async () => {
