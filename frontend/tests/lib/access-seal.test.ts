@@ -246,4 +246,26 @@ describe("AccessSeal contract adapter", () => {
     expect(matchesExactUserError(wrapped, "review does not exist")).toBe(false);
     expect(matchesExactUserError(new Error("RPC offline"), "evidence epoch does not exist")).toBe(false);
   });
+
+  it("decodes the exact Bradbury GenVM UserError payload without accepting another error", () => {
+    const rpcError = Object.assign(new Error("Missing or invalid parameters."), {
+      cause: {
+        code: -32000,
+        data: "1604646174618402736574746c656d656e7420696e74656e7420646f6573206e6f74206578697374046b696e644c557365724572726f72",
+      },
+    });
+    expect(matchesExactUserError(rpcError, "settlement intent does not exist")).toBe(true);
+    expect(matchesExactUserError(rpcError, "review does not exist")).toBe(false);
+    expect(
+      matchesExactUserError(
+        Object.assign(new Error("Missing or invalid parameters."), {
+          cause: {
+            code: -32000,
+            data: "1604646174618402736574746c656d656e7420696e74656e7420646f6573206e6f74206578697374046b696e644c56616c75654572726f72",
+          },
+        }),
+        "settlement intent does not exist",
+      ),
+    ).toBe(false);
+  });
 });

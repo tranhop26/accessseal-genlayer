@@ -6,6 +6,7 @@ import type {
   ReviewAttempt,
   Settlement,
 } from "./access-seal";
+import { matchesExactUserError } from "./access-seal";
 
 export type TransactionPhase =
   | "PENDING"
@@ -169,6 +170,8 @@ async function optional<T>(operation: () => Promise<T>): Promise<T | null> {
       "review finality proof does not exist",
       "settlement intent does not exist",
     ]);
+    if ([...absent].some((message) => matchesExactUserError(error, message)))
+      return null;
     let current: unknown = error;
     const seen = new Set<unknown>();
     while (current && !seen.has(current)) {

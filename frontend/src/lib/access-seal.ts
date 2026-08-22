@@ -1,4 +1,5 @@
-import { keccak256, stringToHex } from "viem";
+import { abi } from "genlayer-js";
+import { hexToBytes, keccak256, stringToHex } from "viem";
 import type { PublicNetwork, SdkNetwork } from "./config";
 import { canonicalizeEvidence, type EvidenceEnvelopeV1 } from "./evidence";
 
@@ -233,6 +234,7 @@ export function matchesExactUserError(
   const seen = new Set<unknown>();
   while (current && !seen.has(current)) {
     seen.add(current);
+    if (decodeGenVmUserError(current) === expected) return true;
     if (current instanceof Error) {
       if (current.message === expected) return true;
       const match = current.message.match(
@@ -245,6 +247,21 @@ export function matchesExactUserError(
     else break;
   }
   return false;
+}
+
+function decodeGenVmUserError(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || !("data" in value)) return;
+  const data = (value as { data?: unknown }).data;
+  if (typeof data !== "string" || !/^[0-9a-f]+$/i.test(data) || data.length % 2)
+    return;
+  try {
+    const decoded = abi.calldata.decode(hexToBytes(`0x${data}`));
+    if (!(decoded instanceof Map) || decoded.get("kind") !== "UserError") return;
+    const message = decoded.get("data");
+    return typeof message === "string" ? message : undefined;
+  } catch {
+    return;
+  }
 }
 function parseReview(value: unknown): ReviewRecord {
   const r = object(value, "Review");
