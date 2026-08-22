@@ -8,7 +8,7 @@ const workflow = await readFile(".github/workflows/ci.yml", "utf8");
 test("Windows CI supplies a validated non-secret local build configuration", () => {
   const network = workflow.match(/NEXT_PUBLIC_GENLAYER_NETWORK:\s*([^\s]+)/)?.[1];
   const address = workflow.match(
-    /NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS:\s*([^\s]+)/,
+    /NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS:\s*["']?([^\s"']+)["']?/,
   )?.[1];
   assert.equal(network, "localnet");
   assert.match(address ?? "", /^0x[0-9a-f]{40}$/);
