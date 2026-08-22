@@ -46,7 +46,7 @@ async function built(): Promise<BuiltEnvelope[]> {
 
 test("verifies the already-published bundle without trusting cached metadata", async () => {
   const verified = await verifyPublicEvidence(publicDir);
-  assert.equal(verified.releaseDigest, "sha256:dfc8b0b84986a4f06e8fc1ac92f298ea79b42bdaea95a13e021d9dd5111d46df");
+  assert.equal(verified.releaseDigest, "sha256:68bc88c4e7fa15c8e2043d520a5e1e65db9c7a3e5afc9bf155f46ee8d42300e8");
   assert.equal(verified.manifest.files.length, 5);
   assert.equal(Buffer.from(verified.payloads.DOM_FACTS).equals(await readFile(join(publicDir, PAYLOAD_SPECS.DOM_FACTS.path.slice(1)))), true);
 
@@ -101,12 +101,13 @@ test("builds one OPEN_RELEASE and five canonical APPEND_EVIDENCE envelopes", asy
 });
 
 test("rejects invalid freshness and expiry domains", async () => {
+  const domFacts = JSON.parse(await readFile(join(publicDir, PAYLOAD_SPECS.DOM_FACTS.path.slice(1)), "utf8")) as { observedAt: number };
   await assert.rejects(
     buildLiveEnvelopeSet({ publicDir, submittedAt: 1_787_376_364, expiresAt, generationId }),
     /submitted.*observed/i,
   );
   await assert.rejects(
-    buildLiveEnvelopeSet({ publicDir, submittedAt: 1_787_462_766, expiresAt, generationId }),
+    buildLiveEnvelopeSet({ publicDir, submittedAt: domFacts.observedAt + 86_401, expiresAt, generationId }),
     /86.?400|stale/i,
   );
   await assert.rejects(

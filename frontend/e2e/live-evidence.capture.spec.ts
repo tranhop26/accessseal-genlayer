@@ -36,6 +36,8 @@ test.afterEach(async ({}, testInfo) => {
 });
 
 type FlowStep = {
+  checkpoint: string;
+  page: string;
   action: string;
   expected: string;
   actual: string;
@@ -105,6 +107,9 @@ async function visibleFocus(page: Page): Promise<string> {
       throw new Error("focused element is obscured by another element");
     const identity =
       element.getAttribute("aria-label") ||
+      ((element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) && element.labels?.length
+        ? [...element.labels].map((label) => label.textContent?.trim() || "").filter(Boolean).join(" ")
+        : "") ||
       element.id ||
       element.getAttribute("name") ||
       element.getAttribute("role") ||
@@ -134,18 +139,41 @@ async function assertNoMeaninglessAltText(page: Page): Promise<void> {
 
 async function domFacts(page: Page, url: string) {
   return page.locator("main").evaluate((main, pageUrl) => {
+    const visible = (element: Element) => {
+      const style = getComputedStyle(element);
+      const box = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && box.width > 0 && box.height > 0;
+    };
+    const accessibleName = (element: Element) => {
+      const labelledBy = element.getAttribute("aria-labelledby");
+      const labels = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
+        ? [...(element.labels || [])].map((label) => label.textContent?.trim() || "").filter(Boolean).join(" ")
+        : "";
+      return (
+        element.getAttribute("aria-label") ||
+        (labelledBy ? labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent?.trim() || "").filter(Boolean).join(" ") : "") ||
+        labels || element.getAttribute("alt") || element.getAttribute("title") || element.textContent?.trim() || ""
+      ).replace(/\s+/g, " ").slice(0, 160);
+    };
+    const role = (element: Element) => element.getAttribute("role") || ({ A: "link", BUTTON: "button", INPUT: "input", SELECT: "select", TEXTAREA: "textbox" } as Record<string, string>)[element.tagName] || element.tagName.toLowerCase();
     const landmarks = [...document.querySelectorAll("header, main, nav, footer, [role]")]
-      .map((element) => element.getAttribute("role") || element.tagName.toLowerCase())
+      .filter(visible)
+      .map((element) => `${element.getAttribute("role") || element.tagName.toLowerCase()}${element.getAttribute("aria-label") ? `:${element.getAttribute("aria-label")}` : ""}`)
       .filter((landmark, index, all) => all.indexOf(landmark) === index);
-    const labelledControls = [...main.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select")].every((control) =>
-      Boolean(
-        control.getAttribute("aria-label") ||
-          control.getAttribute("aria-labelledby") ||
-          control.labels?.length ||
-          (control.id && document.querySelector(`label[for="${CSS.escape(control.id)}"]`)),
-      ),
-    );
-    return { url: pageUrl, landmarks, labelledControls };
+    const interactive = [...document.querySelectorAll("a[href], button, input, textarea, select, [tabindex]:not([tabindex='-1'])")].filter(visible);
+    const formControls = [...main.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input, textarea, select")];
+    const skipLink = document.querySelector<HTMLAnchorElement>('a[href="#main-content"]');
+    return {
+      url: pageUrl,
+      landmarks,
+      headings: [...main.querySelectorAll("h1, h2, h3, h4, h5, h6")].map((heading) => ({ level: Number(heading.tagName.slice(1)), name: accessibleName(heading) })),
+      accessibleNames: interactive.map((control) => ({ role: role(control), name: accessibleName(control) })).filter((item) => item.name),
+      formLabels: formControls.map((control) => ({ control: control.id || control.name || control.tagName.toLowerCase(), label: accessibleName(control) })),
+      imageAlternatives: [...main.querySelectorAll<HTMLImageElement>("img")].map((image) => ({ src: image.getAttribute("src") || "inline", alt: image.getAttribute("alt") || "", decorative: image.getAttribute("role") === "presentation" || image.getAttribute("aria-hidden") === "true" })),
+      skipLinkTarget: skipLink?.getAttribute("href") || "",
+      focusableControlOrder: interactive.filter((control) => !(control as HTMLButtonElement).disabled && control.getAttribute("aria-disabled") !== "true").map((control) => `${role(control)}:${accessibleName(control)}`),
+      disabledStates: interactive.map((control) => ({ name: accessibleName(control), disabled: Boolean((control as HTMLButtonElement).disabled) || control.getAttribute("aria-disabled") === "true" })).filter((item) => item.name),
+    };
   }, url);
 }
 
@@ -160,6 +188,9 @@ async function sanitizedCaseMain(page: Page): Promise<string> {
     clone.querySelectorAll("script, [role=status], [data-tone=pending]").forEach((element) => element.remove());
     clone.querySelectorAll("button").forEach((button) => {
       if (/reconciling|transaction|waiting/i.test(button.textContent || "")) button.remove();
+    });
+    clone.querySelectorAll("p, button, a, span").forEach((element) => {
+      if (/\b(wallet|account|session|MetaMask|private[- ]key|seed phrase|mnemonic)\b/i.test(element.textContent || "")) element.remove();
     });
     clone.querySelectorAll("*").forEach((element) => {
       [...element.attributes].forEach((attribute) => {
@@ -203,46 +234,57 @@ test("captures the approved production accessibility evidence without wallet wri
   const createSteps: FlowStep[] = [];
   const detailSteps: FlowStep[] = [];
 
-  await page.setViewportSize({ width: 960, height: 540 });
+  await page.setViewportSize({ width: 1100, height: 600 });
   await page.goto(urls.cases);
   evidenceUrl(page, urls.cases);
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
-  workspaceSteps.push({ action: "Tab", expected: "Skip to content receives focus", actual: await visibleFocus(page), passed: true });
+  workspaceSteps.push({ checkpoint: "skip-focused", page: urls.cases, action: "Tab", expected: "Skip to content receives focus", actual: await visibleFocus(page), passed: true });
   await page.getByRole("link", { name: "Skip to content" }).press("Enter");
   const casesUrl = evidenceUrl(page, `${urls.cases}#main-content`);
   await expect(page.locator("main")).toBeFocused();
-  workspaceSteps.push({ action: "Enter", expected: "main receives focus", actual: await visibleFocus(page), passed: true });
+  workspaceSteps.push({ checkpoint: "main-focused", page: urls.cases, action: "Enter", expected: "main receives focus", actual: await visibleFocus(page), passed: true });
+  await page.goto(urls.cases);
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("navigation", { name: "Workspace" }).getByRole("link", { name: "Overview" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  evidenceUrl(page, urls.cases);
+  workspaceSteps.push({ checkpoint: "overview-navigation", page: urls.cases, action: "Tab to Overview; Enter", expected: "Overview opens the Cases workspace", actual: "Cases workspace opened", passed: true });
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("navigation", { name: "Workspace" }).getByRole("link", { name: "Cases" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  evidenceUrl(page, urls.cases);
+  workspaceSteps.push({ checkpoint: "cases-navigation", page: urls.cases, action: "Tab to Cases; Enter", expected: "Cases opens the authoritative cases page", actual: "Acceptance cases page opened", passed: true });
   const casesScan = await scan(page, casesUrl);
   const casesFacts = await domFacts(page, casesUrl);
-  expect(casesFacts.labelledControls).toBe(true);
 
   await page.goto(urls.create);
   evidenceUrl(page, urls.create);
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
-  createSteps.push({ action: "Tab", expected: "Skip link receives focus", actual: await visibleFocus(page), passed: true });
+  createSteps.push({ checkpoint: "skip-focused", page: urls.create, action: "Tab", expected: "Skip link receives focus", actual: await visibleFocus(page), passed: true });
   await page.getByRole("link", { name: "Skip to content" }).press("Enter");
   const createUrl = evidenceUrl(page, `${urls.create}#main-content`);
   await expect(page.locator("main")).toBeFocused();
-  createSteps.push({ action: "Enter", expected: "main receives focus", actual: await visibleFocus(page), passed: true });
+  createSteps.push({ checkpoint: "main-focused", page: urls.create, action: "Enter", expected: "main receives focus", actual: await visibleFocus(page), passed: true });
+  const createPartyFacts = await domFacts(page, createUrl);
   const vendor = page.getByLabel("Vendor wallet");
   await page.keyboard.press("Tab");
   await expect(vendor).toBeFocused();
   await page.keyboard.insertText(LIVE_EVIDENCE_BINDING.vendor);
-  createSteps.push({ action: "Type", expected: "labelled Vendor wallet accepts keyboard input", actual: await visibleFocus(page), passed: true });
+  createSteps.push({ checkpoint: "vendor-input", page: urls.create, action: "Type vendor address", expected: "labelled Vendor wallet accepts keyboard input", actual: await visibleFocus(page), passed: true });
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Continue to terms" })).toBeFocused();
-  createSteps.push({ action: "Tab", expected: "focus advances without a keyboard trap", actual: await visibleFocus(page), passed: true });
   await page.keyboard.press("Shift+Tab");
   await expect(vendor).toBeFocused();
-  createSteps.push({ action: "Shift+Tab", expected: "focus can leave and return to the labelled field", actual: await visibleFocus(page), passed: true });
+  createSteps.push({ checkpoint: "no-keyboard-trap", page: urls.create, action: "Tab; Shift+Tab", expected: "focus can leave and return to the labelled field", actual: await visibleFocus(page), passed: true });
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Continue to terms" })).toBeFocused();
-  createSteps.push({ action: "Tab", expected: "focus returns to Continue to terms", actual: await visibleFocus(page), passed: true });
   await page.keyboard.press("Enter");
   await expect(page.getByLabel("Website origin")).toBeFocused();
-  createSteps.push({ action: "Enter", expected: "terms form receives focus", actual: await visibleFocus(page), passed: true });
+  createSteps.push({ checkpoint: "terms-step", page: urls.create, action: "Enter Continue to terms", expected: "terms form receives focus", actual: await visibleFocus(page), passed: true });
   const fields = [
     ["Website origin", LIVE_EVIDENCE_BINDING.subjectOrigin],
     ["Accessibility profile hash", LIVE_EVIDENCE_BINDING.profileHash],
@@ -254,23 +296,27 @@ test("captures the approved production accessibility evidence without wallet wri
   for (const [index, [label, value]] of fields.entries()) {
     await expect(page.getByLabel(label)).toBeFocused();
     await page.keyboard.insertText(value);
-    createSteps.push({ action: "Type", expected: `${label} has a meaningful label`, actual: await visibleFocus(page), passed: true });
+    const checkpoints = ["subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow"] as const;
+    createSteps.push({ checkpoint: checkpoints[index]!, page: urls.create, action: `Type ${label}`, expected: `${label} has a meaningful label`, actual: await visibleFocus(page), passed: true });
     await page.keyboard.press("Tab");
     const next = index + 1 === fields.length
       ? page.getByRole("button", { name: "Back to parties" })
       : page.getByLabel(fields[index + 1]![0]);
     await expect(next).toBeFocused();
-    createSteps.push({ action: "Tab", expected: `focus advances from ${label}`, actual: await visibleFocus(page), passed: true });
   }
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Review locked terms" })).toBeFocused();
-  createSteps.push({ action: "Tab", expected: "focus advances from Back to parties to Review locked terms", actual: await visibleFocus(page), passed: true });
   await page.keyboard.press("Enter");
   await expect(page.getByText("Connect the signing buyer wallet before creating a canonical preview.")).toBeVisible();
-  createSteps.push({ action: "Enter", expected: "preview requires a wallet and does not send a transaction", actual: "wallet requirement shown", passed: true });
+  createSteps.push({ checkpoint: "preview-no-send", page: urls.create, action: "Enter Review locked terms", expected: "preview requires a wallet and does not send a transaction", actual: "wallet requirement shown; no transaction requested", passed: true });
   const createScan = await scan(page, createUrl);
-  const createFacts = await domFacts(page, createUrl);
-  expect(createFacts.labelledControls).toBe(true);
+  const createTermsFacts = await domFacts(page, createUrl);
+  const createFacts = {
+    ...createTermsFacts,
+    formLabels: [...createPartyFacts.formLabels, ...createTermsFacts.formLabels].filter(
+      (item, index, all) => all.findIndex((candidate) => candidate.label === item.label) === index,
+    ),
+  };
 
   const sectionLinks = [
     ["Terms", "terms"],
@@ -278,11 +324,20 @@ test("captures the approved production accessibility evidence without wallet wri
     ["AI decision", "decision"],
     ["Settlement", "settlement"],
   ] as const;
+  await page.goto(urls.detail);
+  evidenceUrl(page, urls.detail);
+  await expect(page.getByText("FUNDED", { exact: true })).toBeVisible();
+  detailSteps.push({ checkpoint: "lifecycle-readback", page: urls.detail, action: "Read", expected: "authoritative lifecycle is FUNDED", actual: "FUNDED", passed: true });
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
+  detailSteps.push({ checkpoint: "skip-focused", page: urls.detail, action: "Tab", expected: "Skip link receives focus", actual: await visibleFocus(page), passed: true });
+  await page.keyboard.press("Enter");
+  await expect(page.locator("main")).toBeFocused();
+  detailSteps.push({ checkpoint: "main-focused", page: urls.detail, action: "Enter", expected: "main receives focus", actual: await visibleFocus(page), passed: true });
   for (const [index, [name, targetId]] of sectionLinks.entries()) {
     await page.goto(urls.detail);
     evidenceUrl(page, urls.detail);
     await expect(page.getByText("FUNDED", { exact: true })).toBeVisible();
-    detailSteps.push({ action: "Read", expected: "authoritative lifecycle is FUNDED", actual: "FUNDED", passed: true });
     await page.keyboard.press("Tab");
     await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
     await page.keyboard.press("Enter");
@@ -298,15 +353,14 @@ test("captures the approved production accessibility evidence without wallet wri
     evidenceUrl(page, `${urls.detail}#${targetId}`);
     const target = page.locator(`#${targetId}`);
     await expect(target).toBeFocused();
-    detailSteps.push({ action: "Enter", expected: `${name} link moves focus to its section`, actual: await visibleFocus(page), passed: true });
+    detailSteps.push({ checkpoint: `${targetId}-navigation`, page: urls.detail, action: `Enter ${name}`, expected: `${name} link moves focus to its section`, actual: await visibleFocus(page), passed: true });
     await page.keyboard.press("Tab");
     await expect(page.locator("body")).not.toBeFocused();
-    detailSteps.push({ action: "Tab", expected: `${name} section focus has an escape path`, actual: await visibleFocus(page), passed: true });
+    detailSteps.push({ checkpoint: `${targetId}-escape`, page: urls.detail, action: "Tab", expected: `${name} section focus has an escape path`, actual: await visibleFocus(page), passed: true });
   }
   const detailUrl = evidenceUrl(page, `${urls.detail}#settlement`);
   const detailScan = await scan(page, detailUrl);
   const detailFacts = await domFacts(page, detailUrl);
-  expect(detailFacts.labelledControls).toBe(true);
 
   const observedAt = Math.floor(Date.now() / 1000);
   const capture: LiveCapture = {

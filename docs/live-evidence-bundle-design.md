@@ -64,6 +64,8 @@ A production screenshot of the light-theme case workspace at a desktop viewport.
 
 A compact report of observed landmarks, heading order, accessible names, form labels, image alternatives, skip-link target, focusable control order, disabled states, and page URLs. Facts are observations, not a verdict.
 
+The `pages` array is closed and ordered: `/cases`, `/cases/new`, then the fixed case-detail URL. Every page record contains exactly `url`, `landmarks`, `headings`, `accessibleNames`, `formLabels`, `imageAlternatives`, `skipLinkTarget`, `focusableControlOrder`, and `disabledStates`; omitted fields or a substituted/reordered page fail validation.
+
 ### Scanner report
 
 An `@axe-core/playwright` report for the three audited pages. It records tool version, audited URLs, rule counts, violations, incomplete checks, and the exact scan timestamp. A zero-violation result remains corroborative and cannot override semantic evidence.
@@ -71,6 +73,10 @@ An `@axe-core/playwright` report for the three audited pages. It records tool ve
 ### Critical-flow trace
 
 A step-by-step keyboard trace for the three flows. Each step records the page, input action, expected focus/visible result, actual result, and pass state. The report records the immutable case `flowsHash` and explicitly reports the five material blocker codes as absent only when the trace supports that conclusion.
+
+The three flow IDs and their order are fixed as `workspace-navigation`, `create-case-preview`, and `case-section-navigation`. Their ordered checkpoints respectively cover skip/main plus Overview/Cases navigation; vendor/profile/three-flow/escrow entry plus preview-without-send; and authoritative lifecycle plus Terms/Evidence/AI decision/Settlement navigation and focus escape. A one-step or renamed flow cannot satisfy the schema.
+
+The HTML validator requires a semantic `main` and heading and rejects scripts, inline event handlers, JavaScript URLs, cookie/storage/provider access, extension/account/private-key/seed/mnemonic/session text, and wallet-state markers. Public case, profile, flow, and contract identifiers remain allowed.
 
 ## Generation and Validation
 

@@ -15,6 +15,11 @@ const urls = [
   `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`,
   `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`,
 ];
+const flowCheckpoints = {
+  "workspace-navigation": ["skip-focused", "main-focused", "overview-navigation", "cases-navigation"],
+  "create-case-preview": ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"],
+  "case-section-navigation": ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"],
+} as const;
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -38,7 +43,19 @@ async function fixture(): Promise<{ root: string; input: string; output: string 
   const domFacts = {
     schemaVersion: "accessseal-dom-facts/1",
     observedAt,
-    pages: urls.map((url) => ({ url, landmarks: ["navigation", "main"], labelledControls: true })),
+    pages: urls.map((url) => ({
+      url,
+      landmarks: ["navigation:Workspace", "main"],
+      headings: [{ level: 1, name: "AccessSeal" }],
+      accessibleNames: [{ role: "link", name: "Skip to content" }],
+      formLabels: url.endsWith("/cases/new") ? [
+        "Vendor wallet", "Website origin", "Accessibility profile hash", "Critical flow 1", "Critical flow 2", "Critical flow 3", "Simulated escrow (wei)",
+      ].map((label) => ({ control: "input", label })) : [],
+      imageAlternatives: [],
+      skipLinkTarget: "#main-content",
+      focusableControlOrder: ["link:Skip to content"],
+      disabledStates: [{ name: "New case", disabled: false }],
+    })),
   };
   const scannerReport = {
     schemaVersion: "accessseal-scanner-report/1",
@@ -51,9 +68,9 @@ async function fixture(): Promise<{ root: string; input: string; output: string 
     caseId: LIVE_EVIDENCE_BINDING.caseId,
     flowsHash: LIVE_EVIDENCE_BINDING.flowsHash,
     observedAt,
-    flows: ["workspace-navigation", "create-case-preview", "case-section-navigation"].map((id) => ({
+    flows: Object.entries(flowCheckpoints).map(([id, checkpoints], flowIndex) => ({
       id,
-      steps: [{ action: "Tab", expected: "visible focus", actual: "visible focus", passed: true }],
+      steps: checkpoints.map((checkpoint) => ({ checkpoint, page: urls[flowIndex], action: "Keyboard", expected: `${checkpoint} expected`, actual: `${checkpoint} observed`, passed: true })),
       passed: true,
     })),
     materialBlockers: {
