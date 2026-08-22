@@ -4,15 +4,26 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workflow = await readFile(".github/workflows/ci.yml", "utf8");
+const addressPattern =
+  /^[ \t]*NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS:[ \t]*(?:"(0x[0-9a-f]{40})"|'(0x[0-9a-f]{40})'|(0x[0-9a-f]{40}))(?:[ \t]+#.*)?[ \t]*$/m;
+
+function extractAddress(source: string): string | undefined {
+  const match = source.match(addressPattern);
+  return match?.[1] ?? match?.[2] ?? match?.[3];
+}
 
 test("Windows CI supplies a validated non-secret local build configuration", () => {
   const network = workflow.match(/NEXT_PUBLIC_GENLAYER_NETWORK:\s*([^\s]+)/)?.[1];
-  const address = workflow.match(
-    /NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS:\s*["']?([^\s"']+)["']?/,
-  )?.[1];
+  const address = extractAddress(workflow);
   assert.equal(network, "localnet");
   assert.match(address ?? "", /^0x[0-9a-f]{40}$/);
   assert.doesNotMatch(address ?? "", /^0x([0-9a-f])\1{39}$/);
+});
+
+test("CI address extraction rejects an unmatched trailing quote", () => {
+  const malformed =
+    "NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS: 0x7216c4492b0266a630265f92c9489e9511086e4a\"\n";
+  assert.equal(extractAddress(malformed), undefined);
 });
 
 test("integration CI has no repository-secret signer dependency", () => {
