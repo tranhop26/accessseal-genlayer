@@ -149,6 +149,14 @@ class FixtureSite:
             return response.read()
 
 
+def glsim_startup_error(message: str, log_path: Path) -> RuntimeError:
+    try:
+        tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:].strip()
+    except (OSError, TypeError) as error:
+        tail = f"unable to read child log: {error}"
+    return RuntimeError(f"{message}\nGLSim child log tail:\n{tail or '<empty>'}")
+
+
 @pytest.fixture(scope="session")
 def glsim_server():
     process: subprocess.Popen | None = None
@@ -180,7 +188,8 @@ def glsim_server():
 
         evidence_dir = Path("work/evidence")
         evidence_dir.mkdir(parents=True, exist_ok=True)
-        log = (evidence_dir / "glsim-task6.log").open("w", encoding="utf-8")
+        log_path = evidence_dir / "glsim-task6.log"
+        log = log_path.open("w", encoding="utf-8")
         child_env = os.environ.copy()
         child_env["ACCESSSEAL_GLSIM_SESSION_ID"] = session_id
         process = subprocess.Popen(
@@ -199,9 +208,13 @@ def glsim_server():
                 break
             except Exception:
                 if process.poll() is not None:
-                    raise RuntimeError("GLSim exited before becoming ready")
+                    if hasattr(log, "flush"):
+                        log.flush()
+                    raise glsim_startup_error("GLSim exited before becoming ready", log_path)
                 if time.monotonic() >= deadline:
-                    raise RuntimeError("GLSim readiness deadline exceeded")
+                    if hasattr(log, "flush"):
+                        log.flush()
+                    raise glsim_startup_error("GLSim readiness deadline exceeded", log_path)
                 time.sleep(0.1)
         yield fingerprint
     finally:

@@ -139,6 +139,17 @@ def test_owned_runner_is_terminated_and_log_closed_when_readiness_fails(monkeypa
     assert log.closed is True
 
 
+def test_startup_failure_surfaces_a_bounded_child_log_tail(tmp_path):
+    log_path = tmp_path / "glsim.log"
+    log_path.write_text("prefix\n" + ("x" * 5000) + "\nROOT CAUSE\n", encoding="utf-8")
+
+    error = harness.glsim_startup_error("GLSim exited before becoming ready", log_path)
+
+    assert "ROOT CAUSE" in str(error)
+    assert "prefix" not in str(error)
+    assert len(str(error)) < 4300
+
+
 def test_scoped_fd0_unlink_patch_restores_and_rethrows_unrelated_permission_error():
     class FakeTempfile:
         def __init__(self):
