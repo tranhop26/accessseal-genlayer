@@ -155,6 +155,27 @@ test("accepts a complete live capture and rejects missing Axe URL coverage", () 
   assert.throws(() => validateLiveCapture(makeCapture({ scannerReport: { ...scannerReport, scans } })), /URL|coverage/i);
 });
 
+test("rejects same-origin URLs whose literal path is not normalized", () => {
+  for (const path of ["//cases", "/cases/../admin", "/café"]) {
+    const capture = makeCapture();
+    const domFacts = capture.domFacts as Record<string, unknown>;
+    const pages = domFacts.pages as Array<Record<string, unknown>>;
+    const url = `${LIVE_EVIDENCE_BINDING.subjectOrigin}${path}`;
+    const changedPages = [{ ...pages[0], url }, ...pages.slice(1)];
+    const scannerReport = capture.scannerReport as Record<string, unknown>;
+    const scans = scannerReport.scans as Array<Record<string, unknown>>;
+    const changedScans = [{ ...scans[0], url }, ...scans.slice(1)];
+    assert.throws(
+      () => validateLiveCapture(makeCapture({
+        domFacts: { ...domFacts, pages: changedPages },
+        scannerReport: { ...scannerReport, scans: changedScans },
+      })),
+      /normalized|URL/i,
+      `accepted unnormalized URL ${url}`,
+    );
+  }
+});
+
 test("rejects a failed critical-flow step and every material blocker code", () => {
   const capture = makeCapture();
   const trace = capture.criticalFlowTrace as Record<string, unknown>;

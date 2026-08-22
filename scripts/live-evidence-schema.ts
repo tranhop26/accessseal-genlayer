@@ -88,6 +88,30 @@ function sameString(value: unknown, expected: string, label: string): void {
   if (value !== expected) throw new Error(`${label} does not match live binding`);
 }
 
+function validateNormalizedPageUrl(value: unknown): string {
+  if (typeof value !== "string" || !value.startsWith(`${LIVE_EVIDENCE_BINDING.subjectOrigin}/`)) {
+    throw new Error("DOM facts page URL is outside the normalized live origin");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("DOM facts page URL is not normalized");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.origin !== LIVE_EVIDENCE_BINDING.subjectOrigin ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.pathname.includes("//") ||
+    value.includes("%") ||
+    parsed.href !== value
+  ) {
+    throw new Error("DOM facts page URL is not normalized");
+  }
+  return value;
+}
+
 function bytes(value: unknown, label: string): Uint8Array {
   if (!(value instanceof Uint8Array)) throw new Error(`${label} must be bytes`);
   return value;
@@ -146,19 +170,11 @@ function validateDomFacts(value: unknown, observedAt: number): string[] {
   const urls: string[] = [];
   for (const pageValue of facts.pages) {
     const page = record(pageValue, "DOM facts page");
-    if (
-      typeof page.url !== "string" ||
-      !page.url.startsWith(`${LIVE_EVIDENCE_BINDING.subjectOrigin}/`) ||
-      page.url.includes("?") ||
-      page.url.includes("#") ||
-      page.url.includes("%") ||
-      page.url.includes("//", LIVE_EVIDENCE_BINDING.subjectOrigin.length + 1) ||
-      /[\\\s]/.test(page.url)
-    ) throw new Error("DOM facts page URL is outside the normalized live origin");
+    const url = validateNormalizedPageUrl(page.url);
     if (!Array.isArray(page.landmarks) || page.landmarks.some((item) => typeof item !== "string")) throw new Error("DOM facts landmarks are invalid");
     if (typeof page.labelledControls !== "boolean") throw new Error("DOM facts labelledControls is invalid");
-    if (urls.includes(page.url)) throw new Error("DOM facts page URLs must be unique");
-    urls.push(page.url);
+    if (urls.includes(url)) throw new Error("DOM facts page URLs must be unique");
+    urls.push(url);
   }
   return urls;
 }
