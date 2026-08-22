@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   LIVE_EVIDENCE_BINDING,
@@ -16,6 +16,19 @@ const outputNames = [
   "scanner-report.json",
   "critical-flow-trace.json",
 ] as const;
+const stagingDirectory = resolve("../work/evidence/live-capture.staging");
+
+test.beforeEach(() => {
+  rmSync(captureDirectory, { force: true, recursive: true });
+  rmSync(stagingDirectory, { force: true, recursive: true });
+});
+
+test.afterEach(async ({}, testInfo) => {
+  if (testInfo.status !== "passed") {
+    rmSync(stagingDirectory, { force: true, recursive: true });
+    expect(existsSync(captureDirectory)).toBe(false);
+  }
+});
 
 type FlowStep = {
   action: string;
@@ -346,16 +359,15 @@ test("captures the approved production accessibility evidence without wallet wri
       statSync(transientScreenshot).size,
   ).toBeLessThan(131_072);
 
-  mkdirSync(captureDirectory, { recursive: true });
-  for (const name of readdirSync(captureDirectory)) {
-    if (!outputNames.includes(name as (typeof outputNames)[number]))
-      rmSync(resolve(captureDirectory, name), { force: true, recursive: true });
-  }
-  writeFileSync(resolve(captureDirectory, "release.html"), releaseHtml, "utf8");
-  copyFileSync(transientScreenshot, resolve(captureDirectory, "screenshot.png"));
-  writeFileSync(resolve(captureDirectory, "dom-facts.json"), domFactsJson, "utf8");
-  writeFileSync(resolve(captureDirectory, "scanner-report.json"), scannerReportJson, "utf8");
-  writeFileSync(resolve(captureDirectory, "critical-flow-trace.json"), criticalFlowTraceJson, "utf8");
+  mkdirSync(stagingDirectory, { recursive: true });
+  writeFileSync(resolve(stagingDirectory, "release.html"), releaseHtml, "utf8");
+  copyFileSync(transientScreenshot, resolve(stagingDirectory, "screenshot.png"));
+  writeFileSync(resolve(stagingDirectory, "dom-facts.json"), domFactsJson, "utf8");
+  writeFileSync(resolve(stagingDirectory, "scanner-report.json"), scannerReportJson, "utf8");
+  writeFileSync(resolve(stagingDirectory, "critical-flow-trace.json"), criticalFlowTraceJson, "utf8");
+  expect(readdirSync(stagingDirectory).sort()).toEqual([...outputNames].sort());
+  rmSync(captureDirectory, { force: true, recursive: true });
+  renameSync(stagingDirectory, captureDirectory);
 
   for (const name of outputNames) {
     expect(existsSync(resolve(captureDirectory, name))).toBe(true);
