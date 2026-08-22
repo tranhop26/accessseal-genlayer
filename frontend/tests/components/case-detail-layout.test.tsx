@@ -1,4 +1,5 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CaseDetail } from "@/components/case-detail";
 import { StatusPanel } from "@/components/status-panel";
@@ -120,7 +121,10 @@ function mockWallet(readback: ReconciledCase) {
 }
 
 describe("case detail document layout", () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    window.history.replaceState({}, "", "/");
+  });
 
   it("renders one invoice summary and four visible workflow sections", async () => {
     mockWallet(finalizedReadback());
@@ -138,6 +142,54 @@ describe("case detail document layout", () => {
     }
     expect(screen.getByText("Submitted")).toBeVisible();
     expect(screen.getByText("Readback confirmed")).toBeVisible();
+  });
+
+  it("moves keyboard focus to each case section after its hash link activates", async () => {
+    mockWallet(finalizedReadback());
+    const user = userEvent.setup();
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    const lifecycle = await screen.findByRole("list", {
+      name: "Case lifecycle",
+    });
+    const navigation = screen.getByRole("navigation", {
+      name: "Case sections",
+    });
+    const escapeControl = within(
+      screen.getByRole("region", { name: "Settlement" }),
+    ).getByRole("button", { name: "Prepare settlement" });
+    const sections = [
+      ["Terms", "terms"],
+      ["Evidence", "evidence"],
+      ["AI decision", "decision"],
+      ["Settlement", "settlement"],
+    ] as const;
+
+    lifecycle.focus();
+    for (const [name] of sections) {
+      await user.tab();
+      expect(within(navigation).getByRole("link", { name })).toHaveFocus();
+    }
+    await user.tab();
+    expect(escapeControl).toHaveFocus();
+
+    for (const [index, [name, id]] of sections.entries()) {
+      lifecycle.focus();
+      for (let step = 0; step <= index; step++) await user.tab();
+
+      const link = within(navigation).getByRole("link", { name });
+      expect(link).toHaveAttribute("href", `#${id}`);
+      expect(link).toHaveFocus();
+
+      await user.keyboard("{Enter}");
+
+      const target = screen.getByRole("region", { name });
+      await waitFor(() => expect(window.location.hash).toBe(`#${id}`));
+      await waitFor(() => expect(target).toHaveFocus());
+
+      await user.tab();
+      expect(escapeControl).toHaveFocus();
+    }
   });
 
   it("keeps the initial readback error under a page H1", async () => {
