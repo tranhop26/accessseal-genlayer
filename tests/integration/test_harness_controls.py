@@ -37,7 +37,66 @@ def test_direct_and_glsim_harnesses_pin_the_reviewed_genvm_release():
 
 
 def test_glsim_cold_start_budget_covers_the_pinned_sdk_download():
-    assert harness.GLSIM_STARTUP_TIMEOUT_SECONDS >= 120
+    assert harness.GLSIM_STARTUP_TIMEOUT_SECONDS == 120
+
+
+def test_glsim_cold_start_does_not_abort_at_the_old_fifteen_second_deadline(
+    monkeypatch,
+):
+    class FakeProcess:
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout):
+            return 0
+
+        def kill(self):
+            raise AssertionError("graceful termination should have succeeded")
+
+    class FakeLog:
+        def close(self):
+            return None
+
+    process = FakeProcess()
+    child_env = {}
+    readiness_attempts = 0
+
+    def fake_popen(*_args, **kwargs):
+        child_env.update(kwargs["env"])
+        return process
+
+    def fake_rpc(method, _params):
+        nonlocal readiness_attempts
+        if not child_env:
+            raise OSError("no existing server")
+        if method == "ping":
+            readiness_attempts += 1
+            if readiness_attempts == 1:
+                raise OSError("still downloading")
+            return "pong"
+        return {
+            **EXPECTED_FINGERPRINT,
+            "sessionId": child_env["ACCESSSEAL_GLSIM_SESSION_ID"],
+        }
+
+    clock = iter((0.0, 16.0))
+    monkeypatch.setattr(harness, "rpc", fake_rpc)
+    monkeypatch.setattr(harness.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(harness.Path, "mkdir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(harness.Path, "open", lambda *_args, **_kwargs: FakeLog())
+    monkeypatch.setattr(harness.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(harness.time, "sleep", lambda _seconds: None)
+
+    fixture = harness.glsim_server.__wrapped__()
+    assert next(fixture)["sessionId"] == child_env["ACCESSSEAL_GLSIM_SESSION_ID"]
+    fixture.close()
+    assert process.terminated is True
 
 
 def test_auto_agree_receipt_without_callback_telemetry_is_rejected():
