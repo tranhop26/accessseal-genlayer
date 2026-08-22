@@ -124,9 +124,14 @@ def test_owned_runner_is_terminated_and_log_closed_when_readiness_fails(monkeypa
     process = FakeProcess()
     log = FakeLog()
     clock = iter((0.0, 16.0))
+    child_env = {}
+
+    def fake_popen(*_args, **kwargs):
+        child_env.update(kwargs["env"])
+        return process
 
     monkeypatch.setattr(harness, "rpc", lambda *_args: (_ for _ in ()).throw(OSError("offline")))
-    monkeypatch.setattr(harness.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(harness.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(harness.Path, "mkdir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(harness.Path, "open", lambda *_args, **_kwargs: log)
     monkeypatch.setattr(harness.time, "monotonic", lambda: next(clock))
@@ -137,6 +142,8 @@ def test_owned_runner_is_terminated_and_log_closed_when_readiness_fails(monkeypa
     assert process.terminated is True
     assert process.waited is True
     assert log.closed is True
+    assert child_env["TEMP"] == child_env["TMP"]
+    assert not Path(child_env["TEMP"]).exists()
 
 
 def test_startup_failure_surfaces_a_bounded_child_log_tail(tmp_path, monkeypatch):

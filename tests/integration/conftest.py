@@ -6,6 +6,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from hashlib import sha256
@@ -164,6 +165,7 @@ def glsim_startup_error(message: str, log_path: Path) -> RuntimeError:
 def glsim_server():
     process: subprocess.Popen | None = None
     log = None
+    child_temp: tempfile.TemporaryDirectory[str] | None = None
     session_id = secrets.token_hex(16)
     try:
         existing = False
@@ -195,6 +197,9 @@ def glsim_server():
         log = log_path.open("w", encoding="utf-8")
         child_env = os.environ.copy()
         child_env["ACCESSSEAL_GLSIM_SESSION_ID"] = session_id
+        child_temp = tempfile.TemporaryDirectory(prefix="accessseal-glsim-")
+        child_env["TEMP"] = child_temp.name
+        child_env["TMP"] = child_temp.name
         process = subprocess.Popen(
             [sys.executable, "scripts/run-glsim-integration.py"],
             stdout=log,
@@ -233,6 +238,8 @@ def glsim_server():
                 process.wait(timeout=5)
         if log is not None:
             log.close()
+        if child_temp is not None:
+            child_temp.cleanup()
 
 
 @pytest.fixture(scope="session")
