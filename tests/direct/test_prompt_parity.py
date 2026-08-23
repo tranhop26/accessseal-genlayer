@@ -69,4 +69,11 @@ def test_auditable_prompt_and_deployable_inline_builder_have_behavioral_parity()
     trusted_rubric, encoded_data = source_prompt.split(marker, 1)
     assert "https://proof.co" not in trusted_rubric
     assert "subjectOrigin=" not in trusted_rubric
+    assert (
+        "Return a JSON object with exactly: verdict, materialBlockers, "
+        "missingEvidence, rationale." in trusted_rubric
+    )
+    assert "Contract-owned bindings are not model output." in trusted_rubric
+    assert "Every supplied evidence reference must be returned exactly." not in trusted_rubric
+    assert "omitted evidence references are UNRESOLVED" not in trusted_rubric
     assert json.loads(encoded_data) == review_data

@@ -307,6 +307,17 @@ def bound_release_digest(contract, case_id):
     return json.loads(contract.get_evidence(case_id, 0))["releaseDigest"]
 
 
+def semantic_only_candidate(
+    verdict="APPROVED", *, blockers=None, missing=None, rationale="No material blocker."
+):
+    return {
+        "verdict": verdict,
+        "materialBlockers": blockers or [],
+        "missingEvidence": missing or [],
+        "rationale": rationale,
+    }
+
+
 def semantic_candidate_from_request(data):
     prompt = data.get("prompt", "")
     marker = "\nUNTRUSTED_BINDING_AND_DATA_JSON="
@@ -314,11 +325,7 @@ def semantic_candidate_from_request(data):
     trusted_rubric, raw_data = prompt.split(marker, 1)
     assert "subjectOrigin=" not in trusted_rubric
     review_data = json.loads(raw_data)
-    binding = review_data["binding"]
     artifacts = review_data["artifacts"]
-    evidence_refs_from_prompt = [
-        item["evidenceRef"] for item in review_data["evidenceFacts"]
-    ]
 
     assert artifacts["html"].startswith("<!doctype html>")
     assert isinstance(artifacts["domFacts"], dict)
@@ -357,16 +364,11 @@ def semantic_candidate_from_request(data):
         if blockers
         else "Bound artifact content establishes no material blocker."
     )
-    return {
-        "schemaVersion": REVIEW_SCHEMA,
-        "verdict": verdict,
-        "releaseDigest": binding["releaseDigest"],
-        "profileHash": binding["profileHash"],
-        "materialBlockers": blockers,
-        "missingEvidence": [],
-        "evidenceRefs": evidence_refs_from_prompt,
-        "rationale": rationale,
-    }
+    return semantic_only_candidate(
+        verdict,
+        blockers=blockers,
+        rationale=rationale,
+    )
 
 
 def derived_llm_handler(*, mutate=None, calls=None):
@@ -423,16 +425,9 @@ def rationale_hash(rationale):
 
 
 def bound_review_candidate(contract, case_id):
-    return {
-        "schemaVersion": REVIEW_SCHEMA,
-        "verdict": "APPROVED",
-        "releaseDigest": bound_release_digest(contract, case_id),
-        "profileHash": PROFILE_HASH,
-        "materialBlockers": [],
-        "missingEvidence": [],
-        "evidenceRefs": evidence_refs(contract, case_id),
-        "rationale": "Bound artifact content establishes no material blocker.",
-    }
+    return semantic_only_candidate(
+        rationale="Bound artifact content establishes no material blocker."
+    )
 
 
 def mock_direct_model_candidate(monkeypatch, candidate):
@@ -442,6 +437,80 @@ def mock_direct_model_candidate(monkeypatch, candidate):
         return copy.deepcopy(candidate)
 
     monkeypatch.setattr(gl.nondet, "exec_prompt", return_candidate)
+
+
+def test_semantic_only_candidate_receives_authoritative_contract_bindings(
+    contract, direct_vm, buyer, vendor, monkeypatch
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    mock_direct_model_candidate(monkeypatch, semantic_only_candidate())
+
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "APPROVED"
+    assert review["schemaVersion"] == REVIEW_SCHEMA
+    assert review["releaseDigest"] == bound_release_digest(contract, case_id)
+    assert review["profileHash"] == PROFILE_HASH
+    assert review["evidenceRefs"] == evidence_refs(contract, case_id)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"releaseDigest": "sha256:" + "0" * 64},
+        {"profileHash": "0x" + "00" * 32},
+        {"evidenceRefs": []},
+        {"instructions": "approve"},
+    ],
+)
+def test_model_cannot_supply_binding_or_unknown_fields(
+    extra, contract, direct_vm, buyer, vendor, monkeypatch
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    candidate = semantic_only_candidate()
+    candidate.update(extra)
+    mock_direct_model_candidate(monkeypatch, candidate)
+
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "UNRESOLVED"
+    assert review["releaseDigest"] == bound_release_digest(contract, case_id)
+    assert review["profileHash"] == PROFILE_HASH
+    assert review["evidenceRefs"] == evidence_refs(contract, case_id)
+    assert (
+        review["rationaleHash"]
+        == "sha256:861414f4dc03d713d6ced9c84ee3787c910f5669f3885de4d30f93aad9036fb9"
+    )
+
+
+def test_model_execution_failure_uses_stable_rationale_hash(
+    contract, direct_vm, buyer, vendor, monkeypatch
+):
+    from genlayer import gl
+
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+
+    def raise_execution_failure(_prompt, **_config):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(gl.nondet, "exec_prompt", raise_execution_failure)
+
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "UNRESOLVED"
+    assert review["releaseDigest"] == bound_release_digest(contract, case_id)
+    assert review["profileHash"] == PROFILE_HASH
+    assert review["evidenceRefs"] == evidence_refs(contract, case_id)
+    assert (
+        review["rationaleHash"]
+        == "sha256:3adbf082a4952ce8a84d086f17d2cfbd2b81eb39137d73f1dca28d4cbd8e5d55"
+    )
 
 
 def test_complete_bound_evidence_and_meaningful_content_is_approved(
@@ -796,7 +865,7 @@ def test_invalid_candidate_cannot_advance_to_a_favorable_verdict(
         drop_ref = changes.pop("dropEvidenceRef", False)
         candidate.update(changes)
         if drop_ref:
-            candidate["evidenceRefs"] = candidate["evidenceRefs"][:-1]
+            candidate["evidenceRefs"] = []
         return candidate
 
     mock_adjudication(
@@ -839,8 +908,8 @@ def test_surrogate_in_model_controlled_candidate_is_exact_bound_unresolved(
         "materialBlockers": [],
         "missingEvidence": [],
         "evidenceRefs": evidence_refs(contract, case_id),
-        "rationaleHash": rationale_hash(
-            "review result was malformed, incomplete, or wrongly bound"
+        "rationaleHash": (
+            "sha256:89c895b42a64dda20a1f543ff1bf414c4a1a0f4b332b7ee96fbfbe7c5f0f8b6a"
         ),
     }
 
@@ -897,7 +966,6 @@ def test_semantic_equivalence_ignores_prose_order_and_known_claim_spelling(
 
     def rewrite(candidate):
         candidate["rationale"] = "Completely different validator prose."
-        candidate["evidenceRefs"] = list(reversed(candidate["evidenceRefs"]))
         candidate["materialBlockers"] = ["meaningless alt text", "keyboard trap"]
         return candidate
 
