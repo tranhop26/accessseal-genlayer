@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   LIVE_EVIDENCE_BINDING,
   PAYLOAD_SPECS,
+  RELEASE_MANIFEST_PATH,
   buildReleaseManifest,
   canonicalJson,
   sha256,
@@ -12,11 +13,11 @@ import {
   type LiveCapture,
 } from "../../scripts/live-evidence-schema.ts";
 
-const observedAt = 1_787_400_000;
+const observedAt = LIVE_EVIDENCE_BINDING.caseCreatedAt + 1;
 const urls = [
-  "https://accessseal-genlayer.vercel.app/cases",
-  "https://accessseal-genlayer.vercel.app/cases/new",
-  "https://accessseal-genlayer.vercel.app/cases/0xecb00a111f3cab8224989ed65f06ebbaa65f31161ace4981f41310747e6f6977",
+  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`,
+  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`,
+  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`,
 ];
 const blockerCodes = [
   "focus-obscured",
@@ -31,6 +32,28 @@ const flowCheckpoints = {
   "create-case-preview": ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"],
   "case-section-navigation": ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"],
 } as const;
+
+test("pins the exact authoritative V2 live binding", () => {
+  assert.deepEqual(LIVE_EVIDENCE_BINDING, {
+    caseId: "0x2e82b92517f29f02e86ea5f761ce8a62dc470fad4c92625133ab407f25091959",
+    contract: "0x42b2eda04e762f50915f17143adbe73038e36b27",
+    chainId: "1",
+    epoch: 0,
+    subjectOrigin: "https://accessseal-genlayer.vercel.app",
+    vendor: "0x35c9979d30992b13ef6df7036bc745e2e1cd76a2",
+    profileVersion: "accessseal-static/1",
+    profileHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    flowsHash: "0xd8b711d3ceb59343cd7822e5fcf3aba42c11de287bd6dcf53bfe838d753f6001",
+    releaseId: "2026-08-23-live-v2",
+    releaseManifestPath: "/evidence/releases/2026-08-23-live-v2/release-manifest.json",
+    sourceCommit: "23ab41fb5a6c982d259d7d441da8ab5c85b8aa44",
+    createCaseTransactionHash: "0x7ef90047f5e94cfb838eb176bcb243bce4c3153f293cc660f3919cdb2c60dd74",
+    caseCreatedAt: 1_787_492_373,
+    evidenceDeadlineSeconds: 86_400,
+    hardDeadlineSeconds: 604_800,
+  });
+  assert.equal(RELEASE_MANIFEST_PATH, "/evidence/releases/2026-08-23-live-v2/release-manifest.json");
+});
 
 function pageFacts(url: string) {
   return {
