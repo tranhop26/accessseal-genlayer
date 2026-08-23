@@ -84,6 +84,7 @@ def test_request_more_info_opens_one_vendor_cure_epoch(
         transaction_context=io_context(
             cure_release,
             candidate(deployed_contract, case_id, cure_release, "APPROVED", epoch=1),
+            when=RETRY_TIME,
         ),
     )
     assert cure["status"] == 7

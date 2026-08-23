@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -7,14 +8,120 @@ from gltest.types import TransactionStatus
 from conftest import (
     assert_accounting_conservation,
     assert_five_validator_consensus,
+    build_release,
     candidate,
+    EVIDENCE_TYPES,
+    FLOWS_HASH,
     io_context,
     open_release,
+    ORIGIN,
+    PATHS,
     read_json,
     record_evidence,
     rpc,
 )
 from scripts.glsim_support import GenLayerSettlementReader, read_and_verify_settlement_proof
+
+
+def test_release_fixture_binds_runtime_case_and_complete_pages_scans_flows(
+    fixture_site,
+):
+    runtime_case_id = "runtime-case-id"
+    release = build_release(runtime_case_id, fixture_site)
+    dom_facts = json.loads(release["served"][PATHS["DOM_FACTS"]])
+    scanner_report = json.loads(release["served"][PATHS["SCANNER_REPORT"]])
+    flow_trace = json.loads(release["served"][PATHS["CRITICAL_FLOW_TRACE"]])
+    urls = [
+        ORIGIN + "/cases",
+        ORIGIN + "/cases/new",
+        ORIGIN + "/cases/" + runtime_case_id,
+    ]
+
+    assert release["manifest"]["caseId"] == runtime_case_id
+    assert flow_trace["caseId"] == runtime_case_id
+    assert [page["url"] for page in dom_facts["pages"]] == urls
+    assert all(
+        set(page) == {
+            "url",
+            "landmarks",
+            "headings",
+            "accessibleNames",
+            "formLabels",
+            "imageAlternatives",
+            "skipLinkTarget",
+            "focusableControlOrder",
+            "disabledStates",
+        }
+        for page in dom_facts["pages"]
+    )
+    assert {item["label"] for item in dom_facts["pages"][1]["formLabels"]} == {
+        "Vendor wallet",
+        "Website origin",
+        "Accessibility profile hash",
+        "Critical flow 1",
+        "Critical flow 2",
+        "Critical flow 3",
+        "Simulated escrow (wei)",
+    }
+    assert scanner_report["tool"] == {"name": "axe-core", "version": "4.13.0"}
+    assert [scan["url"] for scan in scanner_report["scans"]] == urls
+    assert [flow["id"] for flow in flow_trace["flows"]] == [
+        "workspace-navigation",
+        "create-case-preview",
+        "case-section-navigation",
+    ]
+    assert all(flow["passed"] and flow["steps"] for flow in flow_trace["flows"])
+    assert all(
+        {step["page"] for step in flow["steps"]} == {urls[index]}
+        for index, flow in enumerate(flow_trace["flows"])
+    )
+    assert all(
+        set(step) == {
+            "checkpoint",
+            "page",
+            "action",
+            "expected",
+            "actual",
+            "passed",
+        }
+        for flow in flow_trace["flows"]
+        for step in flow["steps"]
+    )
+
+
+def test_release_fixture_uses_case_timeline_for_all_artifacts(fixture_site):
+    release = build_release("runtime-case-timeline", fixture_site)
+    observed_at = 1_786_579_500
+
+    assert {
+        json.loads(release["served"][PATHS[kind]])["observedAt"]
+        for kind in ("DOM_FACTS", "SCANNER_REPORT", "CRITICAL_FLOW_TRACE")
+    } == {observed_at}
+
+
+def test_submitted_envelopes_share_served_case_and_observation_time(
+    deployed_contract, actors, fixture_site
+):
+    case_id, release = open_release(
+        deployed_contract,
+        actors,
+        fixture_site,
+        "integration-evidence-bindings",
+    )
+    observed_at = json.loads(
+        release["served"][PATHS["CRITICAL_FLOW_TRACE"]]
+    )["observedAt"]
+    evidence = read_json(deployed_contract, "get_evidence", [case_id, 0])
+
+    assert len(evidence["envelopes"]) == len(EVIDENCE_TYPES) + 1
+    assert {item["caseId"] for item in evidence["envelopes"]} == {case_id}
+    assert {item["observedAt"] for item in evidence["envelopes"]} == {
+        observed_at
+    }
+    assert all(
+        item["observedAt"] <= item["submittedAt"] < item["expiresAt"]
+        for item in evidence["envelopes"]
+    )
 
 
 def test_five_validators_finalize_semantic_approval_and_contract_finality(
@@ -23,16 +130,64 @@ def test_five_validators_finalize_semantic_approval_and_contract_finality(
     case_id, release = open_release(
         deployed_contract, actors, fixture_site, "integration-approved"
     )
+    dom_facts = json.loads(release["served"][PATHS["DOM_FACTS"]])
+    scanner_report = json.loads(release["served"][PATHS["SCANNER_REPORT"]])
+    flow_trace = json.loads(release["served"][PATHS["CRITICAL_FLOW_TRACE"]])
+    urls = [
+        ORIGIN + "/cases",
+        ORIGIN + "/cases/new",
+        ORIGIN + "/cases/" + case_id,
+    ]
+    evidence = read_json(deployed_contract, "get_evidence", [case_id, 0])
+
+    assert release["manifest"]["caseId"] == case_id
+    assert flow_trace["caseId"] == case_id
+    assert flow_trace["flowsHash"] == FLOWS_HASH
+    assert [page["url"] for page in dom_facts["pages"]] == urls
+    assert [scan["url"] for scan in scanner_report["scans"]] == urls
+    assert [flow["id"] for flow in flow_trace["flows"]] == [
+        "workspace-navigation",
+        "create-case-preview",
+        "case-section-navigation",
+    ]
+    assert all(flow["passed"] and flow["steps"] for flow in flow_trace["flows"])
+    assert {
+        dom_facts["observedAt"],
+        scanner_report["observedAt"],
+        flow_trace["observedAt"],
+        *(item["observedAt"] for item in evidence["envelopes"]),
+    } == {release["observedAt"]}
+    leader_candidate = candidate(
+        deployed_contract, case_id, release, "APPROVED"
+    )
+    assert leader_candidate == {
+        "verdict": "APPROVED",
+        "materialBlockers": [],
+        "missingEvidence": [],
+        "rationale": "Bound artifact content establishes no material blocker.",
+    }
+    context = io_context(release, leader_candidate)
+    llm_routes = context["validators"][0]["plugin_config"]["mock_response"][
+        "response"
+    ]
+    assert llm_routes == {
+        r"[\s\S]*LEADER_REVIEW_JSON=[\s\S]*": '{"supported":true}',
+        r"[\s\S]*UNTRUSTED_BINDING_AND_DATA_JSON=[\s\S]*": (
+            '{"verdict":"APPROVED","materialBlockers":[],"missingEvidence":[],'
+            '"rationale":"Bound artifact content establishes no material blocker."}'
+        ),
+    }
     rpc("accessseal_resetValidatorTelemetry", [])
     receipt = deployed_contract.connect(actors[2]).request_review([case_id]).transact(
         wait_transaction_status=TransactionStatus.FINALIZED,
-        transaction_context=io_context(
-            release, candidate(deployed_contract, case_id, release, "APPROVED")
-        ),
+        transaction_context=context,
     )
 
     telemetry = rpc("accessseal_getValidatorTelemetry", [])
     assert_five_validator_consensus(receipt, telemetry)
+    assert receipt["consensus_data"]["leader_receipt"]
+    assert telemetry["consensusSessions"] >= 1
+    assert telemetry["callbackInvocations"] == 5
     review = read_json(deployed_contract, "get_review", [case_id, 0])
     finality = read_json(deployed_contract, "get_review_finality", [case_id])
     assert review["verdict"] == "APPROVED"

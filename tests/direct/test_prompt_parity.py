@@ -10,6 +10,10 @@ PROMPT_SYMBOLS = {
     "MATERIAL_BLOCKER_CODES",
     "FIXED_REVIEW_RUBRIC",
 }
+PROMPT_BUILDERS = {
+    "build_review_prompt",
+    "build_review_validation_prompt",
+}
 
 
 def load_prompt_api(path):
@@ -21,7 +25,7 @@ def load_prompt_api(path):
             names = {target.id for target in targets if isinstance(target, ast.Name)}
             if names & PROMPT_SYMBOLS:
                 selected.append(node)
-        elif isinstance(node, ast.FunctionDef) and node.name == "build_review_prompt":
+        elif isinstance(node, ast.FunctionDef) and node.name in PROMPT_BUILDERS:
             selected.append(node)
     namespace = {"json": json}
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), namespace)
@@ -69,4 +73,50 @@ def test_auditable_prompt_and_deployable_inline_builder_have_behavioral_parity()
     trusted_rubric, encoded_data = source_prompt.split(marker, 1)
     assert "https://proof.co" not in trusted_rubric
     assert "subjectOrigin=" not in trusted_rubric
+    assert (
+        "Return a JSON object with exactly: verdict, materialBlockers, "
+        "missingEvidence, rationale." in trusted_rubric
+    )
+    assert "Contract-owned bindings are not model output." in trusted_rubric
+    assert "Every supplied evidence reference must be returned exactly." not in trusted_rubric
+    assert "omitted evidence references are UNRESOLVED" not in trusted_rubric
+    assert json.loads(encoded_data) == review_data
+
+    leader_review = {
+        "schemaVersion": "accessseal-review/1",
+        "verdict": "UNRESOLVED",
+        "releaseDigest": "sha256:" + "a" * 64,
+        "profileHash": "0x" + "1" * 64,
+        "materialBlockers": [],
+        "missingEvidence": [],
+        "evidenceRefs": ["sha256:" + "b" * 64],
+        "rationaleHash": "sha256:" + "c" * 64,
+    }
+    leader_review_json = json.dumps(
+        leader_review,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    source_validation_prompt = source["build_review_validation_prompt"](
+        review_data_json,
+        leader_review_json,
+    )
+    inline_validation_prompt = inline["build_review_validation_prompt"](
+        review_data_json,
+        leader_review_json,
+    )
+
+    assert source_validation_prompt == inline_validation_prompt
+    leader_marker = "\nLEADER_REVIEW_JSON="
+    data_marker = "\nUNTRUSTED_BINDING_AND_DATA_JSON="
+    assert source_validation_prompt.count(leader_marker) == 1
+    assert source_validation_prompt.count(data_marker) == 1
+    validation_rules, untrusted_blocks = source_validation_prompt.split(
+        leader_marker,
+        1,
+    )
+    encoded_leader, encoded_data = untrusted_blocks.split(data_marker, 1)
+    assert "Assess every verdict, including UNRESOLVED." in validation_rules
+    assert '{"supported":false}' in validation_rules
+    assert json.loads(encoded_leader) == leader_review
     assert json.loads(encoded_data) == review_data

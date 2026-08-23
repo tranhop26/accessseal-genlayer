@@ -40,9 +40,14 @@ FLOWS_HASH = "0x" + "22" * 32
 PROFILE_VERSION = "accessseal-static/1"
 ESCROW = 50_000
 BASE_TIME = "2026-08-13T00:00:00+00:00"
+EVIDENCE_TIME = "2026-08-13T00:05:00+00:00"
 CUTOFF_TIME = "2026-08-13T00:30:01+00:00"
+CURE_EVIDENCE_TIME = "2026-08-13T00:32:00+00:00"
 RETRY_TIME = "2026-08-13T00:35:01+00:00"
 TIMEOUT_TIME = "2026-08-13T02:00:01+00:00"
+EVIDENCE_OBSERVED_AT = 1_786_579_500
+CURE_EVIDENCE_OBSERVED_AT = 1_786_581_120
+EVIDENCE_TTL_SECONDS = 7_200
 MANIFEST_PATH = "/.well-known/accessseal/release-manifest.json"
 EVIDENCE_TYPES = (
     "HTML_BUNDLE",
@@ -51,6 +56,57 @@ EVIDENCE_TYPES = (
     "SCANNER_REPORT",
     "CRITICAL_FLOW_TRACE",
 )
+MATERIAL_BLOCKER_CODES = (
+    "focus-obscured",
+    "inoperable-critical-flow",
+    "keyboard-trap",
+    "meaningless-alt-text",
+    "missing-form-label",
+)
+CREATE_FORM_LABELS = (
+    "Vendor wallet",
+    "Website origin",
+    "Accessibility profile hash",
+    "Critical flow 1",
+    "Critical flow 2",
+    "Critical flow 3",
+    "Simulated escrow (wei)",
+)
+FLOW_CHECKPOINTS = {
+    "workspace-navigation": (
+        "skip-focused",
+        "main-focused",
+        "overview-navigation",
+        "cases-navigation",
+    ),
+    "create-case-preview": (
+        "skip-focused",
+        "main-focused",
+        "vendor-input",
+        "no-keyboard-trap",
+        "terms-step",
+        "subject-origin",
+        "profile-hash",
+        "critical-flow-1",
+        "critical-flow-2",
+        "critical-flow-3",
+        "escrow",
+        "preview-no-send",
+    ),
+    "case-section-navigation": (
+        "lifecycle-readback",
+        "skip-focused",
+        "main-focused",
+        "terms-navigation",
+        "terms-escape",
+        "evidence-navigation",
+        "evidence-escape",
+        "decision-navigation",
+        "decision-escape",
+        "settlement-navigation",
+        "settlement-escape",
+    ),
+}
 MEDIA_TYPES = {
     "RELEASE_MANIFEST": "application/json",
     "HTML_BUNDLE": "text/html",
@@ -298,29 +354,111 @@ def deployed_contract(glsim_server, actors):
     return Contract.new(deployment["contract_address"], schema, account=actors[0])
 
 
+def evidence_timeline(epoch: int) -> dict[str, object]:
+    if epoch == 0:
+        transaction_time = EVIDENCE_TIME
+        observed_at = EVIDENCE_OBSERVED_AT
+    else:
+        transaction_time = CURE_EVIDENCE_TIME
+        observed_at = CURE_EVIDENCE_OBSERVED_AT
+    return {
+        "transactionTime": transaction_time,
+        "observedAt": observed_at,
+        "submittedAt": observed_at,
+        "expiresAt": observed_at + EVIDENCE_TTL_SECONDS,
+    }
+
+
 def build_release(case_id: str, fixture_site, *, keyboard_trap=False, epoch=0):
     site, base_url = fixture_site
     fixture_root = Path(__file__).parents[2] / "fixtures" / "releases"
     html_name = "fail-keyboard" if keyboard_trap else "pass"
+    timeline = evidence_timeline(epoch)
+    observed_at = timeline["observedAt"]
+    urls = [ORIGIN + "/cases", ORIGIN + "/cases/new", ORIGIN + "/cases/" + case_id]
+    pages = []
+    for index, url in enumerate(urls):
+        labels = (
+            [{"control": "input", "label": label} for label in CREATE_FORM_LABELS]
+            if index == 1
+            else (
+                [{"control": "case-id", "label": "Import case ID"}]
+                if index == 0
+                else []
+            )
+        )
+        pages.append(
+            {
+                "url": url,
+                "landmarks": ["nav:Workspace", "main"],
+                "headings": [{"level": 1, "name": "AccessSeal"}],
+                "accessibleNames": [
+                    {"role": "link", "name": "Skip to content"}
+                ],
+                "formLabels": labels,
+                "imageAlternatives": [],
+                "skipLinkTarget": "#main-content",
+                "focusableControlOrder": ["link:Skip to content"],
+                "disabledStates": [{"name": "New case", "disabled": False}],
+            }
+        )
+    flows = []
+    for index, (flow_id, checkpoints) in enumerate(FLOW_CHECKPOINTS.items()):
+        steps = []
+        for checkpoint in checkpoints:
+            passed = not (
+                keyboard_trap
+                and flow_id == "create-case-preview"
+                and checkpoint == "no-keyboard-trap"
+            )
+            steps.append(
+                {
+                    "checkpoint": checkpoint,
+                    "page": urls[index],
+                    "action": "Keyboard",
+                    "expected": checkpoint + " expected",
+                    "actual": checkpoint + (" blocked" if not passed else " observed"),
+                    "passed": passed,
+                }
+            )
+        flows.append({"id": flow_id, "steps": steps, "passed": all(step["passed"] for step in steps)})
     bodies = {
         "HTML_BUNDLE": (fixture_root / html_name / "index.html").read_bytes(),
         "SCREENSHOT": SCREENSHOT,
         "DOM_FACTS": canonical_bytes(
             {
-                "forms": [{"control": "email", "label": "Email address"}],
-                "images": [{"alt": "Blue running shoe with white sole", "src": "shoe.jpg"}],
-                "focusObscured": False,
+                "schemaVersion": "accessseal-dom-facts/1",
+                "observedAt": observed_at,
+                "pages": pages,
             }
         ),
         "SCANNER_REPORT": canonical_bytes(
-            {"engine": "fixture-scanner/1", "score": 100, "violations": []}
+            {
+                "schemaVersion": "accessseal-scanner-report/1",
+                "tool": {"name": "axe-core", "version": "4.13.0"},
+                "observedAt": observed_at,
+                "scans": [
+                    {
+                        "url": url,
+                        "violations": [],
+                        "incomplete": [],
+                        "passes": 40,
+                    }
+                    for url in urls
+                ],
+            }
         ),
         "CRITICAL_FLOW_TRACE": canonical_bytes(
             {
-                "completed": not keyboard_trap,
-                "flow": "checkout",
-                "keyboardTrap": keyboard_trap,
-                "steps": ["email", "blocked"] if keyboard_trap else ["email", "place-order", "status"],
+                "schemaVersion": "accessseal-critical-flow-trace/1",
+                "caseId": case_id,
+                "flowsHash": FLOWS_HASH,
+                "observedAt": observed_at,
+                "flows": flows,
+                "materialBlockers": {
+                    code: code == "keyboard-trap" and keyboard_trap
+                    for code in MATERIAL_BLOCKER_CODES
+                },
             }
         ),
     }
@@ -348,7 +486,13 @@ def build_release(case_id: str, fixture_site, *, keyboard_trap=False, epoch=0):
     # strict I/O adapter because AccessSeal intentionally rejects localhost HTTP URIs.
     served = {MANIFEST_PATH: site.fetch(base_url, MANIFEST_PATH)}
     served.update({PATHS[k]: site.fetch(base_url, PATHS[k]) for k in EVIDENCE_TYPES})
-    return {"manifest": manifest, "bodies": bodies, "served": served, "digest": digest(manifest_body)}
+    return {
+        "manifest": manifest,
+        "bodies": bodies,
+        "served": served,
+        "digest": digest(manifest_body),
+        **timeline,
+    }
 
 
 def envelope(contract, case_id, issuer, release, kind, *, epoch=0, nonce="release"):
@@ -372,15 +516,22 @@ def envelope(contract, case_id, issuer, release, kind, *, epoch=0, nonce="releas
             "payloadUri": ORIGIN + path,
             "payloadSha256": payload_hash,
             "mediaType": MEDIA_TYPES[kind],
-            "observedAt": 1_786_579_000,
-            "submittedAt": 1_786_579_100,
-            "expiresAt": 1_786_587_000,
+            "observedAt": release["observedAt"],
+            "submittedAt": release["submittedAt"],
+            "expiresAt": release["expiresAt"],
             "nonce": nonce,
         }
     )
 
 
-def io_context(release, candidate=None, *, unavailable_manifest=False, when=CUTOFF_TIME):
+def io_context(
+    release,
+    candidate=None,
+    *,
+    supported=True,
+    unavailable_manifest=False,
+    when=CUTOFF_TIME,
+):
     rpc("sim_setTime", [when])
     web = {}
     for path, body in release["served"].items():
@@ -392,7 +543,18 @@ def io_context(release, candidate=None, *, unavailable_manifest=False, when=CUTO
             "body": "",
             "bodyBase64": base64.b64encode(body).decode("ascii"),
         }
-    llm = {r"[\s\S]*": compact(candidate)} if candidate is not None else {}
+    llm = (
+        {
+            r"[\s\S]*LEADER_REVIEW_JSON=[\s\S]*": compact(
+                {"supported": supported}
+            ),
+            r"[\s\S]*UNTRUSTED_BINDING_AND_DATA_JSON=[\s\S]*": compact(
+                candidate
+            ),
+        }
+        if candidate is not None
+        else {}
+    )
     validators = get_validator_factory().batch_create_mock_validators(
         5,
         mock_llm_response={"nondet_exec_prompt": llm},
@@ -425,15 +587,17 @@ def create_funded_case(contract, actors, salt: str, *, max_retries=2):
 
 def submit_release_epoch(contract, vendor, fixture_site, case_id, *, epoch, keyboard_trap=False, supporting=EVIDENCE_TYPES):
     release = build_release(case_id, fixture_site, keyboard_trap=keyboard_trap, epoch=epoch)
+    transaction_time = release["transactionTime"]
+    rpc("sim_setTime", [transaction_time])
     vendor_contract = contract.connect(vendor)
     assert_success(vendor_contract.open_evidence([case_id, envelope(contract, case_id, vendor, release, "RELEASE_MANIFEST", epoch=epoch, nonce=f"release-{epoch}")]).transact(
         wait_transaction_status=TransactionStatus.FINALIZED,
-        transaction_context={"genvm_datetime": BASE_TIME},
+        transaction_context={"genvm_datetime": transaction_time},
     ))
     for index, kind in enumerate(supporting, 1):
         assert_success(vendor_contract.append_evidence([case_id, envelope(contract, case_id, vendor, release, kind, epoch=epoch, nonce=f"epoch-{epoch}-item-{index}")]).transact(
             wait_transaction_status=TransactionStatus.FINALIZED,
-            transaction_context={"genvm_datetime": BASE_TIME},
+            transaction_context={"genvm_datetime": transaction_time},
         ))
     return release
 
@@ -454,16 +618,11 @@ def open_release(contract, actors, fixture_site, salt, *, keyboard_trap=False, s
 
 
 def candidate(contract, case_id, release, verdict, *, epoch=0):
-    evidence = read_json(contract, "get_evidence", [case_id, epoch])
     blockers = ["keyboard-trap"] if verdict == "REJECTED" else []
     return {
-        "schemaVersion": "accessseal-review/1",
         "verdict": verdict,
-        "releaseDigest": release["digest"],
-        "profileHash": PROFILE_HASH,
         "materialBlockers": blockers,
         "missingEvidence": [],
-        "evidenceRefs": evidence["hashes"],
         "rationale": "Bound artifact content establishes: keyboard-trap" if blockers else "Bound artifact content establishes no material blocker.",
     }
 

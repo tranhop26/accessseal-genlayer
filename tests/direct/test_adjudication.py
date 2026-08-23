@@ -22,6 +22,13 @@ ALL_SUPPORTING_EVIDENCE = (
     "SCANNER_REPORT",
     "CRITICAL_FLOW_TRACE",
 )
+MATERIAL_BLOCKER_CODES = (
+    "focus-obscured",
+    "inoperable-critical-flow",
+    "keyboard-trap",
+    "meaningless-alt-text",
+    "missing-form-label",
+)
 MEDIA_TYPES = {
     "RELEASE_MANIFEST": "application/json",
     "HTML_BUNDLE": "text/html",
@@ -87,27 +94,45 @@ def build_release(
         page = fixture_text("releases/pass/index.html")
     if dom_facts is None:
         dom_facts = {
-            "forms": [{"control": "email", "label": "Email address"}],
-            "images": [
+            "schemaVersion": "accessseal-dom-facts/1",
+            "observedAt": 1_787_381_551,
+            "pages": [
                 {
-                    "alt": "Blue running shoe with white sole",
-                    "src": "shoe.jpg",
+                    "url": origin + "/cases",
+                    "formLabels": [
+                        {"control": "case-id", "label": "Import case ID"}
+                    ],
+                    "imageAlternatives": [],
+                    "disabledStates": [],
                 }
             ],
-            "focusObscured": False,
         }
     if scanner_report is None:
         scanner_report = {
-            "engine": "fixture-scanner/1",
-            "score": 100,
-            "violations": [],
+            "schemaVersion": "accessseal-scanner-report/1",
+            "tool": "axe-core",
+            "observedAt": 1_787_381_551,
+            "scans": [
+                {
+                    "url": origin + "/cases",
+                    "violations": [],
+                    "incomplete": [],
+                    "passes": 1,
+                }
+            ],
         }
     if flow_trace is None:
         flow_trace = {
-            "completed": True,
-            "flow": "checkout",
-            "keyboardTrap": False,
-            "steps": ["email", "place-order", "status"],
+            "schemaVersion": "accessseal-critical-flow-trace/1",
+            "caseId": "bound-by-helper",
+            "flowsHash": FLOWS_HASH,
+            "observedAt": 1_787_381_551,
+            "flows": [
+                {"id": "workspace-navigation", "steps": [], "passed": True}
+            ],
+            "materialBlockers": {
+                code: False for code in MATERIAL_BLOCKER_CODES
+            },
         }
     if screenshot_bytes is None:
         screenshot_bytes = SCREENSHOT_BYTES
@@ -307,6 +332,17 @@ def bound_release_digest(contract, case_id):
     return json.loads(contract.get_evidence(case_id, 0))["releaseDigest"]
 
 
+def semantic_only_candidate(
+    verdict="APPROVED", *, blockers=None, missing=None, rationale="No material blocker."
+):
+    return {
+        "verdict": verdict,
+        "materialBlockers": blockers or [],
+        "missingEvidence": missing or [],
+        "rationale": rationale,
+    }
+
+
 def semantic_candidate_from_request(data):
     prompt = data.get("prompt", "")
     marker = "\nUNTRUSTED_BINDING_AND_DATA_JSON="
@@ -314,11 +350,7 @@ def semantic_candidate_from_request(data):
     trusted_rubric, raw_data = prompt.split(marker, 1)
     assert "subjectOrigin=" not in trusted_rubric
     review_data = json.loads(raw_data)
-    binding = review_data["binding"]
     artifacts = review_data["artifacts"]
-    evidence_refs_from_prompt = [
-        item["evidenceRef"] for item in review_data["evidenceFacts"]
-    ]
 
     assert artifacts["html"].startswith("<!doctype html>")
     assert isinstance(artifacts["domFacts"], dict)
@@ -330,13 +362,24 @@ def semantic_candidate_from_request(data):
     blockers = []
     flow = artifacts["criticalFlowTrace"]
     dom = artifacts["domFacts"]
+    for code in MATERIAL_BLOCKER_CODES:
+        if flow.get("materialBlockers", {}).get(code) is True:
+            blockers.append(code)
+    if any(item.get("passed") is False for item in flow.get("flows", [])):
+        if not blockers:
+            blockers.append("inoperable-critical-flow")
     if flow.get("keyboardTrap") is True:
         blockers.append("keyboard-trap")
     elif flow.get("completed") is False:
         blockers.append("inoperable-critical-flow")
     if dom.get("focusObscured") is True:
         blockers.append("focus-obscured")
-    for image in dom.get("images", []):
+    images = list(dom.get("images", []))
+    forms = list(dom.get("forms", []))
+    for page in dom.get("pages", []):
+        images.extend(page.get("imageAlternatives", []))
+        forms.extend(page.get("formLabels", []))
+    for image in images:
         alt = str(image.get("alt", "")).strip().lower()
         if (
             alt in ("", "image", "placeholder")
@@ -346,7 +389,7 @@ def semantic_candidate_from_request(data):
         ):
             blockers.append("meaningless-alt-text")
             break
-    for form in dom.get("forms", []):
+    for form in forms:
         if len(str(form.get("label", "")).strip()) == 0:
             blockers.append("missing-form-label")
             break
@@ -357,16 +400,11 @@ def semantic_candidate_from_request(data):
         if blockers
         else "Bound artifact content establishes no material blocker."
     )
-    return {
-        "schemaVersion": REVIEW_SCHEMA,
-        "verdict": verdict,
-        "releaseDigest": binding["releaseDigest"],
-        "profileHash": binding["profileHash"],
-        "materialBlockers": blockers,
-        "missingEvidence": [],
-        "evidenceRefs": evidence_refs_from_prompt,
-        "rationale": rationale,
-    }
+    return semantic_only_candidate(
+        verdict,
+        blockers=blockers,
+        rationale=rationale,
+    )
 
 
 def derived_llm_handler(*, mutate=None, calls=None):
@@ -423,16 +461,9 @@ def rationale_hash(rationale):
 
 
 def bound_review_candidate(contract, case_id):
-    return {
-        "schemaVersion": REVIEW_SCHEMA,
-        "verdict": "APPROVED",
-        "releaseDigest": bound_release_digest(contract, case_id),
-        "profileHash": PROFILE_HASH,
-        "materialBlockers": [],
-        "missingEvidence": [],
-        "evidenceRefs": evidence_refs(contract, case_id),
-        "rationale": "Bound artifact content establishes no material blocker.",
-    }
+    return semantic_only_candidate(
+        rationale="Bound artifact content establishes no material blocker."
+    )
 
 
 def mock_direct_model_candidate(monkeypatch, candidate):
@@ -442,6 +473,257 @@ def mock_direct_model_candidate(monkeypatch, candidate):
         return copy.deepcopy(candidate)
 
     monkeypatch.setattr(gl.nondet, "exec_prompt", return_candidate)
+
+
+def test_semantic_only_candidate_receives_authoritative_contract_bindings(
+    contract, direct_vm, buyer, vendor, monkeypatch
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    mock_direct_model_candidate(monkeypatch, semantic_only_candidate())
+
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "APPROVED"
+    assert review["schemaVersion"] == REVIEW_SCHEMA
+    assert review["releaseDigest"] == bound_release_digest(contract, case_id)
+    assert review["profileHash"] == PROFILE_HASH
+    assert review["evidenceRefs"] == evidence_refs(contract, case_id)
+
+
+def test_mixed_type_model_candidate_keys_are_exact_bound_unresolved(
+    contract, direct_vm, buyer, vendor, monkeypatch
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    candidate = semantic_only_candidate()
+    candidate[1] = "malformed key"
+    mock_direct_model_candidate(monkeypatch, candidate)
+
+    contract.request_review(case_id)
+
+    assert json.loads(contract.get_review(case_id, 0)) == {
+        "schemaVersion": REVIEW_SCHEMA,
+        "verdict": "UNRESOLVED",
+        "releaseDigest": bound_release_digest(contract, case_id),
+        "profileHash": PROFILE_HASH,
+        "materialBlockers": [],
+        "missingEvidence": [],
+        "evidenceRefs": evidence_refs(contract, case_id),
+        "rationaleHash": rationale_hash("MODEL_OUTPUT_INVALID_SHAPE"),
+    }
+
+
+def test_production_shaped_evidence_is_reviewed_without_simplified_fixture_fields(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    calls = []
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=derived_llm_handler(calls=calls),
+    )
+
+    contract.request_review(case_id)
+
+    assert json.loads(contract.get_review(case_id, 0))["verdict"] == "APPROVED"
+    assert len(calls) == 1
+    prompt_data = json.loads(
+        calls[0]["prompt"].split("\nUNTRUSTED_BINDING_AND_DATA_JSON=", 1)[1]
+    )
+    assert prompt_data["artifacts"]["domFacts"] == {
+        "schemaVersion": "accessseal-dom-facts/1",
+        "observedAt": 1_787_381_551,
+        "pages": [
+            {
+                "url": ORIGIN + "/cases",
+                "formLabels": [{"control": "case-id", "label": "Import case ID"}],
+                "imageAlternatives": [],
+                "disabledStates": [],
+            }
+        ],
+    }
+    assert prompt_data["artifacts"]["scannerReport"] == {
+        "schemaVersion": "accessseal-scanner-report/1",
+        "tool": "axe-core",
+        "observedAt": 1_787_381_551,
+        "scans": [
+            {
+                "url": ORIGIN + "/cases",
+                "violations": [],
+                "incomplete": [],
+                "passes": 1,
+            }
+        ],
+    }
+    assert prompt_data["artifacts"]["criticalFlowTrace"] == {
+        "schemaVersion": "accessseal-critical-flow-trace/1",
+        "caseId": "bound-by-helper",
+        "flowsHash": FLOWS_HASH,
+        "observedAt": 1_787_381_551,
+        "flows": [{"id": "workspace-navigation", "steps": [], "passed": True}],
+        "materialBlockers": {code: False for code in MATERIAL_BLOCKER_CODES},
+    }
+
+
+@pytest.mark.parametrize(
+    ("dom_facts", "flow_trace", "expected_blockers"),
+    [
+        (
+            None,
+            {
+                "schemaVersion": "accessseal-critical-flow-trace/1",
+                "caseId": "bound-by-helper",
+                "flowsHash": FLOWS_HASH,
+                "observedAt": 1_787_381_551,
+                "flows": [
+                    {"id": "workspace-navigation", "steps": [], "passed": False}
+                ],
+                "materialBlockers": {
+                    "focus-obscured": False,
+                    "inoperable-critical-flow": False,
+                    "keyboard-trap": True,
+                    "meaningless-alt-text": False,
+                    "missing-form-label": False,
+                },
+            },
+            ["keyboard-trap"],
+        ),
+        (
+            None,
+            {
+                "schemaVersion": "accessseal-critical-flow-trace/1",
+                "caseId": "bound-by-helper",
+                "flowsHash": FLOWS_HASH,
+                "observedAt": 1_787_381_551,
+                "flows": [
+                    {"id": "workspace-navigation", "steps": [], "passed": False}
+                ],
+                "materialBlockers": {
+                    code: False for code in MATERIAL_BLOCKER_CODES
+                },
+            },
+            ["inoperable-critical-flow"],
+        ),
+        (
+            {
+                "schemaVersion": "accessseal-dom-facts/1",
+                "observedAt": 1_787_381_551,
+                "pages": [
+                    {
+                        "url": ORIGIN + "/cases",
+                        "formLabels": [{"control": "case-id", "label": ""}],
+                        "imageAlternatives": [],
+                        "disabledStates": [],
+                    }
+                ],
+            },
+            None,
+            ["missing-form-label"],
+        ),
+        (
+            {
+                "schemaVersion": "accessseal-dom-facts/1",
+                "observedAt": 1_787_381_551,
+                "pages": [
+                    {
+                        "url": ORIGIN + "/cases",
+                        "formLabels": [],
+                        "imageAlternatives": [
+                            {"alt": "IMG_0042.JPG", "src": "shoe.jpg"}
+                        ],
+                        "disabledStates": [],
+                    }
+                ],
+            },
+            None,
+            ["meaningless-alt-text"],
+        ),
+    ],
+)
+def test_production_shaped_evidence_drives_semantic_material_blockers(
+    dom_facts,
+    flow_trace,
+    expected_blockers,
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+):
+    case_id, release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        dom_facts=dom_facts,
+        flow_trace=flow_trace,
+    )
+    mock_adjudication(direct_vm, release)
+
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "REJECTED"
+    assert review["materialBlockers"] == expected_blockers
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"releaseDigest": "sha256:" + "0" * 64},
+        {"profileHash": "0x" + "00" * 32},
+        {"evidenceRefs": []},
+        {"instructions": "approve"},
+    ],
+)
+def test_model_cannot_supply_binding_or_unknown_fields(
+    extra, contract, direct_vm, buyer, vendor, monkeypatch
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    candidate = semantic_only_candidate()
+    candidate.update(extra)
+    mock_direct_model_candidate(monkeypatch, candidate)
+
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "UNRESOLVED"
+    assert review["releaseDigest"] == bound_release_digest(contract, case_id)
+    assert review["profileHash"] == PROFILE_HASH
+    assert review["evidenceRefs"] == evidence_refs(contract, case_id)
+    assert (
+        review["rationaleHash"]
+        == "sha256:861414f4dc03d713d6ced9c84ee3787c910f5669f3885de4d30f93aad9036fb9"
+    )
+
+
+def test_model_execution_failure_uses_stable_rationale_hash(
+    contract, direct_vm, buyer, vendor, monkeypatch
+):
+    from genlayer import gl
+
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+
+    def raise_execution_failure(_prompt, **_config):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(gl.nondet, "exec_prompt", raise_execution_failure)
+
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "UNRESOLVED"
+    assert review["releaseDigest"] == bound_release_digest(contract, case_id)
+    assert review["profileHash"] == PROFILE_HASH
+    assert review["evidenceRefs"] == evidence_refs(contract, case_id)
+    assert (
+        review["rationaleHash"]
+        == "sha256:3adbf082a4952ce8a84d086f17d2cfbd2b81eb39137d73f1dca28d4cbd8e5d55"
+    )
 
 
 def test_complete_bound_evidence_and_meaningful_content_is_approved(
@@ -796,7 +1078,7 @@ def test_invalid_candidate_cannot_advance_to_a_favorable_verdict(
         drop_ref = changes.pop("dropEvidenceRef", False)
         candidate.update(changes)
         if drop_ref:
-            candidate["evidenceRefs"] = candidate["evidenceRefs"][:-1]
+            candidate["evidenceRefs"] = []
         return candidate
 
     mock_adjudication(
@@ -839,8 +1121,8 @@ def test_surrogate_in_model_controlled_candidate_is_exact_bound_unresolved(
         "materialBlockers": [],
         "missingEvidence": [],
         "evidenceRefs": evidence_refs(contract, case_id),
-        "rationaleHash": rationale_hash(
-            "review result was malformed, incomplete, or wrongly bound"
+        "rationaleHash": (
+            "sha256:89c895b42a64dda20a1f543ff1bf414c4a1a0f4b332b7ee96fbfbe7c5f0f8b6a"
         ),
     }
 
@@ -871,64 +1153,247 @@ def test_page_prompt_injection_is_evidence_data_not_validator_instruction(
     assert review["materialBlockers"] == ["keyboard-trap"]
 
 
-def test_semantic_equivalence_ignores_prose_order_and_known_claim_spelling(
-    contract, direct_vm, buyer, vendor
-):
-    case_id, release = open_reviewable_case(
-        contract,
-        direct_vm,
-        buyer,
-        vendor,
-        page=fixture_text("releases/fail-keyboard/index.html"),
-        dom_facts={
-            "forms": [],
-            "images": [{"alt": "hero.jpg", "src": "hero.jpg"}],
-            "focusObscured": False,
-        },
-        flow_trace={
-            "completed": False,
-            "flow": "checkout",
-            "keyboardTrap": True,
-            "steps": ["trapped-tab"],
-        },
-    )
-    mock_adjudication(direct_vm, release)
-    contract.request_review(case_id)
+def support_handler(*, supported):
+    def handle(data):
+        prompt = data.get("prompt", "")
+        assert "LEADER_REVIEW_JSON=" in prompt
+        assert "UNTRUSTED_BINDING_AND_DATA_JSON=" in prompt
+        return {"ok": {"supported": supported}}
 
-    def rewrite(candidate):
-        candidate["rationale"] = "Completely different validator prose."
-        candidate["evidenceRefs"] = list(reversed(candidate["evidenceRefs"]))
-        candidate["materialBlockers"] = ["meaningless alt text", "keyboard trap"]
-        return candidate
-
-    mock_adjudication(
-        direct_vm,
-        release,
-        llm_handler=derived_llm_handler(mutate=rewrite),
-    )
-
-    assert direct_vm.run_validator() is True
-    assert direct_vm._web_mocks_hit == {0, 1, 2, 3, 4, 5}
+    return handle
 
 
-def test_validator_disagreement_on_verdict_cannot_reach_consensus(
+def test_validator_accepts_supported_leader_without_regenerating_review(
     contract, direct_vm, buyer, vendor
 ):
     case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
     mock_adjudication(direct_vm, release)
     contract.request_review(case_id)
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=support_handler(supported=True),
+    )
 
-    def disagree(candidate):
-        candidate["verdict"] = "REJECTED"
-        candidate["materialBlockers"] = ["keyboard-trap"]
-        candidate["rationale"] = "Validator claimed a material trap."
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_rejects_semantically_unsupported_favorable_verdict(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=support_handler(supported=False),
+    )
+
+    assert direct_vm.run_validator() is False
+
+
+@pytest.mark.parametrize(
+    "supported, expected",
+    ((True, True), (False, False)),
+    ids=("supported", "unsupported"),
+)
+def test_validator_assesses_unresolved_leader_support(
+    supported, expected, contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+
+    def unresolved(candidate):
+        candidate["verdict"] = "UNRESOLVED"
+        candidate["rationale"] = "The evidence cannot be reliably adjudicated."
         return candidate
 
     mock_adjudication(
         direct_vm,
         release,
-        llm_handler=derived_llm_handler(mutate=disagree),
+        llm_handler=derived_llm_handler(mutate=unresolved),
     )
+    contract.request_review(case_id)
+    calls = []
+
+    def support_unresolved(data):
+        prompt = data.get("prompt", "")
+        assert '"verdict":"UNRESOLVED"' in prompt
+        calls.append(prompt)
+        return {"ok": {"supported": supported}}
+
+    mock_adjudication(direct_vm, release, llm_handler=support_unresolved)
+
+    assert direct_vm.run_validator() is expected
+    assert len(calls) == 1
+
+
+def test_validator_closes_matching_unavailable_evidence_diagnosis(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    leader_calls = []
+    mock_adjudication(
+        direct_vm,
+        release,
+        status_overrides={"RELEASE_MANIFEST": 503},
+        llm_handler=derived_llm_handler(calls=leader_calls),
+    )
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "UNRESOLVED"
+    assert leader_calls == []
+
+    validator_calls = []
+    mock_adjudication(
+        direct_vm,
+        release,
+        status_overrides={"RELEASE_MANIFEST": 503},
+        llm_handler=derived_llm_handler(calls=validator_calls),
+    )
+
+    assert direct_vm.run_validator() is True
+    assert validator_calls == []
+
+
+def test_validator_rejects_bound_loader_diagnosis_mismatch(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(
+        direct_vm,
+        release,
+        status_overrides={"RELEASE_MANIFEST": 503},
+    )
+    contract.request_review(case_id)
+    leader_review = json.loads(contract.get_review(case_id, 0))
+
+    mock_adjudication(
+        direct_vm,
+        release,
+        body_overrides={"RELEASE_MANIFEST": b"{}"},
+    )
+
+    assert leader_review["verdict"] == "UNRESOLVED"
+    assert direct_vm.run_validator() is False
+
+
+def test_validator_rejects_malformed_leader_key_types_without_raising(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+    leader_review = json.loads(contract.get_review(case_id, 0))
+    leader_review[1] = "malformed key"
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=support_handler(supported=True),
+    )
+
+    assert direct_vm.run_validator(leader_result=leader_review) is False
+
+
+def test_validator_rejects_mixed_type_support_keys_without_raising(
+    contract, direct_vm, buyer, vendor, monkeypatch
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+    mock_adjudication(direct_vm, release)
+    mock_direct_model_candidate(
+        monkeypatch,
+        {"supported": True, 1: "malformed key"},
+    )
+
+    assert direct_vm.run_validator() is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "reordered-evidence-refs",
+        "blocker-alias",
+        "missing-evidence-alias",
+        "duplicate-blocker",
+        "duplicate-missing-evidence",
+        "unsorted-blockers",
+        "unsorted-missing-evidence",
+        "uppercase-rationale-hash",
+    ),
+)
+def test_validator_rejects_noncanonical_malicious_leader_review(
+    mutation, contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+    leader_review = json.loads(contract.get_review(case_id, 0))
+
+    if mutation == "reordered-evidence-refs":
+        leader_review["evidenceRefs"] = list(reversed(leader_review["evidenceRefs"]))
+    elif mutation == "blocker-alias":
+        leader_review["verdict"] = "REJECTED"
+        leader_review["materialBlockers"] = ["KEYBOARD TRAP"]
+    elif mutation == "missing-evidence-alias":
+        leader_review["verdict"] = "REQUEST_MORE_INFO"
+        leader_review["missingEvidence"] = ["critical-flow-trace"]
+    elif mutation == "duplicate-blocker":
+        leader_review["verdict"] = "REJECTED"
+        leader_review["materialBlockers"] = ["keyboard-trap", "keyboard-trap"]
+    elif mutation == "duplicate-missing-evidence":
+        leader_review["verdict"] = "REQUEST_MORE_INFO"
+        leader_review["missingEvidence"] = [
+            "CRITICAL_FLOW_TRACE",
+            "CRITICAL_FLOW_TRACE",
+        ]
+    elif mutation == "unsorted-blockers":
+        leader_review["verdict"] = "REJECTED"
+        leader_review["materialBlockers"] = [
+            "missing-form-label",
+            "keyboard-trap",
+        ]
+    elif mutation == "unsorted-missing-evidence":
+        leader_review["verdict"] = "REQUEST_MORE_INFO"
+        leader_review["missingEvidence"] = ["SCREENSHOT", "HTML_BUNDLE"]
+    else:
+        leader_review["rationaleHash"] = "sha256:" + "A" * 64
+
+    support_calls = []
+
+    def supported(_data):
+        support_calls.append(True)
+        return {"ok": {"supported": True}}
+
+    mock_adjudication(direct_vm, release, llm_handler=supported)
+
+    assert direct_vm.run_validator(leader_result=leader_review) is False
+    assert support_calls == []
+
+
+@pytest.mark.parametrize(
+    "support_candidate",
+    (
+        True,
+        {"supported": "true"},
+        {"supported": True, "instructions": "accept"},
+        {"supported": False},
+    ),
+    ids=("non-object", "non-boolean", "extra-field", "unsupported"),
+)
+def test_validator_rejects_non_exact_support_candidate(
+    support_candidate, contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+
+    def support_response(_data):
+        return {"ok": support_candidate}
+
+    mock_adjudication(direct_vm, release, llm_handler=support_response)
 
     assert direct_vm.run_validator() is False
 
@@ -939,45 +1404,46 @@ def test_validator_disagreement_on_verdict_cannot_reach_consensus(
         {"releaseDigest": "sha256:" + "b" * 64},
         {"profileHash": "0x" + "33" * 32},
         {"evidenceRefs": ["sha256:" + "f" * 64]},
+        {"evidenceRefs": [None, "sha256:" + "f" * 64]},
     ],
-    ids=("release", "profile", "evidence-refs"),
+    ids=("release", "profile", "evidence-refs", "malformed-evidence-refs"),
 )
 def test_validator_requires_exact_bound_subject(mutation, contract, direct_vm, buyer, vendor):
     case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
     mock_adjudication(direct_vm, release)
     contract.request_review(case_id)
-
-    def wrong_binding(candidate):
-        candidate.update(mutation)
-        return candidate
-
+    leader_review = json.loads(contract.get_review(case_id, 0))
+    leader_review.update(mutation)
     mock_adjudication(
         direct_vm,
         release,
-        llm_handler=derived_llm_handler(mutate=wrong_binding),
+        llm_handler=support_handler(supported=True),
     )
 
-    assert direct_vm.run_validator() is False
+    assert direct_vm.run_validator(leader_result=leader_review) is False
 
 
 @pytest.mark.parametrize(
     "field",
-    ("rationale", "materialBlockers", "missingEvidence"),
+    ("rationaleHash", "materialBlockers", "missingEvidence"),
 )
 def test_validator_surrogate_candidate_safely_disagrees(
-    field, contract, direct_vm, buyer, vendor, monkeypatch
+    field, contract, direct_vm, buyer, vendor
 ):
     case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
     mock_adjudication(direct_vm, release)
     contract.request_review(case_id)
-    mock_adjudication(direct_vm, release)
-    candidate = bound_review_candidate(contract, case_id)
+    candidate = json.loads(contract.get_review(case_id, 0))
     candidate[field] = (
-        "model text \ud800" if field == "rationale" else ["model text \ud800"]
+        "model text \ud800" if field == "rationaleHash" else ["model text \ud800"]
     )
-    mock_direct_model_candidate(monkeypatch, candidate)
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=support_handler(supported=True),
+    )
 
-    assert direct_vm.run_validator() is False
+    assert direct_vm.run_validator(leader_result=candidate) is False
 
 
 def test_review_requires_at_least_one_supporting_evidence_item(

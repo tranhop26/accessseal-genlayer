@@ -232,12 +232,12 @@ function commands(overrides: Record<string, CommandResult> = {}) {
     "root-lint": result(actualRootLintOutput),
     "contract-schema": result(actualSchemaOutput),
     "root-typecheck": result("accessseal typecheck\ntsc --noEmit"),
-    direct: result("214 passed in 9.0s"),
-    integration: result("31 passed, 1 skipped in 9.0s"),
-    "root-scripts": result("tests 45\npass 45\nfail 0"),
+    direct: result("================ 250 passed in 9.0s ================"),
+    integration: result("================ 38 passed, 1 skipped in 9.0s ================"),
+    "root-scripts": result("ℹ tests 130\nℹ pass 130\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0"),
     "frontend-lint": result("0 warnings"),
     "frontend-typecheck": result("typecheck complete"),
-    "frontend-unit": result("Test Files 8 passed (8)\nTests 63 passed (63)"),
+    "frontend-unit": result("Test Files 16 passed (16)\nTests 128 passed (128)"),
     "frontend-build": result("Compiled successfully\nRoute (app)"),
     "frontend-e2e-1": result("9 passed (31.0s)"),
     "frontend-e2e-2": result("9 passed (31.1s)"),
@@ -247,6 +247,16 @@ function commands(overrides: Record<string, CommandResult> = {}) {
 }
 
 function result(stdout: string, exitCode = 0): CommandResult { return { exitCode, stdout, stderr: "" }; }
+
+function replaceLast(value: string, search: string, replacement: string): string {
+  const index = value.lastIndexOf(search);
+  assert.notEqual(index, -1, `missing fixture text: ${search}`);
+  return value.slice(0, index) + replacement + value.slice(index + search.length);
+}
+
+function ansi(value: string, color = 32): string {
+  return `\u001b[${color}m${value}\u001b[0m`;
+}
 
 test("only independent official readers, publication APIs, and actual command outputs can create proof", async () => {
   const proof = await verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands() });
@@ -259,7 +269,11 @@ test("only independent official readers, publication APIs, and actual command ou
     contractAddress: contract,
     safeTestConfig: false,
   });
-  assert.equal(proof.checks.find((item) => item.id === "direct")?.passed, 214);
+  assert.equal(proof.checks.find((item) => item.id === "direct")?.passed, 250);
+  assert.equal(proof.checks.find((item) => item.id === "integration")?.passed, 38);
+  assert.equal(proof.checks.find((item) => item.id === "root-scripts")?.passed, 130);
+  assert.equal(proof.checks.find((item) => item.id === "frontend-unit")?.passed, 128);
+  assert.equal(proof.checks.find((item) => item.id === "root-lint")?.passed, 9);
   assert.equal(proof.proofRows.payout.childTransactionHash, payoutChild);
   assert.equal(proof.proofRows.payout.amount, "900719925474099312345");
   assert.equal(proof.proofRows.payout.executor, settler);
@@ -370,17 +384,97 @@ test("accepts only canonical decimal-string u256 amounts and exact pinned absent
 
 test("rejects failed or count-spoofed command results rather than accepting declared PASS strings", async () => {
   for (const changed of [
-    { direct: result("214 passed", 1) },
-    { direct: result("213 passed") },
-    { integration: result("31 passed, 0 skipped") },
+    { direct: result("250 passed", 1) },
+    { direct: result("249 passed") },
+    { integration: result("38 passed, 0 skipped") },
+    { "root-scripts": result("ℹ tests 129\nℹ pass 129\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") },
+    { "frontend-unit": result("Test Files 16 passed (16)\nTests 127 passed (127)") },
     { "frontend-e2e-2": result("7 passed") },
-    { "root-lint": result(actualRootLintOutput.replace(/Lint passed \(2 checks\)/, "prompt lint missing")) },
+    { "root-lint": result(actualRootLintOutput.replaceAll("Lint passed (3 checks)", "prompt lint missing")) },
     { "contract-schema": result('{"ok":false,"schema":{}}') },
     { "root-typecheck": result("", 0) },
   ] as Array<Record<string, CommandResult>>) {
     await assert.rejects(verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands(changed) }), /command|count|suite|check/i);
   }
 });
+
+for (const [name, stdout] of [
+  ["missing prompt lint summary", replaceLast(actualRootLintOutput, "✓ Lint passed (3 checks)", "")],
+  ["corrupted prompt lint summary", replaceLast(actualRootLintOutput, "✓ Lint passed (3 checks)", "✓ Lint passed (2 checks)")],
+  ["warning-bearing lint output", `${actualRootLintOutput}\nWarnings:\n  line 1: fixture warning`],
+  ["extra lint summary", `${actualRootLintOutput}\n✓ Lint passed (3 checks)`],
+] as const) {
+  test(`rejects ${name}`, async () => {
+    await assert.rejects(
+      verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands({ "root-lint": result(stdout) }) }),
+      /root-lint.*(?:count|output|summary|warning)/i,
+    );
+  });
+}
+
+for (const [name, changed] of [
+  ["a prefixed direct total", { direct: result("================ 1250 passed in 9.0s ================") }],
+  ["a misleading direct line before the real contradictory summary", { direct: result("diagnostic: 250 passed\n================ 249 passed in 9.0s ================") }],
+  ["duplicate direct summaries", { direct: result("================ 250 passed in 9.0s ================\n================ 250 passed in 9.1s ================") }],
+  ["a pytest failure summary beside a passing summary", { direct: result("================ 250 passed in 9.0s ================\n================ 1 failed, 249 passed in 9.1s ================") }],
+  ["a prefixed integration total", { integration: result("================ 138 passed, 1 skipped in 9.0s ================") }],
+  ["duplicate contradictory integration summaries", { integration: result("================ 38 passed, 1 skipped in 9.0s ================\n================ 37 passed, 1 skipped in 9.1s ================") }],
+  ["a nonzero script failure count", { "root-scripts": result("ℹ tests 130\nℹ pass 130\nℹ fail 1\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
+  ["a misleading script line before contradictory counts", { "root-scripts": result("ℹ tests 130\ndiagnostic pass 130\nℹ pass 129\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
+  ["duplicate contradictory frontend summaries", { "frontend-unit": result("Test Files 16 passed (16)\nTests 128 passed (128)\nTests 127 passed (127)") }],
+  ["a prefixed end-to-end total", { "frontend-e2e-1": result("19 passed (31.0s)") }],
+  ["a misleading end-to-end line before the real summary", { "frontend-e2e-1": result("diagnostic: 9 passed\n8 passed (31.0s)") }],
+  ["duplicate end-to-end summaries", { "frontend-e2e-1": result("9 passed (31.0s)\n9 passed (31.1s)") }],
+] as const) {
+  test(`rejects ${name}`, async () => {
+    await assert.rejects(
+      verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands(changed) }),
+      /(?:direct|integration|root-scripts|frontend-unit|frontend-e2e-1).*(?:count|output|summary|failed)/i,
+    );
+  });
+}
+
+for (const [name, id, expected, changed] of [
+  ["lint", "root-lint", 9, { "root-lint": result(actualRootLintOutput.replaceAll("✓ Lint passed (3 checks)", ansi("✓ Lint passed (3 checks)"))) }],
+  ["direct pytest", "direct", 250, { direct: result(ansi("================ 250 passed in 9.0s ================")) }],
+  ["integration pytest", "integration", 38, { integration: result(ansi("================ 38 passed, 1 skipped in 9.0s ================")) }],
+  ["Node test", "root-scripts", 130, { "root-scripts": result(["ℹ tests 130", "ℹ pass 130", "ℹ fail 0", "ℹ cancelled 0", "ℹ skipped 0", "ℹ todo 0"].map((line) => ansi(line)).join("\n")) }],
+  ["Vitest", "frontend-unit", 128, { "frontend-unit": result(`${ansi("Test Files 16 passed (16)")}\n${ansi("Tests 128 passed (128)")}`) }],
+  ["Playwright", "frontend-e2e-1", 9, { "frontend-e2e-1": result(ansi("9 passed (31.0s)")) }],
+] as const) {
+  test(`accepts ANSI-colored legitimate ${name} summaries`, async () => {
+    const proof = await verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands(changed) });
+    assert.equal(proof.checks.find((item) => item.id === id)?.passed, expected);
+  });
+}
+
+for (const [name, changed] of [
+  ["ANSI-colored pytest failure beside a valid summary", { direct: result(`================ 250 passed in 9.0s ================\n${ansi("================ 1 failed, 249 passed in 9.1s ================", 31)}`) }],
+  ["ANSI-colored integration contradiction beside a valid summary", { integration: result(`================ 38 passed, 1 skipped in 9.0s ================\n${ansi("================ 37 passed, 1 skipped in 9.1s ================", 31)}`) }],
+  ["ANSI-colored Node failure beside a valid summary", { "root-scripts": result(`${commands()["root-scripts"]!.stdout}\n${ansi("ℹ fail 1", 31)}`) }],
+  ["ANSI-colored Vitest contradiction beside a valid summary", { "frontend-unit": result(`${commands()["frontend-unit"]!.stdout}\n${ansi("Tests 127 passed (127)", 31)}`) }],
+  ["ANSI-colored Playwright failure beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 failed", 31)}`) }],
+  ["ANSI-colored Playwright compound failure beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 failed, 8 passed (1.2m)", 31)}`) }],
+  ["ANSI-colored Playwright compound skip beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 skipped, 8 passed (1.2m)", 33)}`) }],
+  ["ANSI-colored Playwright compound interruption beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 interrupted, 8 passed (1.2m)", 33)}`) }],
+  ["ANSI-colored Playwright compound flaky result beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 flaky, 8 passed (1.2m)", 33)}`) }],
+  ["ANSI-colored Playwright compound did-not-run result beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 did not run, 8 passed (1.2m)", 33)}`) }],
+  ["ANSI-colored duplicate valid Playwright summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("9 passed (1.2m)")}`) }],
+] as const) {
+  test(`rejects ${name}`, async () => {
+    await assert.rejects(
+      verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands(changed) }),
+      /(?:direct|integration|root-scripts|frontend-unit|frontend-e2e-1).*(?:count|output|summary|failed)/i,
+    );
+  });
+}
+
+for (const duration of ["1.5m", "1.2h"] as const) {
+  test(`accepts Playwright ${duration.endsWith("m") ? "minute" : "hour"} duration summaries`, async () => {
+    const proof = await verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands({ "frontend-e2e-1": result(`9 passed (${duration})`) }) });
+    assert.equal(proof.checks.find((item) => item.id === "frontend-e2e-1")?.passed, 9);
+  });
+}
 
 test("rechecks clean HEAD and exact source bindings before atomic installation", async () => {
   const output = join(root, "work", "evidence", "final");

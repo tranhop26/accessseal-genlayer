@@ -238,6 +238,25 @@ describe("AccessSeal contract adapter", () => {
     await expect(client.readReview("case-1", 0)).resolves.toEqual(review);
   });
 
+  it("accepts the unchanged eight-field V2 final review readback", async () => {
+    const v2Review = {
+      schemaVersion: "accessseal-review/1",
+      verdict: "APPROVED",
+      releaseDigest: `sha256:${"a".repeat(64)}`,
+      profileHash: `0x${"b".repeat(64)}`,
+      materialBlockers: [],
+      missingEvidence: [],
+      evidenceRefs: [`sha256:${"c".repeat(64)}`],
+      rationaleHash: `sha256:${"d".repeat(64)}`,
+    };
+    const client = new AccessSealClient(
+      { readContract: vi.fn().mockResolvedValue(JSON.stringify(v2Review)) } as never,
+      address,
+    );
+
+    await expect(client.readReview("case-1", 0)).resolves.toEqual(v2Review);
+  });
+
   it("matches only the exact pinned viem UserError message for an absent view", () => {
     const wrapped = new Error(
       "An internal error was received.\n\nDetails: UserError(message='evidence epoch does not exist')\nVersion: viem@2.55.16",

@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 import { abi, createClient } from "genlayer-js";
 import { studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
@@ -236,21 +237,96 @@ type VerificationInputs = {
   commandResults: Record<string, CommandResult>;
 };
 
-const CHECKS = [
-  { id: "root-lint", command: "npm run lint", passed: /Lint passed \(3 checks\)[\s\S]*Lint passed \(2 checks\)[\s\S]*accessseal-frontend[\s\S]*eslint \. --max-warnings=0/i, count: 5, skipped: 0 },
-  { id: "contract-schema", command: "genvm-lint schema --json contracts/access_seal.py", passed: /^\s*\{"ok":true,"schema":\{[\s\S]*\}\}\s*$/i, count: 22, skipped: 0 },
-  { id: "root-typecheck", command: "npm run typecheck", passed: /(?:accessseal.*typecheck|tsc --noEmit)/i, count: 1, skipped: 0 },
-  { id: "direct", command: "npm run test:direct", passed: /214 passed/i, count: 214, skipped: 0 },
-  { id: "integration", command: "npm run test:integration", passed: /31 passed, 1 skipped/i, count: 31, skipped: 1 },
-  { id: "root-scripts", command: "npm run test:scripts", passed: /(?:tests|pass)\s+45[\s\S]*(?:pass|fail)\s+(?:45|0)/i, count: 45, skipped: 0 },
-  { id: "frontend-lint", command: "npm --prefix frontend run lint", passed: /(?:0 warnings|accessseal-frontend)/i, count: 1, skipped: 0 },
-  { id: "frontend-typecheck", command: "npm --prefix frontend run typecheck", passed: /(?:typecheck|tsc --noEmit)/i, count: 1, skipped: 0 },
-  { id: "frontend-unit", command: "npm --prefix frontend run test", passed: /Tests\s+63 passed \(63\)/i, count: 63, skipped: 0 },
-  { id: "frontend-build", command: "npm --prefix frontend run build", passed: /(?:Compiled successfully|Route \(app\))/i, count: 1, skipped: 0 },
-  { id: "frontend-e2e-1", command: "npm --prefix frontend run test:e2e # run 1", passed: /9 passed/i, count: 9, skipped: 0 },
-  { id: "frontend-e2e-2", command: "npm --prefix frontend run test:e2e # run 2", passed: /9 passed/i, count: 9, skipped: 0 },
-  { id: "secret-scan", command: "internal environment-secret value and credential-material scan", passed: /Secret-value scan: PASS/i, count: 1, skipped: 0 },
-] as const;
+type ParsedCommandSummary = { passed: number; skipped: number };
+type CheckDefinition = {
+  id: string;
+  command: string;
+  parse: (output: string) => ParsedCommandSummary | null;
+};
+
+function outputLines(output: string): string[] {
+  return output.split(/\r?\n/).map((line) => stripVTControlCharacters(line).trim()).filter(Boolean);
+}
+
+function fixedSummary(pattern: RegExp, passed: number, skipped = 0): CheckDefinition["parse"] {
+  return (output) => pattern.test(output) ? { passed, skipped } : null;
+}
+
+function parseRootLintSummary(output: string): ParsedCommandSummary | null {
+  const lines = outputLines(output);
+  if (lines.some((line) => /\bwarnings?:/i.test(line))) return null;
+  const lintLines = lines.filter((line) => /\bLint (?:passed|failed)\b/i.test(line));
+  const summaries = lintLines.map((line) => line.match(/^✓ Lint passed \((\d+) checks\)$/));
+  if (summaries.length !== 3 || summaries.some((match) => match === null)) return null;
+  const counts = summaries.map((match) => Number(match![1]));
+  if (counts.some((count) => count !== 3)) return null;
+  if (lines.filter((line) => /^> accessseal-frontend@\S+ lint$/.test(line)).length !== 1) return null;
+  if (lines.filter((line) => line === "> eslint . --max-warnings=0").length !== 1) return null;
+  return { passed: counts.reduce((total, count) => total + count, 0), skipped: 0 };
+}
+
+function parsePytestSummary(output: string, expectedPassed: number, expectedSkipped: number): ParsedCommandSummary | null {
+  const terminalSummaries = outputLines(output).filter((line) => /^=+\s+.+ in \d+(?:\.\d+)?s\s+=+$/.test(line));
+  if (terminalSummaries.length !== 1) return null;
+  const match = terminalSummaries[0].match(/^=+\s+(\d+) passed(?:, (\d+) skipped)? in \d+(?:\.\d+)?s\s+=+$/);
+  if (!match) return null;
+  const passed = Number(match[1]);
+  const skipped = Number(match[2] ?? 0);
+  return passed === expectedPassed && skipped === expectedSkipped ? { passed, skipped } : null;
+}
+
+function parseNodeTestSummary(output: string): ParsedCommandSummary | null {
+  const matches = outputLines(output)
+    .map((line) => line.match(/^ℹ (tests|pass|fail|cancelled|skipped|todo) (\d+)$/))
+    .filter((match): match is RegExpMatchArray => match !== null);
+  const values = new Map<string, number>();
+  for (const match of matches) {
+    if (values.has(match[1])) return null;
+    values.set(match[1], Number(match[2]));
+  }
+  if (values.size !== 6 || values.get("tests") !== 130 || values.get("pass") !== 130) return null;
+  if (values.get("fail") !== 0 || values.get("cancelled") !== 0 || values.get("skipped") !== 0 || values.get("todo") !== 0) return null;
+  return { passed: values.get("pass")!, skipped: values.get("skipped")! };
+}
+
+function parseFrontendUnitSummary(output: string): ParsedCommandSummary | null {
+  const summaryLines = outputLines(output).filter((line) => /^(?:Test Files|Tests)\b/.test(line));
+  if (summaryLines.length !== 2) return null;
+  const fileMatches = summaryLines.map((line) => line.match(/^Test Files\s+(\d+) passed \((\d+)\)$/)).filter((match): match is RegExpMatchArray => match !== null);
+  const testMatches = summaryLines.map((line) => line.match(/^Tests\s+(\d+) passed \((\d+)\)$/)).filter((match): match is RegExpMatchArray => match !== null);
+  if (fileMatches.length !== 1 || testMatches.length !== 1) return null;
+  const filesPassed = Number(fileMatches[0][1]);
+  const filesTotal = Number(fileMatches[0][2]);
+  const passed = Number(testMatches[0][1]);
+  const total = Number(testMatches[0][2]);
+  if (filesPassed !== 16 || filesTotal !== 16 || passed !== 128 || total !== 128) return null;
+  return { passed, skipped: 0 };
+}
+
+function parsePlaywrightSummary(output: string): ParsedCommandSummary | null {
+  const summaryLines = outputLines(output).filter((line) => /^\d+ (?:passed|failed|skipped|interrupted|flaky|did not run)(?:,\s*\d+ (?:passed|failed|skipped|interrupted|flaky|did not run))*(?: \(\d+(?:\.\d+)?(?:ms|s|m|h)\))?$/.test(line));
+  if (summaryLines.length !== 1) return null;
+  const match = summaryLines[0].match(/^(\d+) passed \(\d+(?:\.\d+)?(?:ms|s|m|h)\)$/);
+  if (!match) return null;
+  const passed = Number(match[1]);
+  return passed === 9 ? { passed, skipped: 0 } : null;
+}
+
+const CHECKS: readonly CheckDefinition[] = [
+  { id: "root-lint", command: "npm run lint", parse: parseRootLintSummary },
+  { id: "contract-schema", command: "genvm-lint schema --json contracts/access_seal.py", parse: fixedSummary(/^\s*\{"ok":true,"schema":\{[\s\S]*\}\}\s*$/i, 22) },
+  { id: "root-typecheck", command: "npm run typecheck", parse: fixedSummary(/(?:accessseal.*typecheck|tsc --noEmit)/i, 1) },
+  { id: "direct", command: "npm run test:direct", parse: (output) => parsePytestSummary(output, 250, 0) },
+  { id: "integration", command: "npm run test:integration", parse: (output) => parsePytestSummary(output, 38, 1) },
+  { id: "root-scripts", command: "npm run test:scripts", parse: parseNodeTestSummary },
+  { id: "frontend-lint", command: "npm --prefix frontend run lint", parse: fixedSummary(/(?:0 warnings|accessseal-frontend)/i, 1) },
+  { id: "frontend-typecheck", command: "npm --prefix frontend run typecheck", parse: fixedSummary(/(?:typecheck|tsc --noEmit)/i, 1) },
+  { id: "frontend-unit", command: "npm --prefix frontend run test", parse: parseFrontendUnitSummary },
+  { id: "frontend-build", command: "npm --prefix frontend run build", parse: fixedSummary(/(?:Compiled successfully|Route \(app\))/i, 1) },
+  { id: "frontend-e2e-1", command: "npm --prefix frontend run test:e2e # run 1", parse: parsePlaywrightSummary },
+  { id: "frontend-e2e-2", command: "npm --prefix frontend run test:e2e # run 2", parse: parsePlaywrightSummary },
+  { id: "secret-scan", command: "internal environment-secret value and credential-material scan", parse: fixedSummary(/Secret-value scan: PASS/i, 1) },
+];
 
 export async function verifyProofEvidence(inputs: VerificationInputs): Promise<FinalProofV2> {
   const repoRoot = resolve(inputs.repoRoot);
@@ -639,7 +715,8 @@ function verifyActualCommandResults(results: Record<string, CommandResult>): Che
     const result = results[expected.id];
     if (!result || result.exitCode !== 0) throw new Error(`${expected.id} command failed`);
     const output = `${result.stdout}\n${result.stderr}`;
-    if (!expected.passed.test(output)) throw new Error(`${expected.id} suite count/output mismatch`);
+    const summary = expected.parse(output);
+    if (!summary) throw new Error(`${expected.id} suite count/output summary mismatch`);
     if (expected.id === "contract-schema") {
       let payload: { ok?: unknown; schema?: object };
       try { payload = JSON.parse(result.stdout) as { ok?: unknown; schema?: object }; }
@@ -648,7 +725,7 @@ function verifyActualCommandResults(results: Record<string, CommandResult>): Che
         throw new Error("contract-schema output does not bind the exact frozen schema");
       }
     }
-    return { id: expected.id, command: expected.command, exitCode: 0, passed: expected.count, skipped: expected.skipped, outputSha256: hashText(output) };
+    return { id: expected.id, command: expected.command, exitCode: 0, passed: summary.passed, skipped: summary.skipped, outputSha256: hashText(output) };
   });
 }
 
