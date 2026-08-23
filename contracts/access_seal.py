@@ -1398,7 +1398,7 @@ class AccessSeal(gl.Contract):
                 reason,
             )
 
-        def load_review_context() -> dict[str, object]:
+        def adjudicate(context_only: bool = False) -> dict[str, object]:
             evidence_records = json.loads(evidence_facts_json)
             records_by_type: dict[str, dict[str, object]] = {}
             for required_type in MANDATORY_EVIDENCE_TYPES:
@@ -1579,14 +1579,11 @@ class AccessSeal(gl.Contract):
                 separators=(",", ":"),
                 ensure_ascii=False,
             )
-            return {
+            context = {
                 "reviewDataJson": review_data_json,
                 "screenshotBody": screenshot_body,
             }
-
-        def adjudicate() -> dict[str, object]:
-            context = load_review_context()
-            if "reviewDataJson" not in context:
+            if context_only:
                 return context
             review_data_json = str(context["reviewDataJson"])
             screenshot_body = context["screenshotBody"]
@@ -1617,7 +1614,7 @@ class AccessSeal(gl.Contract):
                 evidence_refs,
             ):
                 return False
-            context = load_review_context()
+            context = adjudicate(True)
             if "reviewDataJson" not in context:
                 return context == leader_review
             review_data_json = str(context["reviewDataJson"])
