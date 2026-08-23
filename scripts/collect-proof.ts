@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 import { abi, createClient } from "genlayer-js";
 import { studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
@@ -244,7 +245,7 @@ type CheckDefinition = {
 };
 
 function outputLines(output: string): string[] {
-  return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return output.split(/\r?\n/).map((line) => stripVTControlCharacters(line).trim()).filter(Boolean);
 }
 
 function fixedSummary(pattern: RegExp, passed: number, skipped = 0): CheckDefinition["parse"] {
@@ -283,7 +284,7 @@ function parseNodeTestSummary(output: string): ParsedCommandSummary | null {
     if (values.has(match[1])) return null;
     values.set(match[1], Number(match[2]));
   }
-  if (values.size !== 6 || values.get("tests") !== 111 || values.get("pass") !== 111) return null;
+  if (values.size !== 6 || values.get("tests") !== 124 || values.get("pass") !== 124) return null;
   if (values.get("fail") !== 0 || values.get("cancelled") !== 0 || values.get("skipped") !== 0 || values.get("todo") !== 0) return null;
   return { passed: values.get("pass")!, skipped: values.get("skipped")! };
 }
@@ -303,9 +304,9 @@ function parseFrontendUnitSummary(output: string): ParsedCommandSummary | null {
 }
 
 function parsePlaywrightSummary(output: string): ParsedCommandSummary | null {
-  const summaryLines = outputLines(output).filter((line) => /^\d+ (?:passed|failed|skipped)(?: \(\d+(?:\.\d+)?s\))?$/.test(line));
+  const summaryLines = outputLines(output).filter((line) => /^\d+ (?:passed|failed|skipped)(?: \(\d+(?:\.\d+)?(?:ms|s|m|h)\))?$/.test(line));
   if (summaryLines.length !== 1) return null;
-  const match = summaryLines[0].match(/^(\d+) passed \(\d+(?:\.\d+)?s\)$/);
+  const match = summaryLines[0].match(/^(\d+) passed \(\d+(?:\.\d+)?(?:ms|s|m|h)\)$/);
   if (!match) return null;
   const passed = Number(match[1]);
   return passed === 9 ? { passed, skipped: 0 } : null;
