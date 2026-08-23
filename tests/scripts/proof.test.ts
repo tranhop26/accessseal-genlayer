@@ -232,9 +232,9 @@ function commands(overrides: Record<string, CommandResult> = {}) {
     "root-lint": result(actualRootLintOutput),
     "contract-schema": result(actualSchemaOutput),
     "root-typecheck": result("accessseal typecheck\ntsc --noEmit"),
-    direct: result("240 passed in 9.0s"),
-    integration: result("35 passed, 1 skipped in 9.0s"),
-    "root-scripts": result("tests 95\npass 95\nfail 0"),
+    direct: result("================ 240 passed in 9.0s ================"),
+    integration: result("================ 35 passed, 1 skipped in 9.0s ================"),
+    "root-scripts": result("ℹ tests 111\nℹ pass 111\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0"),
     "frontend-lint": result("0 warnings"),
     "frontend-typecheck": result("typecheck complete"),
     "frontend-unit": result("Test Files 16 passed (16)\nTests 128 passed (128)"),
@@ -247,6 +247,12 @@ function commands(overrides: Record<string, CommandResult> = {}) {
 }
 
 function result(stdout: string, exitCode = 0): CommandResult { return { exitCode, stdout, stderr: "" }; }
+
+function replaceLast(value: string, search: string, replacement: string): string {
+  const index = value.lastIndexOf(search);
+  assert.notEqual(index, -1, `missing fixture text: ${search}`);
+  return value.slice(0, index) + replacement + value.slice(index + search.length);
+}
 
 test("only independent official readers, publication APIs, and actual command outputs can create proof", async () => {
   const proof = await verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands() });
@@ -261,9 +267,9 @@ test("only independent official readers, publication APIs, and actual command ou
   });
   assert.equal(proof.checks.find((item) => item.id === "direct")?.passed, 240);
   assert.equal(proof.checks.find((item) => item.id === "integration")?.passed, 35);
-  assert.equal(proof.checks.find((item) => item.id === "root-scripts")?.passed, 95);
+  assert.equal(proof.checks.find((item) => item.id === "root-scripts")?.passed, 111);
   assert.equal(proof.checks.find((item) => item.id === "frontend-unit")?.passed, 128);
-  assert.equal(proof.checks.find((item) => item.id === "root-lint")?.passed, 6);
+  assert.equal(proof.checks.find((item) => item.id === "root-lint")?.passed, 9);
   assert.equal(proof.proofRows.payout.childTransactionHash, payoutChild);
   assert.equal(proof.proofRows.payout.amount, "900719925474099312345");
   assert.equal(proof.proofRows.payout.executor, settler);
@@ -377,7 +383,7 @@ test("rejects failed or count-spoofed command results rather than accepting decl
     { direct: result("240 passed", 1) },
     { direct: result("239 passed") },
     { integration: result("35 passed, 0 skipped") },
-    { "root-scripts": result("tests 94\npass 94\nfail 0") },
+    { "root-scripts": result("ℹ tests 110\nℹ pass 110\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") },
     { "frontend-unit": result("Test Files 16 passed (16)\nTests 127 passed (127)") },
     { "frontend-e2e-2": result("7 passed") },
     { "root-lint": result(actualRootLintOutput.replaceAll("Lint passed (3 checks)", "prompt lint missing")) },
@@ -387,6 +393,42 @@ test("rejects failed or count-spoofed command results rather than accepting decl
     await assert.rejects(verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands(changed) }), /command|count|suite|check/i);
   }
 });
+
+for (const [name, stdout] of [
+  ["missing prompt lint summary", replaceLast(actualRootLintOutput, "✓ Lint passed (3 checks)", "")],
+  ["corrupted prompt lint summary", replaceLast(actualRootLintOutput, "✓ Lint passed (3 checks)", "✓ Lint passed (2 checks)")],
+  ["warning-bearing lint output", `${actualRootLintOutput}\nWarnings:\n  line 1: fixture warning`],
+  ["extra lint summary", `${actualRootLintOutput}\n✓ Lint passed (3 checks)`],
+] as const) {
+  test(`rejects ${name}`, async () => {
+    await assert.rejects(
+      verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands({ "root-lint": result(stdout) }) }),
+      /root-lint.*(?:count|output|summary|warning)/i,
+    );
+  });
+}
+
+for (const [name, changed] of [
+  ["a prefixed direct total", { direct: result("================ 1240 passed in 9.0s ================") }],
+  ["a misleading direct line before the real contradictory summary", { direct: result("diagnostic: 240 passed\n================ 239 passed in 9.0s ================") }],
+  ["duplicate direct summaries", { direct: result("================ 240 passed in 9.0s ================\n================ 240 passed in 9.1s ================") }],
+  ["a pytest failure summary beside a passing summary", { direct: result("================ 240 passed in 9.0s ================\n================ 1 failed, 239 passed in 9.1s ================") }],
+  ["a prefixed integration total", { integration: result("================ 135 passed, 1 skipped in 9.0s ================") }],
+  ["duplicate contradictory integration summaries", { integration: result("================ 35 passed, 1 skipped in 9.0s ================\n================ 34 passed, 1 skipped in 9.1s ================") }],
+  ["a nonzero script failure count", { "root-scripts": result("ℹ tests 111\nℹ pass 111\nℹ fail 1\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
+  ["a misleading script line before contradictory counts", { "root-scripts": result("ℹ tests 111\ndiagnostic pass 111\nℹ pass 110\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
+  ["duplicate contradictory frontend summaries", { "frontend-unit": result("Test Files 16 passed (16)\nTests 128 passed (128)\nTests 127 passed (127)") }],
+  ["a prefixed end-to-end total", { "frontend-e2e-1": result("19 passed (31.0s)") }],
+  ["a misleading end-to-end line before the real summary", { "frontend-e2e-1": result("diagnostic: 9 passed\n8 passed (31.0s)") }],
+  ["duplicate end-to-end summaries", { "frontend-e2e-1": result("9 passed (31.0s)\n9 passed (31.1s)") }],
+] as const) {
+  test(`rejects ${name}`, async () => {
+    await assert.rejects(
+      verifyProofEvidence({ repoRoot: root, manifest, locators: locators(), reader: new FakeReader(), fetcher, commandResults: commands(changed) }),
+      /(?:direct|integration|root-scripts|frontend-unit|frontend-e2e-1).*(?:count|output|summary|failed)/i,
+    );
+  });
+}
 
 test("rechecks clean HEAD and exact source bindings before atomic installation", async () => {
   const output = join(root, "work", "evidence", "final");
