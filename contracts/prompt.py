@@ -1,3 +1,5 @@
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+
 """Auditable source for the fixed AccessSeal review rubric.
 
 GenVM v0.2.16 deploys and validates an Intelligent Contract as one source file,

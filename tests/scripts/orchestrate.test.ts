@@ -23,6 +23,17 @@ test("direct-test orchestration is native and does not require a WSL distro", ()
   assert.match(source, /run\("gltest", \[directory\]\)/);
 });
 
+test("auditable prompt mirror passes contract lint without warnings", () => {
+  const result = spawnSync("genvm-lint", ["lint", "contracts/prompt.py"], {
+    cwd: process.cwd(),
+    env: { ...process.env, PYTHONUTF8: "1" },
+    encoding: "utf8",
+  });
+  const output = `${result.stdout}\n${result.stderr}`;
+  assert.equal(result.status, 0, output);
+  assert.doesNotMatch(output, /Warnings:|Missing contract dependency header/);
+});
+
 test("native Windows direct tests clean fd0 injection tempfiles", { skip: process.platform !== "win32" }, () => {
   const isolatedTemp = mkdtempSync(join(tmpdir(), "accessseal-direct-"));
   try {
