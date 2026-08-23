@@ -284,7 +284,7 @@ function parseNodeTestSummary(output: string): ParsedCommandSummary | null {
     if (values.has(match[1])) return null;
     values.set(match[1], Number(match[2]));
   }
-  if (values.size !== 6 || values.get("tests") !== 124 || values.get("pass") !== 124) return null;
+  if (values.size !== 6 || values.get("tests") !== 130 || values.get("pass") !== 130) return null;
   if (values.get("fail") !== 0 || values.get("cancelled") !== 0 || values.get("skipped") !== 0 || values.get("todo") !== 0) return null;
   return { passed: values.get("pass")!, skipped: values.get("skipped")! };
 }
@@ -304,7 +304,7 @@ function parseFrontendUnitSummary(output: string): ParsedCommandSummary | null {
 }
 
 function parsePlaywrightSummary(output: string): ParsedCommandSummary | null {
-  const summaryLines = outputLines(output).filter((line) => /^\d+ (?:passed|failed|skipped)(?: \(\d+(?:\.\d+)?(?:ms|s|m|h)\))?$/.test(line));
+  const summaryLines = outputLines(output).filter((line) => /^\d+ (?:passed|failed|skipped|interrupted|flaky|did not run)(?:,\s*\d+ (?:passed|failed|skipped|interrupted|flaky|did not run))*(?: \(\d+(?:\.\d+)?(?:ms|s|m|h)\))?$/.test(line));
   if (summaryLines.length !== 1) return null;
   const match = summaryLines[0].match(/^(\d+) passed \(\d+(?:\.\d+)?(?:ms|s|m|h)\)$/);
   if (!match) return null;

@@ -234,7 +234,7 @@ function commands(overrides: Record<string, CommandResult> = {}) {
     "root-typecheck": result("accessseal typecheck\ntsc --noEmit"),
     direct: result("================ 240 passed in 9.0s ================"),
     integration: result("================ 35 passed, 1 skipped in 9.0s ================"),
-    "root-scripts": result("ℹ tests 124\nℹ pass 124\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0"),
+    "root-scripts": result("ℹ tests 130\nℹ pass 130\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0"),
     "frontend-lint": result("0 warnings"),
     "frontend-typecheck": result("typecheck complete"),
     "frontend-unit": result("Test Files 16 passed (16)\nTests 128 passed (128)"),
@@ -271,7 +271,7 @@ test("only independent official readers, publication APIs, and actual command ou
   });
   assert.equal(proof.checks.find((item) => item.id === "direct")?.passed, 240);
   assert.equal(proof.checks.find((item) => item.id === "integration")?.passed, 35);
-  assert.equal(proof.checks.find((item) => item.id === "root-scripts")?.passed, 124);
+  assert.equal(proof.checks.find((item) => item.id === "root-scripts")?.passed, 130);
   assert.equal(proof.checks.find((item) => item.id === "frontend-unit")?.passed, 128);
   assert.equal(proof.checks.find((item) => item.id === "root-lint")?.passed, 9);
   assert.equal(proof.proofRows.payout.childTransactionHash, payoutChild);
@@ -387,7 +387,7 @@ test("rejects failed or count-spoofed command results rather than accepting decl
     { direct: result("240 passed", 1) },
     { direct: result("239 passed") },
     { integration: result("35 passed, 0 skipped") },
-    { "root-scripts": result("ℹ tests 123\nℹ pass 123\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") },
+    { "root-scripts": result("ℹ tests 129\nℹ pass 129\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") },
     { "frontend-unit": result("Test Files 16 passed (16)\nTests 127 passed (127)") },
     { "frontend-e2e-2": result("7 passed") },
     { "root-lint": result(actualRootLintOutput.replaceAll("Lint passed (3 checks)", "prompt lint missing")) },
@@ -419,8 +419,8 @@ for (const [name, changed] of [
   ["a pytest failure summary beside a passing summary", { direct: result("================ 240 passed in 9.0s ================\n================ 1 failed, 239 passed in 9.1s ================") }],
   ["a prefixed integration total", { integration: result("================ 135 passed, 1 skipped in 9.0s ================") }],
   ["duplicate contradictory integration summaries", { integration: result("================ 35 passed, 1 skipped in 9.0s ================\n================ 34 passed, 1 skipped in 9.1s ================") }],
-  ["a nonzero script failure count", { "root-scripts": result("ℹ tests 124\nℹ pass 124\nℹ fail 1\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
-  ["a misleading script line before contradictory counts", { "root-scripts": result("ℹ tests 124\ndiagnostic pass 124\nℹ pass 123\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
+  ["a nonzero script failure count", { "root-scripts": result("ℹ tests 130\nℹ pass 130\nℹ fail 1\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
+  ["a misleading script line before contradictory counts", { "root-scripts": result("ℹ tests 130\ndiagnostic pass 130\nℹ pass 129\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
   ["duplicate contradictory frontend summaries", { "frontend-unit": result("Test Files 16 passed (16)\nTests 128 passed (128)\nTests 127 passed (127)") }],
   ["a prefixed end-to-end total", { "frontend-e2e-1": result("19 passed (31.0s)") }],
   ["a misleading end-to-end line before the real summary", { "frontend-e2e-1": result("diagnostic: 9 passed\n8 passed (31.0s)") }],
@@ -438,7 +438,7 @@ for (const [name, id, expected, changed] of [
   ["lint", "root-lint", 9, { "root-lint": result(actualRootLintOutput.replaceAll("✓ Lint passed (3 checks)", ansi("✓ Lint passed (3 checks)"))) }],
   ["direct pytest", "direct", 240, { direct: result(ansi("================ 240 passed in 9.0s ================")) }],
   ["integration pytest", "integration", 35, { integration: result(ansi("================ 35 passed, 1 skipped in 9.0s ================")) }],
-  ["Node test", "root-scripts", 124, { "root-scripts": result(["ℹ tests 124", "ℹ pass 124", "ℹ fail 0", "ℹ cancelled 0", "ℹ skipped 0", "ℹ todo 0"].map((line) => ansi(line)).join("\n")) }],
+  ["Node test", "root-scripts", 130, { "root-scripts": result(["ℹ tests 130", "ℹ pass 130", "ℹ fail 0", "ℹ cancelled 0", "ℹ skipped 0", "ℹ todo 0"].map((line) => ansi(line)).join("\n")) }],
   ["Vitest", "frontend-unit", 128, { "frontend-unit": result(`${ansi("Test Files 16 passed (16)")}\n${ansi("Tests 128 passed (128)")}`) }],
   ["Playwright", "frontend-e2e-1", 9, { "frontend-e2e-1": result(ansi("9 passed (31.0s)")) }],
 ] as const) {
@@ -454,6 +454,12 @@ for (const [name, changed] of [
   ["ANSI-colored Node failure beside a valid summary", { "root-scripts": result(`${commands()["root-scripts"]!.stdout}\n${ansi("ℹ fail 1", 31)}`) }],
   ["ANSI-colored Vitest contradiction beside a valid summary", { "frontend-unit": result(`${commands()["frontend-unit"]!.stdout}\n${ansi("Tests 127 passed (127)", 31)}`) }],
   ["ANSI-colored Playwright failure beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 failed", 31)}`) }],
+  ["ANSI-colored Playwright compound failure beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 failed, 8 passed (1.2m)", 31)}`) }],
+  ["ANSI-colored Playwright compound skip beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 skipped, 8 passed (1.2m)", 33)}`) }],
+  ["ANSI-colored Playwright compound interruption beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 interrupted, 8 passed (1.2m)", 33)}`) }],
+  ["ANSI-colored Playwright compound flaky result beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 flaky, 8 passed (1.2m)", 33)}`) }],
+  ["ANSI-colored Playwright compound did-not-run result beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 did not run, 8 passed (1.2m)", 33)}`) }],
+  ["ANSI-colored duplicate valid Playwright summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("9 passed (1.2m)")}`) }],
 ] as const) {
   test(`rejects ${name}`, async () => {
     await assert.rejects(
