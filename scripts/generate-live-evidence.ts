@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } fr
 import {
   LIVE_EVIDENCE_BINDING,
   PAYLOAD_SPECS,
+  RELEASE_MANIFEST_PATH,
   buildReleaseManifest,
   sha256,
   verifyEvidenceBundle,
@@ -20,8 +21,6 @@ const CAPTURE_FILES: Readonly<Record<EvidenceType, string>> = Object.freeze({
   SCANNER_REPORT: "scanner-report.json",
   CRITICAL_FLOW_TRACE: "critical-flow-trace.json",
 });
-const MANIFEST_PATH = "/.well-known/accessseal/release-manifest.json";
-
 type PlannedWrite = { path: string; bytes: Buffer };
 
 async function stat(path: string) {
@@ -194,7 +193,7 @@ export async function generateLiveEvidenceBundle(inputDirectory: string, publicD
   const publicRoot = await safePublicRoot(publicDirectory);
   const payloadWrites = (Object.entries(PAYLOAD_SPECS) as Array<[EvidenceType, (typeof PAYLOAD_SPECS)[EvidenceType]]>)
     .map(([evidenceType, spec]) => ({ path: join(publicRoot, spec.path.slice(1)), bytes: Buffer.from(payloads[evidenceType]) }));
-  const manifestWrite = { path: join(publicRoot, MANIFEST_PATH.slice(1)), bytes: built.bytes };
+  const manifestWrite = { path: join(publicRoot, RELEASE_MANIFEST_PATH.slice(1)), bytes: built.bytes };
   const writes = [...payloadWrites, manifestWrite];
 
   await removeAbandonedStagingFiles(publicRoot, writes);
@@ -219,7 +218,7 @@ export type VerifiedPublicEvidence = {
 
 export async function verifyPublicEvidence(publicDirectory: string): Promise<VerifiedPublicEvidence> {
   const publicRoot = await safeExistingPublicRoot(publicDirectory);
-  const manifestPath = join(publicRoot, MANIFEST_PATH.slice(1));
+  const manifestPath = join(publicRoot, RELEASE_MANIFEST_PATH.slice(1));
   await assertSafeOutputPath(publicRoot, manifestPath);
   const payloads = {} as EvidencePayloads;
   for (const [evidenceType, spec] of Object.entries(PAYLOAD_SPECS) as Array<

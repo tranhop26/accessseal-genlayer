@@ -12,11 +12,11 @@ import { verifyPublicEvidence, type VerifiedPublicEvidence } from "./generate-li
 import {
   LIVE_EVIDENCE_BINDING,
   PAYLOAD_SPECS,
+  RELEASE_MANIFEST_PATH,
   canonicalJson,
   type EvidenceType,
 } from "./live-evidence-schema.ts";
 
-const MANIFEST_PATH = "/.well-known/accessseal/release-manifest.json";
 const MAX_OBSERVATION_AGE_SECONDS = 86_400;
 const MAX_ENVELOPE_LIFETIME_SECONDS = 518_400;
 const EVIDENCE_ORDER = [
@@ -98,7 +98,7 @@ function sharedObservedAt(verified: VerifiedPublicEvidence): number {
 
 function expectedPayloadUri(evidenceType: string): string {
   if (evidenceType === "RELEASE_MANIFEST") {
-    return `${LIVE_EVIDENCE_BINDING.subjectOrigin}${MANIFEST_PATH}`;
+    return `${LIVE_EVIDENCE_BINDING.subjectOrigin}${RELEASE_MANIFEST_PATH}`;
   }
   const spec = PAYLOAD_SPECS[evidenceType as EvidenceType];
   if (spec === undefined) throw new Error(`unsupported live evidence type: ${evidenceType}`);

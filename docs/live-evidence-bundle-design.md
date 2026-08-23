@@ -8,20 +8,23 @@ This design covers artifact production, same-origin hosting, envelope generation
 
 ## Fixed Live Binding
 
-- Case ID: `0xecb00a111f3cab8224989ed65f06ebbaa65f31161ace4981f41310747e6f6977`
-- Contract: `0x1aa0bf5a38bb150bef15ec2899f62fd62660360b`
+- Case ID: `0x2e82b92517f29f02e86ea5f761ce8a62dc470fad4c92625133ab407f25091959`
+- Contract: `0x42b2eda04e762f50915f17143adbe73038e36b27`
 - Evidence chain domain: `1`, matching the immutable case record
 - Epoch: `0`
 - Subject origin: `https://accessseal-genlayer.vercel.app`
+- Buyer: `0x21b45103dd05c43969daf3cbb4277391777e2ec7`
 - Vendor issuer: `0x35c9979d30992b13ef6df7036bc745e2e1cd76a2`
 - Profile version: `accessseal-static/1`
 - Profile hash: `0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
-- Audited production source: Git commit `6d3c933e05e1747d7f9b3b3e1d1ac41212165a61`
-- Artifact release ID: `2026-08-22-live-v1`
-- Finalized create-case transaction: `0xcb160381a10aef9864c849524c59507d6c7c94b4a9612ef1ed0dfde83f4a07ac`
-- Authoritative case creation timestamp: `1787332650`; evidence cutoff: `1787419050`; hard deadline: `1787937450`
+- Flows hash: `0xd8b711d3ceb59343cd7822e5fcf3aba42c11de287bd6dcf53bfe838d753f6001`
+- Audited production source: Git commit `23ab41fb5a6c982d259d7d441da8ab5c85b8aa44`
+- Artifact release ID: `2026-08-23-live-v2`
+- Finalized create-case transaction: `0x7ef90047f5e94cfb838eb176bcb243bce4c3153f293cc660f3919cdb2c60dd74`
+- Fund transaction: `0xf701ff00b9818da5cd4ebafb0b5252e9402cf0cc47e3ddf5352c09a727138c05`; require `FINALIZED / AGREE / FINISHED_WITH_RETURN` before capture or any evidence operation.
+- Authoritative case creation timestamp: `1787492373`; evidence cutoff: `1787578773`; hard deadline: `1788097173`.
 
-All envelope timestamps are generated immediately before preview and submission. `observedAt <= submittedAt < expiresAt`; observations and submissions must remain within the absolute case evidence window, and expiry cannot exceed the absolute hard deadline. Nonces are unique per generation as well as per case, epoch, action, and evidence type so a same-second retry cannot reuse a nonce.
+`caseCreatedAt` is the V2 final create receipt/readback's execution timestamp, not a client clock or an `ACCEPTED` transaction timestamp. The public `get_case` readback does not expose it. All envelope timestamps are generated immediately before preview and submission. `observedAt <= submittedAt < expiresAt`; observations and submissions must remain within the absolute case evidence window, and expiry cannot exceed the absolute hard deadline. Nonces are unique per generation as well as per case, epoch, action, and evidence type so a same-second retry cannot reuse a nonce.
 
 ## Critical Flows
 
@@ -39,14 +42,14 @@ The frontend serves five versioned payloads and one well-known manifest:
 
 | Evidence type | Public path | Media type | Maximum bytes |
 |---|---|---:|---:|
-| `HTML_BUNDLE` | `/evidence/releases/2026-08-22-live-v1/release.html` | `text/html` | 32,768 |
-| `SCREENSHOT` | `/evidence/releases/2026-08-22-live-v1/screenshot.png` | `image/png` | 65,536 |
-| `DOM_FACTS` | `/evidence/releases/2026-08-22-live-v1/dom-facts.json` | `application/json` | 16,384 |
-| `SCANNER_REPORT` | `/evidence/releases/2026-08-22-live-v1/scanner-report.json` | `application/json` | 16,384 |
-| `CRITICAL_FLOW_TRACE` | `/evidence/releases/2026-08-22-live-v1/critical-flow-trace.json` | `application/json` | 16,384 |
-| `RELEASE_MANIFEST` | `/.well-known/accessseal/release-manifest.json` | `application/json` | 16,384 |
+| `HTML_BUNDLE` | `/evidence/releases/2026-08-23-live-v2/release.html` | `text/html` | 32,768 |
+| `SCREENSHOT` | `/evidence/releases/2026-08-23-live-v2/screenshot.png` | `image/png` | 65,536 |
+| `DOM_FACTS` | `/evidence/releases/2026-08-23-live-v2/dom-facts.json` | `application/json` | 16,384 |
+| `SCANNER_REPORT` | `/evidence/releases/2026-08-23-live-v2/scanner-report.json` | `application/json` | 16,384 |
+| `CRITICAL_FLOW_TRACE` | `/evidence/releases/2026-08-23-live-v2/critical-flow-trace.json` | `application/json` | 16,384 |
+| `RELEASE_MANIFEST` | `/evidence/releases/2026-08-23-live-v2/release-manifest.json` | `application/json` | 16,384 |
 
-The five payloads together must keep the total validator download below 131,072 bytes. The manifest uses schema `accessseal-release-manifest/1`, binds the case ID, epoch, subject origin, profile hash, and exact relative path, media type, and lowercase SHA-256 digest of every payload.
+The five payloads together must keep the total validator download below 131,072 bytes. The manifest uses schema `accessseal-release-manifest/1`, binds the case ID, epoch, subject origin, profile hash, and exact relative path, media type, and lowercase SHA-256 digest of every payload. V2's versioned manifest avoids mutating the V1 `/.well-known/accessseal/release-manifest.json`; all V1 public assets remain historical evidence.
 
 The manifest bytes are canonical JSON with sorted keys and compact separators. The manifest SHA-256 is the release digest and is also the manifest envelope's `payloadSha256`. Payload URLs are normalized HTTPS URLs with no query, fragment, credentials, percent escapes, dot segments, or cross-origin redirects.
 
@@ -80,7 +83,7 @@ The HTML validator requires a semantic `main` and heading and rejects scripts, i
 
 ## Generation and Validation
 
-A dedicated generator consumes captured live audit results and writes only the six allowlisted output paths. It calculates every payload digest, builds the canonical manifest last, and refuses to overwrite an existing release ID with different bytes.
+A dedicated generator consumes captured live audit results and writes only the six allowlisted V2 release paths. It calculates every payload digest, builds the canonical manifest last, and refuses to overwrite an existing release ID with different bytes.
 
 Validation is fail-closed:
 
@@ -93,13 +96,13 @@ Validation is fail-closed:
 
 ## Envelope and On-Chain Sequence
 
-After the artifact deployment is live and read back byte-for-byte:
+After the V2 create transaction has finalized, its authoritative receipt timestamp and `get_case` fields have been recorded, the vendor has accepted the exact terms, the buyer has funded the exact readback escrow, and the V2 artifact deployment is live and read back byte-for-byte:
 
 1. Generate a `RELEASE_MANIFEST` envelope with action `OPEN_RELEASE` and submit `open_evidence` from the vendor.
 2. Generate five envelopes with action `APPEND_EVIDENCE`, one for each supporting evidence type, and submit `append_evidence` sequentially from the same vendor.
 3. For every transaction, wait for `FINALIZED`, require execution `FINISHED_WITH_RETURN`, and read `get_evidence(caseId, 0)` before advancing.
 4. Confirm exactly six unique evidence hashes, one release digest, correct media types, fresh expiry, and lifecycle `EVIDENCE_OPEN`.
-5. Do not request review until every mandatory artifact is live, finalized, and read back. Review eligibility also remains subject to the contract's evidence cutoff.
+5. Do not request review until every mandatory artifact is live, finalized, and read back, and the chain time is strictly after the evidence cutoff. The contract rejects review at or before `createdAt + evidenceDeadline`; all evidence writes must complete before their applicable evidence/hard deadline.
 
 Each on-chain write requires a fresh action-time user confirmation and a final MetaMask confirmation. Retrying reuses neither a nonce nor a transaction when the prior transaction already exists.
 
@@ -125,6 +128,8 @@ Tests are written before production changes and cover:
 ## Deployment and Proof Gates
 
 Local implementation and verification do not authorize external actions. Before push and Vercel production deployment, verify Git author, GitHub account, repository owner/remote, Vercel project/team, exact commit, and staged-file hygiene, then obtain the user's action-time confirmation.
+
+The production build must set `NEXT_PUBLIC_ACCESSSEAL_CONTRACT_ADDRESS=0x42b2eda04e762f50915f17143adbe73038e36b27` before the V2 capture. The public config route is static, so read back `/.well-known/accessseal/config.json` after deployment and require the V2 address before opening the V2 case detail in the capture flow.
 
 The final evidence package records the artifact commit, Vercel deployment ID, six public URLs, release digest, six envelope hashes, six transaction hashes, finality/execution results, and `get_evidence` readback. `APPROVED` remains a target, not a guaranteed claim; validators may return `REQUEST_MORE_INFO`, `REJECTED`, or `UNRESOLVED`, and the application must preserve those outcomes.
 

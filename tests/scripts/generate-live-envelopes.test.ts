@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import test, { afterEach } from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 
 import { MEDIA_TYPES, canonicalizeEvidence, hashEvidence } from "../../scripts/generate-evidence.ts";
 import {
@@ -11,12 +11,13 @@ import {
   writeLiveEnvelopeSet,
   type BuiltEnvelope,
 } from "../../scripts/generate-live-envelopes.ts";
-import { verifyPublicEvidence } from "../../scripts/generate-live-evidence.ts";
-import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS } from "../../scripts/live-evidence-schema.ts";
+import { generateLiveEvidenceBundle, verifyPublicEvidence } from "../../scripts/generate-live-evidence.ts";
+import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS, RELEASE_MANIFEST_PATH } from "../../scripts/live-evidence-schema.ts";
 
 const roots: string[] = [];
-const publicDir = resolve("frontend/public");
-const submittedAt = 1_787_400_000;
+let publicDir = "";
+const observedAt = LIVE_EVIDENCE_BINDING.caseCreatedAt + 1;
+const submittedAt = observedAt + 1;
 const expiresAt = submittedAt + 518_400;
 const generationId = "00112233445566778899aabbccddeeff";
 const evidenceOrder = [
@@ -32,6 +33,67 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
+beforeEach(async () => {
+  const root = await mkdtemp(join(tmpdir(), "accessseal-live-envelopes-fixture-"));
+  roots.push(root);
+  const capture = join(root, "capture");
+  publicDir = join(root, "public");
+  await mkdir(capture, { recursive: true });
+  const urls = [
+    `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`,
+    `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`,
+    `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`,
+  ];
+  const checkpoints = [
+    ["skip-focused", "main-focused", "overview-navigation", "cases-navigation"],
+    ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"],
+    ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"],
+  ] as const;
+  const domFacts = {
+    schemaVersion: "accessseal-dom-facts/1",
+    observedAt,
+    pages: urls.map((url) => ({
+      url,
+      landmarks: ["nav:Workspace", "main"],
+      headings: [{ level: 1, name: "AccessSeal" }],
+      accessibleNames: [{ role: "link", name: "Skip to content" }],
+      formLabels: url.endsWith("/cases/new")
+        ? ["Vendor wallet", "Website origin", "Accessibility profile hash", "Critical flow 1", "Critical flow 2", "Critical flow 3", "Simulated escrow (wei)"].map((label) => ({ control: "input", label }))
+        : [],
+      imageAlternatives: [],
+      skipLinkTarget: "#main-content",
+      focusableControlOrder: ["link:Skip to content"],
+      disabledStates: [{ name: "New case", disabled: false }],
+    })),
+  };
+  const scannerReport = {
+    schemaVersion: "accessseal-scanner-report/1",
+    tool: { name: "axe-core", version: "4.13.0" },
+    observedAt,
+    scans: urls.map((url) => ({ url, violations: [], incomplete: [], passes: 1 })),
+  };
+  const criticalFlowTrace = {
+    schemaVersion: "accessseal-critical-flow-trace/1",
+    caseId: LIVE_EVIDENCE_BINDING.caseId,
+    flowsHash: LIVE_EVIDENCE_BINDING.flowsHash,
+    observedAt,
+    flows: ["workspace-navigation", "create-case-preview", "case-section-navigation"].map((id, index) => ({
+      id,
+      steps: checkpoints[index]!.map((checkpoint) => ({ checkpoint, page: urls[index], action: "Keyboard", expected: `${checkpoint} expected`, actual: `${checkpoint} observed`, passed: true })),
+      passed: true,
+    })),
+    materialBlockers: { "focus-obscured": false, "inoperable-critical-flow": false, "keyboard-trap": false, "meaningless-alt-text": false, "missing-form-label": false },
+  };
+  await Promise.all([
+    writeFile(join(capture, "release.html"), "<main><h1>AccessSeal case</h1></main>"),
+    writeFile(join(capture, "screenshot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+    writeFile(join(capture, "dom-facts.json"), JSON.stringify(domFacts)),
+    writeFile(join(capture, "scanner-report.json"), JSON.stringify(scannerReport)),
+    writeFile(join(capture, "critical-flow-trace.json"), JSON.stringify(criticalFlowTrace)),
+  ]);
+  await generateLiveEvidenceBundle(capture, publicDir);
+});
+
 async function copiedPublicDir(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "accessseal-live-envelopes-"));
   roots.push(root);
@@ -44,9 +106,8 @@ async function built(): Promise<BuiltEnvelope[]> {
   return buildLiveEnvelopeSet({ publicDir, submittedAt, expiresAt, generationId });
 }
 
-test("verifies the already-published bundle without trusting cached metadata", async () => {
+test("verifies a V2 versioned-manifest bundle without trusting cached metadata", async () => {
   const verified = await verifyPublicEvidence(publicDir);
-  assert.equal(verified.releaseDigest, "sha256:68bc88c4e7fa15c8e2043d520a5e1e65db9c7a3e5afc9bf155f46ee8d42300e8");
   assert.equal(verified.manifest.files.length, 5);
   assert.equal(Buffer.from(verified.payloads.DOM_FACTS).equals(await readFile(join(publicDir, PAYLOAD_SPECS.DOM_FACTS.path.slice(1)))), true);
 
@@ -89,7 +150,7 @@ test("builds one OPEN_RELEASE and five canonical APPEND_EVIDENCE envelopes", asy
 
   const verified = await verifyPublicEvidence(publicDir);
   const manifest = set[0]!.envelope;
-  assert.equal(manifest.payloadUri, `${LIVE_EVIDENCE_BINDING.subjectOrigin}/.well-known/accessseal/release-manifest.json`);
+  assert.equal(manifest.payloadUri, `${LIVE_EVIDENCE_BINDING.subjectOrigin}${RELEASE_MANIFEST_PATH}`);
   assert.equal(manifest.payloadSha256, verified.releaseDigest);
   assert.equal(manifest.releaseDigest, verified.releaseDigest);
   for (const [index, file] of verified.manifest.files.entries()) {
@@ -103,7 +164,7 @@ test("builds one OPEN_RELEASE and five canonical APPEND_EVIDENCE envelopes", asy
 test("rejects invalid freshness and expiry domains", async () => {
   const domFacts = JSON.parse(await readFile(join(publicDir, PAYLOAD_SPECS.DOM_FACTS.path.slice(1)), "utf8")) as { observedAt: number };
   await assert.rejects(
-    buildLiveEnvelopeSet({ publicDir, submittedAt: 1_787_376_364, expiresAt, generationId }),
+    buildLiveEnvelopeSet({ publicDir, submittedAt: observedAt - 1, expiresAt, generationId }),
     /submitted.*observed/i,
   );
   await assert.rejects(
