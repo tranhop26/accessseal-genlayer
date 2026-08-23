@@ -65,6 +65,64 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function parseSemanticOnlyReview(sourcePath: string): Record<string, unknown> {
+  const script = String.raw`
+import ast
+import json
+import sys
+from hashlib import sha256
+
+source_path = sys.argv[1]
+tree = ast.parse(open(source_path, encoding="utf-8").read(), source_path)
+constants = {
+    "MANDATORY_EVIDENCE_TYPES",
+    "MATERIAL_BLOCKER_CODES",
+    "MAX_REVIEW_CLAIMS",
+    "MAX_REVIEW_CLAIM_BYTES",
+    "MAX_REVIEW_RATIONALE_BYTES",
+    "MODEL_OUTPUT_INVALID_CLAIMS",
+    "MODEL_OUTPUT_INVALID_SHAPE",
+    "RAW_REVIEW_FIELDS",
+    "REVIEW_SCHEMA",
+    "REVIEW_VERDICTS",
+}
+functions = {
+    "_utf8_size",
+    "_review_result",
+    "_normalize_blockers",
+    "_normalize_missing_evidence",
+    "_safe_review_candidate",
+}
+nodes = []
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id in constants for target in node.targets
+    ):
+        nodes.append(node)
+    elif isinstance(node, ast.FunctionDef) and node.name in functions:
+        nodes.append(node)
+namespace = {"json": json, "sha256": sha256}
+exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), source_path, "exec"), namespace)
+result = namespace["_safe_review_candidate"](
+    {
+        "verdict": "APPROVED",
+        "materialBlockers": [],
+        "missingEvidence": [],
+        "rationale": "Semantic evidence supports approval.",
+    },
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ["sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+)
+print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+`;
+  const result = spawnSync("python", ["-c", script, sourcePath], {
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout) as Record<string, unknown>;
+}
+
 test("builds the exact dependency-bound artifact deterministically within the Bradbury budget", async () => {
   const root = await fixture();
   const firstRun = run(root, "--write");
@@ -86,6 +144,32 @@ test("builds the exact dependency-bound artifact deterministically within the Br
     artifactSha256: sha256(first),
     readableSha256: sha256(readable),
   });
+});
+
+test("tracked artifact preserves semantic-only review bindings from readable source", async () => {
+  const artifactPath = resolve("contracts/access_seal_deploy.py");
+  const readablePath = resolve("contracts/access_seal.py");
+  const checked = run(resolve("."), "--check");
+  assert.equal(checked.status, 0, checked.stderr);
+
+  const expected = {
+    schemaVersion: "accessseal-review/1",
+    verdict: "APPROVED",
+    releaseDigest: `sha256:${"a".repeat(64)}`,
+    profileHash: `0x${"b".repeat(64)}`,
+    materialBlockers: [],
+    missingEvidence: [],
+    evidenceRefs: [`sha256:${"c".repeat(64)}`],
+    rationaleHash:
+      "sha256:da9f6ec333087ad036b9b1e98ff80dd19f39e301fa74dbc66f75b46783c2a5bc",
+  };
+  const artifact = parseSemanticOnlyReview(artifactPath);
+  const readable = parseSemanticOnlyReview(readablePath);
+
+  assert.ok((await readFile(artifactPath)).byteLength <= 48_000);
+  assert.deepEqual(readable, expected);
+  assert.deepEqual(artifact, expected);
+  assert.deepEqual(artifact, readable);
 });
 
 test("check rejects missing and stale artifacts without rewriting them", async () => {

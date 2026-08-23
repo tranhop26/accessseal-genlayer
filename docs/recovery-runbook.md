@@ -72,6 +72,13 @@ AccessSeal is `INTENTIONALLY_FROZEN`. There is no administrator, upgrade key, co
 5. Require each user to opt into a new v2 case. Do not claim automatic storage/balance migration.
 6. Update the frontend only after exact v2 source/schema/deployment readback is proven.
 
+### Frozen v1 to v2 recovery boundary
+
+- The v1 address is immutable. Do not describe the v1 deployment as fixed, patched, upgraded, or repaired in place.
+- A v1 case whose final review is `UNRESOLVED` may keep its remaining final retry available, or exhaust that retry under the encoded rules. After the recovery budget is exhausted, `expire_unresolved` prepares the deterministic buyer-refund path; it does not repair the review or move the case to v2.
+- V2 is a separately deployed contract at a new address with a new evidence replay domain. New v2 evidence must be opened, bound, and reviewed under the v2 address/domain.
+- Never copy v1 contract state, case IDs, proof IDs, settlement IDs, evidence nonces, or settlement records into v2. A user who opts in creates a new v2 case and receives only the recovery paths encoded by each deployment.
+
 ## Bradbury deployment rejected before wallet confirmation
 
 - Read the Studio/browser RPC error before retrying. `BlockPubdataLimitReached` means the deployment payload exceeds the chain's block pubdata boundary; changing gas, wallet, or CLI does not bypass it.

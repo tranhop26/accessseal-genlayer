@@ -186,6 +186,7 @@ Both are ignored local evidence until deliberately included in a submission pack
 7. `DISPATCHED_FINALIZED` does not prove child receipt or recipient balance; no automatic external-child retry is claimed.
 8. There is no on-chain case enumeration, persisted review/appeal transaction history, or case `createdAt` view.
 9. Frozen code removes upgrade-key risk but cannot be patched in place. A v2 requires a new deployment and migration by user action.
+10. V2 is not proven until a live Bradbury model canary reaches finalized authoritative readback.
 
 ## Repository map
 
