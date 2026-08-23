@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -8,8 +9,11 @@ from conftest import (
     assert_accounting_conservation,
     assert_five_validator_consensus,
     candidate,
+    FLOWS_HASH,
     io_context,
     open_release,
+    ORIGIN,
+    PATHS,
     read_json,
     record_evidence,
     rpc,
@@ -23,6 +27,49 @@ def test_five_validators_finalize_semantic_approval_and_contract_finality(
     case_id, release = open_release(
         deployed_contract, actors, fixture_site, "integration-approved"
     )
+    assert json.loads(release["served"][PATHS["DOM_FACTS"]]) == {
+        "schemaVersion": "accessseal-dom-facts/1",
+        "observedAt": 1_787_381_551,
+        "pages": [
+            {
+                "url": ORIGIN + "/cases",
+                "formLabels": [
+                    {"control": "case-id", "label": "Import case ID"}
+                ],
+                "imageAlternatives": [],
+                "disabledStates": [],
+            }
+        ],
+    }
+    assert json.loads(release["served"][PATHS["SCANNER_REPORT"]]) == {
+        "schemaVersion": "accessseal-scanner-report/1",
+        "tool": "axe-core",
+        "observedAt": 1_787_381_551,
+        "scans": [
+            {
+                "url": ORIGIN + "/cases",
+                "violations": [],
+                "incomplete": [],
+                "passes": 1,
+            }
+        ],
+    }
+    assert json.loads(release["served"][PATHS["CRITICAL_FLOW_TRACE"]]) == {
+        "schemaVersion": "accessseal-critical-flow-trace/1",
+        "caseId": "bound-by-helper",
+        "flowsHash": FLOWS_HASH,
+        "observedAt": 1_787_381_551,
+        "flows": [
+            {"id": "workspace-navigation", "steps": [], "passed": True}
+        ],
+        "materialBlockers": {
+            "focus-obscured": False,
+            "inoperable-critical-flow": False,
+            "keyboard-trap": False,
+            "meaningless-alt-text": False,
+            "missing-form-label": False,
+        },
+    }
     leader_candidate = candidate(
         deployed_contract, case_id, release, "APPROVED"
     )
