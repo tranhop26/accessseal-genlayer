@@ -51,6 +51,13 @@ EVIDENCE_TYPES = (
     "SCANNER_REPORT",
     "CRITICAL_FLOW_TRACE",
 )
+MATERIAL_BLOCKER_CODES = (
+    "focus-obscured",
+    "inoperable-critical-flow",
+    "keyboard-trap",
+    "meaningless-alt-text",
+    "missing-form-label",
+)
 MEDIA_TYPES = {
     "RELEASE_MANIFEST": "application/json",
     "HTML_BUNDLE": "text/html",
@@ -307,20 +314,52 @@ def build_release(case_id: str, fixture_site, *, keyboard_trap=False, epoch=0):
         "SCREENSHOT": SCREENSHOT,
         "DOM_FACTS": canonical_bytes(
             {
-                "forms": [{"control": "email", "label": "Email address"}],
-                "images": [{"alt": "Blue running shoe with white sole", "src": "shoe.jpg"}],
-                "focusObscured": False,
+                "schemaVersion": "accessseal-dom-facts/1",
+                "observedAt": 1_787_381_551,
+                "pages": [
+                    {
+                        "url": ORIGIN + "/cases",
+                        "formLabels": [
+                            {"control": "case-id", "label": "Import case ID"}
+                        ],
+                        "imageAlternatives": [],
+                        "disabledStates": [],
+                    }
+                ],
             }
         ),
         "SCANNER_REPORT": canonical_bytes(
-            {"engine": "fixture-scanner/1", "score": 100, "violations": []}
+            {
+                "schemaVersion": "accessseal-scanner-report/1",
+                "tool": "axe-core",
+                "observedAt": 1_787_381_551,
+                "scans": [
+                    {
+                        "url": ORIGIN + "/cases",
+                        "violations": [],
+                        "incomplete": [],
+                        "passes": 1,
+                    }
+                ],
+            }
         ),
         "CRITICAL_FLOW_TRACE": canonical_bytes(
             {
-                "completed": not keyboard_trap,
-                "flow": "checkout",
-                "keyboardTrap": keyboard_trap,
-                "steps": ["email", "blocked"] if keyboard_trap else ["email", "place-order", "status"],
+                "schemaVersion": "accessseal-critical-flow-trace/1",
+                "caseId": "bound-by-helper",
+                "flowsHash": FLOWS_HASH,
+                "observedAt": 1_787_381_551,
+                "flows": [
+                    {
+                        "id": "workspace-navigation",
+                        "steps": [],
+                        "passed": not keyboard_trap,
+                    }
+                ],
+                "materialBlockers": {
+                    code: code == "keyboard-trap" and keyboard_trap
+                    for code in MATERIAL_BLOCKER_CODES
+                },
             }
         ),
     }
@@ -380,7 +419,14 @@ def envelope(contract, case_id, issuer, release, kind, *, epoch=0, nonce="releas
     )
 
 
-def io_context(release, candidate=None, *, unavailable_manifest=False, when=CUTOFF_TIME):
+def io_context(
+    release,
+    candidate=None,
+    *,
+    supported=True,
+    unavailable_manifest=False,
+    when=CUTOFF_TIME,
+):
     rpc("sim_setTime", [when])
     web = {}
     for path, body in release["served"].items():
@@ -392,7 +438,18 @@ def io_context(release, candidate=None, *, unavailable_manifest=False, when=CUTO
             "body": "",
             "bodyBase64": base64.b64encode(body).decode("ascii"),
         }
-    llm = {r"[\s\S]*": compact(candidate)} if candidate is not None else {}
+    llm = (
+        {
+            r"[\s\S]*LEADER_REVIEW_JSON=[\s\S]*": compact(
+                {"supported": supported}
+            ),
+            r"[\s\S]*UNTRUSTED_BINDING_AND_DATA_JSON=[\s\S]*": compact(
+                candidate
+            ),
+        }
+        if candidate is not None
+        else {}
+    )
     validators = get_validator_factory().batch_create_mock_validators(
         5,
         mock_llm_response={"nondet_exec_prompt": llm},
@@ -454,16 +511,11 @@ def open_release(contract, actors, fixture_site, salt, *, keyboard_trap=False, s
 
 
 def candidate(contract, case_id, release, verdict, *, epoch=0):
-    evidence = read_json(contract, "get_evidence", [case_id, epoch])
     blockers = ["keyboard-trap"] if verdict == "REJECTED" else []
     return {
-        "schemaVersion": "accessseal-review/1",
         "verdict": verdict,
-        "releaseDigest": release["digest"],
-        "profileHash": PROFILE_HASH,
         "materialBlockers": blockers,
         "missingEvidence": [],
-        "evidenceRefs": evidence["hashes"],
         "rationale": "Bound artifact content establishes: keyboard-trap" if blockers else "Bound artifact content establishes no material blocker.",
     }
 

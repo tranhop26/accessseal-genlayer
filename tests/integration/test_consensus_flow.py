@@ -23,16 +23,37 @@ def test_five_validators_finalize_semantic_approval_and_contract_finality(
     case_id, release = open_release(
         deployed_contract, actors, fixture_site, "integration-approved"
     )
+    leader_candidate = candidate(
+        deployed_contract, case_id, release, "APPROVED"
+    )
+    assert leader_candidate == {
+        "verdict": "APPROVED",
+        "materialBlockers": [],
+        "missingEvidence": [],
+        "rationale": "Bound artifact content establishes no material blocker.",
+    }
+    context = io_context(release, leader_candidate)
+    llm_routes = context["validators"][0]["plugin_config"]["mock_response"][
+        "response"
+    ]
+    assert llm_routes == {
+        r"[\s\S]*LEADER_REVIEW_JSON=[\s\S]*": '{"supported":true}',
+        r"[\s\S]*UNTRUSTED_BINDING_AND_DATA_JSON=[\s\S]*": (
+            '{"verdict":"APPROVED","materialBlockers":[],"missingEvidence":[],'
+            '"rationale":"Bound artifact content establishes no material blocker."}'
+        ),
+    }
     rpc("accessseal_resetValidatorTelemetry", [])
     receipt = deployed_contract.connect(actors[2]).request_review([case_id]).transact(
         wait_transaction_status=TransactionStatus.FINALIZED,
-        transaction_context=io_context(
-            release, candidate(deployed_contract, case_id, release, "APPROVED")
-        ),
+        transaction_context=context,
     )
 
     telemetry = rpc("accessseal_getValidatorTelemetry", [])
     assert_five_validator_consensus(receipt, telemetry)
+    assert receipt["consensus_data"]["leader_receipt"]
+    assert telemetry["consensusSessions"] >= 1
+    assert telemetry["callbackInvocations"] == 5
     review = read_json(deployed_contract, "get_review", [case_id, 0])
     finality = read_json(deployed_contract, "get_review_finality", [case_id])
     assert review["verdict"] == "APPROVED"

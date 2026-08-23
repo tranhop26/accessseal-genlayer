@@ -22,6 +22,13 @@ ALL_SUPPORTING_EVIDENCE = (
     "SCANNER_REPORT",
     "CRITICAL_FLOW_TRACE",
 )
+MATERIAL_BLOCKER_CODES = (
+    "focus-obscured",
+    "inoperable-critical-flow",
+    "keyboard-trap",
+    "meaningless-alt-text",
+    "missing-form-label",
+)
 MEDIA_TYPES = {
     "RELEASE_MANIFEST": "application/json",
     "HTML_BUNDLE": "text/html",
@@ -87,27 +94,45 @@ def build_release(
         page = fixture_text("releases/pass/index.html")
     if dom_facts is None:
         dom_facts = {
-            "forms": [{"control": "email", "label": "Email address"}],
-            "images": [
+            "schemaVersion": "accessseal-dom-facts/1",
+            "observedAt": 1_787_381_551,
+            "pages": [
                 {
-                    "alt": "Blue running shoe with white sole",
-                    "src": "shoe.jpg",
+                    "url": origin + "/cases",
+                    "formLabels": [
+                        {"control": "case-id", "label": "Import case ID"}
+                    ],
+                    "imageAlternatives": [],
+                    "disabledStates": [],
                 }
             ],
-            "focusObscured": False,
         }
     if scanner_report is None:
         scanner_report = {
-            "engine": "fixture-scanner/1",
-            "score": 100,
-            "violations": [],
+            "schemaVersion": "accessseal-scanner-report/1",
+            "tool": "axe-core",
+            "observedAt": 1_787_381_551,
+            "scans": [
+                {
+                    "url": origin + "/cases",
+                    "violations": [],
+                    "incomplete": [],
+                    "passes": 1,
+                }
+            ],
         }
     if flow_trace is None:
         flow_trace = {
-            "completed": True,
-            "flow": "checkout",
-            "keyboardTrap": False,
-            "steps": ["email", "place-order", "status"],
+            "schemaVersion": "accessseal-critical-flow-trace/1",
+            "caseId": "bound-by-helper",
+            "flowsHash": FLOWS_HASH,
+            "observedAt": 1_787_381_551,
+            "flows": [
+                {"id": "workspace-navigation", "steps": [], "passed": True}
+            ],
+            "materialBlockers": {
+                code: False for code in MATERIAL_BLOCKER_CODES
+            },
         }
     if screenshot_bytes is None:
         screenshot_bytes = SCREENSHOT_BYTES
@@ -337,13 +362,24 @@ def semantic_candidate_from_request(data):
     blockers = []
     flow = artifacts["criticalFlowTrace"]
     dom = artifacts["domFacts"]
+    for code in MATERIAL_BLOCKER_CODES:
+        if flow.get("materialBlockers", {}).get(code) is True:
+            blockers.append(code)
+    if any(item.get("passed") is False for item in flow.get("flows", [])):
+        if not blockers:
+            blockers.append("inoperable-critical-flow")
     if flow.get("keyboardTrap") is True:
         blockers.append("keyboard-trap")
     elif flow.get("completed") is False:
         blockers.append("inoperable-critical-flow")
     if dom.get("focusObscured") is True:
         blockers.append("focus-obscured")
-    for image in dom.get("images", []):
+    images = list(dom.get("images", []))
+    forms = list(dom.get("forms", []))
+    for page in dom.get("pages", []):
+        images.extend(page.get("imageAlternatives", []))
+        forms.extend(page.get("formLabels", []))
+    for image in images:
         alt = str(image.get("alt", "")).strip().lower()
         if (
             alt in ("", "image", "placeholder")
@@ -353,7 +389,7 @@ def semantic_candidate_from_request(data):
         ):
             blockers.append("meaningless-alt-text")
             break
-    for form in dom.get("forms", []):
+    for form in forms:
         if len(str(form.get("label", "")).strip()) == 0:
             blockers.append("missing-form-label")
             break
@@ -454,6 +490,160 @@ def test_semantic_only_candidate_receives_authoritative_contract_bindings(
     assert review["releaseDigest"] == bound_release_digest(contract, case_id)
     assert review["profileHash"] == PROFILE_HASH
     assert review["evidenceRefs"] == evidence_refs(contract, case_id)
+
+
+def test_production_shaped_evidence_is_reviewed_without_simplified_fixture_fields(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    calls = []
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=derived_llm_handler(calls=calls),
+    )
+
+    contract.request_review(case_id)
+
+    assert json.loads(contract.get_review(case_id, 0))["verdict"] == "APPROVED"
+    assert len(calls) == 1
+    prompt_data = json.loads(
+        calls[0]["prompt"].split("\nUNTRUSTED_BINDING_AND_DATA_JSON=", 1)[1]
+    )
+    assert prompt_data["artifacts"]["domFacts"] == {
+        "schemaVersion": "accessseal-dom-facts/1",
+        "observedAt": 1_787_381_551,
+        "pages": [
+            {
+                "url": ORIGIN + "/cases",
+                "formLabels": [{"control": "case-id", "label": "Import case ID"}],
+                "imageAlternatives": [],
+                "disabledStates": [],
+            }
+        ],
+    }
+    assert prompt_data["artifacts"]["scannerReport"] == {
+        "schemaVersion": "accessseal-scanner-report/1",
+        "tool": "axe-core",
+        "observedAt": 1_787_381_551,
+        "scans": [
+            {
+                "url": ORIGIN + "/cases",
+                "violations": [],
+                "incomplete": [],
+                "passes": 1,
+            }
+        ],
+    }
+    assert prompt_data["artifacts"]["criticalFlowTrace"] == {
+        "schemaVersion": "accessseal-critical-flow-trace/1",
+        "caseId": "bound-by-helper",
+        "flowsHash": FLOWS_HASH,
+        "observedAt": 1_787_381_551,
+        "flows": [{"id": "workspace-navigation", "steps": [], "passed": True}],
+        "materialBlockers": {code: False for code in MATERIAL_BLOCKER_CODES},
+    }
+
+
+@pytest.mark.parametrize(
+    ("dom_facts", "flow_trace", "expected_blockers"),
+    [
+        (
+            None,
+            {
+                "schemaVersion": "accessseal-critical-flow-trace/1",
+                "caseId": "bound-by-helper",
+                "flowsHash": FLOWS_HASH,
+                "observedAt": 1_787_381_551,
+                "flows": [
+                    {"id": "workspace-navigation", "steps": [], "passed": False}
+                ],
+                "materialBlockers": {
+                    "focus-obscured": False,
+                    "inoperable-critical-flow": False,
+                    "keyboard-trap": True,
+                    "meaningless-alt-text": False,
+                    "missing-form-label": False,
+                },
+            },
+            ["keyboard-trap"],
+        ),
+        (
+            None,
+            {
+                "schemaVersion": "accessseal-critical-flow-trace/1",
+                "caseId": "bound-by-helper",
+                "flowsHash": FLOWS_HASH,
+                "observedAt": 1_787_381_551,
+                "flows": [
+                    {"id": "workspace-navigation", "steps": [], "passed": False}
+                ],
+                "materialBlockers": {
+                    code: False for code in MATERIAL_BLOCKER_CODES
+                },
+            },
+            ["inoperable-critical-flow"],
+        ),
+        (
+            {
+                "schemaVersion": "accessseal-dom-facts/1",
+                "observedAt": 1_787_381_551,
+                "pages": [
+                    {
+                        "url": ORIGIN + "/cases",
+                        "formLabels": [{"control": "case-id", "label": ""}],
+                        "imageAlternatives": [],
+                        "disabledStates": [],
+                    }
+                ],
+            },
+            None,
+            ["missing-form-label"],
+        ),
+        (
+            {
+                "schemaVersion": "accessseal-dom-facts/1",
+                "observedAt": 1_787_381_551,
+                "pages": [
+                    {
+                        "url": ORIGIN + "/cases",
+                        "formLabels": [],
+                        "imageAlternatives": [
+                            {"alt": "IMG_0042.JPG", "src": "shoe.jpg"}
+                        ],
+                        "disabledStates": [],
+                    }
+                ],
+            },
+            None,
+            ["meaningless-alt-text"],
+        ),
+    ],
+)
+def test_production_shaped_evidence_drives_semantic_material_blockers(
+    dom_facts,
+    flow_trace,
+    expected_blockers,
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+):
+    case_id, release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        dom_facts=dom_facts,
+        flow_trace=flow_trace,
+    )
+    mock_adjudication(direct_vm, release)
+
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "REJECTED"
+    assert review["materialBlockers"] == expected_blockers
 
 
 @pytest.mark.parametrize(
