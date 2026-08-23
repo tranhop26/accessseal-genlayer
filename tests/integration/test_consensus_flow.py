@@ -40,13 +40,41 @@ def test_release_fixture_binds_runtime_case_and_complete_pages_scans_flows(
     assert release["manifest"]["caseId"] == runtime_case_id
     assert flow_trace["caseId"] == runtime_case_id
     assert [page["url"] for page in dom_facts["pages"]] == urls
+    assert all(
+        set(page) == {
+            "url",
+            "landmarks",
+            "headings",
+            "accessibleNames",
+            "formLabels",
+            "imageAlternatives",
+            "skipLinkTarget",
+            "focusableControlOrder",
+            "disabledStates",
+        }
+        for page in dom_facts["pages"]
+    )
+    assert {item["label"] for item in dom_facts["pages"][1]["formLabels"]} == {
+        "Vendor wallet",
+        "Website origin",
+        "Accessibility profile hash",
+        "Critical flow 1",
+        "Critical flow 2",
+        "Critical flow 3",
+        "Simulated escrow (wei)",
+    }
+    assert scanner_report["tool"] == {"name": "axe-core", "version": "4.13.0"}
     assert [scan["url"] for scan in scanner_report["scans"]] == urls
     assert [flow["id"] for flow in flow_trace["flows"]] == [
         "workspace-navigation",
         "create-case-preview",
         "case-section-navigation",
     ]
-    assert all(flow["steps"] for flow in flow_trace["flows"])
+    assert all(flow["passed"] and flow["steps"] for flow in flow_trace["flows"])
+    assert all(
+        {step["page"] for step in flow["steps"]} == {urls[index]}
+        for index, flow in enumerate(flow_trace["flows"])
+    )
     assert all(
         set(step) == {
             "checkpoint",
