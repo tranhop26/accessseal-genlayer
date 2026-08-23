@@ -260,6 +260,7 @@ test("only independent official readers, publication APIs, and actual command ou
     safeTestConfig: false,
   });
   assert.equal(proof.checks.find((item) => item.id === "direct")?.passed, 214);
+  assert.equal(proof.checks.find((item) => item.id === "root-lint")?.passed, 6);
   assert.equal(proof.proofRows.payout.childTransactionHash, payoutChild);
   assert.equal(proof.proofRows.payout.amount, "900719925474099312345");
   assert.equal(proof.proofRows.payout.executor, settler);
@@ -374,7 +375,7 @@ test("rejects failed or count-spoofed command results rather than accepting decl
     { direct: result("213 passed") },
     { integration: result("31 passed, 0 skipped") },
     { "frontend-e2e-2": result("7 passed") },
-    { "root-lint": result(actualRootLintOutput.replace(/Lint passed \(2 checks\)/, "prompt lint missing")) },
+    { "root-lint": result(actualRootLintOutput.replaceAll("Lint passed (3 checks)", "prompt lint missing")) },
     { "contract-schema": result('{"ok":false,"schema":{}}') },
     { "root-typecheck": result("", 0) },
   ] as Array<Record<string, CommandResult>>) {

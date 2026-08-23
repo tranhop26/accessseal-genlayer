@@ -237,7 +237,7 @@ type VerificationInputs = {
 };
 
 const CHECKS = [
-  { id: "root-lint", command: "npm run lint", passed: /Lint passed \(3 checks\)[\s\S]*Lint passed \(2 checks\)[\s\S]*accessseal-frontend[\s\S]*eslint \. --max-warnings=0/i, count: 5, skipped: 0 },
+  { id: "root-lint", command: "npm run lint", passed: /Lint passed \(3 checks\)[\s\S]*Lint passed \(3 checks\)[\s\S]*accessseal-frontend[\s\S]*eslint \. --max-warnings=0/i, count: 6, skipped: 0 },
   { id: "contract-schema", command: "genvm-lint schema --json contracts/access_seal.py", passed: /^\s*\{"ok":true,"schema":\{[\s\S]*\}\}\s*$/i, count: 22, skipped: 0 },
   { id: "root-typecheck", command: "npm run typecheck", passed: /(?:accessseal.*typecheck|tsc --noEmit)/i, count: 1, skipped: 0 },
   { id: "direct", command: "npm run test:direct", passed: /214 passed/i, count: 214, skipped: 0 },
