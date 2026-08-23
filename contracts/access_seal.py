@@ -209,6 +209,38 @@ def build_review_prompt(review_data_json: str) -> str:
     )
 
 
+def build_review_validation_prompt(
+    review_data_json: str,
+    leader_review_json: str,
+) -> str:
+    untrusted_data = json.dumps(
+        json.loads(review_data_json),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    leader_review = json.dumps(
+        json.loads(leader_review_json),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return (
+        FIXED_REVIEW_RUBRIC
+        + "\nValidate whether the normalized final leader review is supported "
+        + "by the exact evidence under this rubric. Assess every verdict, "
+        + "including UNRESOLVED. Return exactly {\"supported\":true} only when "
+        + "the evidence supports the verdict and every blocker and missing-"
+        + "evidence claim. Return {\"supported\":false} when evidence does not "
+        + "support the verdict, any blocker or missing-evidence claim is omitted "
+        + "or invented, or the decision is not reliably adjudicable."
+        + "\nLEADER_REVIEW_JSON="
+        + leader_review
+        + "\nUNTRUSTED_BINDING_AND_DATA_JSON="
+        + untrusted_data
+    )
+
+
 def _is_sha256_text(value: object) -> bool:
     if not isinstance(value, str):
         return False
@@ -507,59 +539,57 @@ def _safe_review_candidate(
     )
 
 
-def _reviews_semantically_equivalent(
-    leader: object,
-    validator: object,
+def _safe_support_candidate(candidate: object) -> bool:
+    return (
+        isinstance(candidate, dict)
+        and sorted(candidate.keys()) == ["supported"]
+        and isinstance(candidate["supported"], bool)
+        and candidate["supported"] is True
+    )
+
+
+def _reviews_semantically_valid(
+    review: object,
     release_digest: str,
     profile_hash: str,
     evidence_refs: list[str],
 ) -> bool:
-    if not isinstance(leader, dict) or not isinstance(validator, dict):
+    if not isinstance(review, dict):
         return False
-    if sorted(leader.keys()) != sorted(FINAL_REVIEW_FIELDS):
+    if sorted(review.keys()) != sorted(FINAL_REVIEW_FIELDS):
         return False
-    if sorted(validator.keys()) != sorted(FINAL_REVIEW_FIELDS):
+    if review["schemaVersion"] != REVIEW_SCHEMA:
         return False
-    for review in (leader, validator):
-        if review["schemaVersion"] != REVIEW_SCHEMA:
-            return False
-        if review["verdict"] not in REVIEW_VERDICTS:
-            return False
-        if review["releaseDigest"] != release_digest:
-            return False
-        if review["profileHash"] != profile_hash:
-            return False
-        references = review["evidenceRefs"]
-        if not isinstance(references, list):
-            return False
-        if sorted(references) != sorted(evidence_refs):
-            return False
-        if not _is_sha256_text(review["rationaleHash"]):
-            return False
-    leader_blockers = _normalize_blockers(leader["materialBlockers"])
-    validator_blockers = _normalize_blockers(validator["materialBlockers"])
-    leader_missing = _normalize_missing_evidence(leader["missingEvidence"])
-    validator_missing = _normalize_missing_evidence(validator["missingEvidence"])
-    if (
-        leader_blockers is None
-        or validator_blockers is None
-        or leader_missing is None
-        or validator_missing is None
-    ):
+    verdict = review["verdict"]
+    if verdict not in REVIEW_VERDICTS:
         return False
-    if leader["verdict"] == "APPROVED" and (
-        len(leader_blockers) > 0 or len(leader_missing) > 0
-    ):
+    if review["releaseDigest"] != release_digest:
         return False
-    if validator["verdict"] == "APPROVED" and (
-        len(validator_blockers) > 0 or len(validator_missing) > 0
-    ):
+    if review["profileHash"] != profile_hash:
         return False
-    return (
-        leader["verdict"] == validator["verdict"]
-        and leader_blockers == validator_blockers
-        and leader_missing == validator_missing
-    )
+    references = review["evidenceRefs"]
+    if not isinstance(references, list):
+        return False
+    if len(references) != len(evidence_refs):
+        return False
+    for reference in references:
+        if not _is_sha256_text(reference):
+            return False
+    if sorted(references) != sorted(evidence_refs):
+        return False
+    if not _is_sha256_text(review["rationaleHash"]):
+        return False
+    blockers = _normalize_blockers(review["materialBlockers"])
+    missing = _normalize_missing_evidence(review["missingEvidence"])
+    if blockers is None or missing is None:
+        return False
+    if verdict == "APPROVED":
+        return len(blockers) == 0 and len(missing) == 0
+    if verdict == "REJECTED":
+        return len(blockers) > 0
+    if verdict == "REQUEST_MORE_INFO":
+        return len(blockers) == 0 and len(missing) > 0
+    return len(blockers) == 0 and len(missing) == 0
 
 
 class AccessSeal(gl.Contract):
@@ -1365,7 +1395,7 @@ class AccessSeal(gl.Contract):
                 reason,
             )
 
-        def adjudicate() -> dict[str, object]:
+        def load_review_context() -> dict[str, object]:
             evidence_records = json.loads(evidence_facts_json)
             records_by_type: dict[str, dict[str, object]] = {}
             for required_type in MANDATORY_EVIDENCE_TYPES:
@@ -1546,6 +1576,17 @@ class AccessSeal(gl.Contract):
                 separators=(",", ":"),
                 ensure_ascii=False,
             )
+            return {
+                "reviewDataJson": review_data_json,
+                "screenshotBody": screenshot_body,
+            }
+
+        def adjudicate() -> dict[str, object]:
+            context = load_review_context()
+            if "reviewDataJson" not in context:
+                return context
+            review_data_json = str(context["reviewDataJson"])
+            screenshot_body = context["screenshotBody"]
             prompt = build_review_prompt(review_data_json)
             try:
                 candidate = gl.nondet.exec_prompt(
@@ -1565,18 +1606,39 @@ class AccessSeal(gl.Contract):
         def validate(leader_result: gl.vm.Result) -> bool:
             if not isinstance(leader_result, gl.vm.Return):
                 return False
-            validator_result = adjudicate()
-            return _reviews_semantically_equivalent(
-                leader_result.calldata,
-                validator_result,
+            leader_review = leader_result.calldata
+            if not _reviews_semantically_valid(
+                leader_review,
                 release_digest,
                 profile_hash,
                 evidence_refs,
+            ):
+                return False
+            context = load_review_context()
+            if "reviewDataJson" not in context:
+                return False
+            review_data_json = str(context["reviewDataJson"])
+            screenshot_body = context["screenshotBody"]
+            validation_prompt = build_review_validation_prompt(
+                review_data_json,
+                json.dumps(
+                    leader_review,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             )
+            try:
+                support = gl.nondet.exec_prompt(
+                    validation_prompt,
+                    response_format="json",
+                    images=[screenshot_body],
+                )
+            except Exception:
+                return False
+            return _safe_support_candidate(support)
 
         review = gl.vm.run_nondet_unsafe(adjudicate, validate)
-        if not _reviews_semantically_equivalent(
-            review,
+        if not _reviews_semantically_valid(
             review,
             release_digest,
             profile_hash,

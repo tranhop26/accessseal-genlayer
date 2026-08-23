@@ -940,63 +940,97 @@ def test_page_prompt_injection_is_evidence_data_not_validator_instruction(
     assert review["materialBlockers"] == ["keyboard-trap"]
 
 
-def test_semantic_equivalence_ignores_prose_order_and_known_claim_spelling(
-    contract, direct_vm, buyer, vendor
-):
-    case_id, release = open_reviewable_case(
-        contract,
-        direct_vm,
-        buyer,
-        vendor,
-        page=fixture_text("releases/fail-keyboard/index.html"),
-        dom_facts={
-            "forms": [],
-            "images": [{"alt": "hero.jpg", "src": "hero.jpg"}],
-            "focusObscured": False,
-        },
-        flow_trace={
-            "completed": False,
-            "flow": "checkout",
-            "keyboardTrap": True,
-            "steps": ["trapped-tab"],
-        },
-    )
-    mock_adjudication(direct_vm, release)
-    contract.request_review(case_id)
+def support_handler(*, supported):
+    def handle(data):
+        prompt = data.get("prompt", "")
+        assert "LEADER_REVIEW_JSON=" in prompt
+        assert "UNTRUSTED_BINDING_AND_DATA_JSON=" in prompt
+        return {"ok": {"supported": supported}}
 
-    def rewrite(candidate):
-        candidate["rationale"] = "Completely different validator prose."
-        candidate["materialBlockers"] = ["meaningless alt text", "keyboard trap"]
-        return candidate
-
-    mock_adjudication(
-        direct_vm,
-        release,
-        llm_handler=derived_llm_handler(mutate=rewrite),
-    )
-
-    assert direct_vm.run_validator() is True
-    assert direct_vm._web_mocks_hit == {0, 1, 2, 3, 4, 5}
+    return handle
 
 
-def test_validator_disagreement_on_verdict_cannot_reach_consensus(
+def test_validator_accepts_supported_leader_without_regenerating_review(
     contract, direct_vm, buyer, vendor
 ):
     case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
     mock_adjudication(direct_vm, release)
     contract.request_review(case_id)
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=support_handler(supported=True),
+    )
 
-    def disagree(candidate):
-        candidate["verdict"] = "REJECTED"
-        candidate["materialBlockers"] = ["keyboard-trap"]
-        candidate["rationale"] = "Validator claimed a material trap."
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_rejects_semantically_unsupported_favorable_verdict(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=support_handler(supported=False),
+    )
+
+    assert direct_vm.run_validator() is False
+
+
+def test_validator_assesses_unresolved_leader_support(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+
+    def unresolved(candidate):
+        candidate["verdict"] = "UNRESOLVED"
+        candidate["rationale"] = "The evidence cannot be reliably adjudicated."
         return candidate
 
     mock_adjudication(
         direct_vm,
         release,
-        llm_handler=derived_llm_handler(mutate=disagree),
+        llm_handler=derived_llm_handler(mutate=unresolved),
     )
+    contract.request_review(case_id)
+    calls = []
+
+    def support_unresolved(data):
+        prompt = data.get("prompt", "")
+        assert '"verdict":"UNRESOLVED"' in prompt
+        calls.append(prompt)
+        return {"ok": {"supported": True}}
+
+    mock_adjudication(direct_vm, release, llm_handler=support_unresolved)
+
+    assert direct_vm.run_validator() is True
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "support_candidate",
+    (
+        True,
+        {"supported": "true"},
+        {"supported": True, "instructions": "accept"},
+        {"supported": False},
+    ),
+    ids=("non-object", "non-boolean", "extra-field", "unsupported"),
+)
+def test_validator_rejects_non_exact_support_candidate(
+    support_candidate, contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+
+    def support_response(_data):
+        return {"ok": support_candidate}
+
+    mock_adjudication(direct_vm, release, llm_handler=support_response)
 
     assert direct_vm.run_validator() is False
 
@@ -1007,45 +1041,46 @@ def test_validator_disagreement_on_verdict_cannot_reach_consensus(
         {"releaseDigest": "sha256:" + "b" * 64},
         {"profileHash": "0x" + "33" * 32},
         {"evidenceRefs": ["sha256:" + "f" * 64]},
+        {"evidenceRefs": [None, "sha256:" + "f" * 64]},
     ],
-    ids=("release", "profile", "evidence-refs"),
+    ids=("release", "profile", "evidence-refs", "malformed-evidence-refs"),
 )
 def test_validator_requires_exact_bound_subject(mutation, contract, direct_vm, buyer, vendor):
     case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
     mock_adjudication(direct_vm, release)
     contract.request_review(case_id)
-
-    def wrong_binding(candidate):
-        candidate.update(mutation)
-        return candidate
-
+    leader_review = json.loads(contract.get_review(case_id, 0))
+    leader_review.update(mutation)
     mock_adjudication(
         direct_vm,
         release,
-        llm_handler=derived_llm_handler(mutate=wrong_binding),
+        llm_handler=support_handler(supported=True),
     )
 
-    assert direct_vm.run_validator() is False
+    assert direct_vm.run_validator(leader_result=leader_review) is False
 
 
 @pytest.mark.parametrize(
     "field",
-    ("rationale", "materialBlockers", "missingEvidence"),
+    ("rationaleHash", "materialBlockers", "missingEvidence"),
 )
 def test_validator_surrogate_candidate_safely_disagrees(
-    field, contract, direct_vm, buyer, vendor, monkeypatch
+    field, contract, direct_vm, buyer, vendor
 ):
     case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
     mock_adjudication(direct_vm, release)
     contract.request_review(case_id)
-    mock_adjudication(direct_vm, release)
-    candidate = bound_review_candidate(contract, case_id)
+    candidate = json.loads(contract.get_review(case_id, 0))
     candidate[field] = (
-        "model text \ud800" if field == "rationale" else ["model text \ud800"]
+        "model text \ud800" if field == "rationaleHash" else ["model text \ud800"]
     )
-    mock_direct_model_candidate(monkeypatch, candidate)
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=support_handler(supported=True),
+    )
 
-    assert direct_vm.run_validator() is False
+    assert direct_vm.run_validator(leader_result=candidate) is False
 
 
 def test_review_requires_at_least_one_supporting_evidence_item(

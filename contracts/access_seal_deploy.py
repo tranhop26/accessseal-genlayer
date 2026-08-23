@@ -5,6 +5,7 @@ class _EoaRecipient:
 	class View:0
 	class Write:0
 def build_review_prompt(review_data_json:str)->str:A=json.dumps(json.loads(review_data_json),sort_keys=True,separators=(',',':'),ensure_ascii=False);return FIXED_REVIEW_RUBRIC+'\nReturn a JSON object with exactly: verdict, materialBlockers, '+'missingEvidence, rationale. Use only the listed verdicts, blocker '+'codes, and mandatory evidence codes; keep rationale under 2048 UTF-8 '+'bytes. Contract-owned bindings are not model output.'+'\nUNTRUSTED_BINDING_AND_DATA_JSON='+A
+def build_review_validation_prompt(review_data_json:str,leader_review_json:str)->str:A=json.dumps(json.loads(review_data_json),sort_keys=True,separators=(',',':'),ensure_ascii=False);B=json.dumps(json.loads(leader_review_json),sort_keys=True,separators=(',',':'),ensure_ascii=False);return FIXED_REVIEW_RUBRIC+'\nValidate whether the normalized final leader review is supported '+'by the exact evidence under this rubric. Assess every verdict, '+'including UNRESOLVED. Return exactly {"supported":true} only when '+'the evidence supports the verdict and every blocker and missing-'+'evidence claim. Return {"supported":false} when evidence does not '+'support the verdict, any blocker or missing-evidence claim is omitted '+'or invented, or the decision is not reliably adjudicable.'+'\nLEADER_REVIEW_JSON='+B+'\nUNTRUSTED_BINDING_AND_DATA_JSON='+A
 def _is_sha256_text(value:object)->bool:
 	A=value
 	if not isinstance(A,str):return False
@@ -109,25 +110,29 @@ def _safe_review_candidate(candidate:object,release_digest:str,profile_hash:str,
 	elif len(G)>0:E='REQUEST_MORE_INFO'
 	elif E in('REJECTED','REQUEST_MORE_INFO'):return _review_result('UNRESOLVED',B,C,[],[],D,MODEL_OUTPUT_INVALID_CLAIMS)
 	return _review_result(E,B,C,F,G,D,J)
-def _reviews_semantically_equivalent(leader:object,validator:object,release_digest:str,profile_hash:str,evidence_refs:list[str])->bool:
-	B=validator;A=leader
-	if not isinstance(A,dict)or not isinstance(B,dict):return False
+def _safe_support_candidate(candidate:object)->bool:A=candidate;return isinstance(A,dict)and sorted(A.keys())==['supported']and isinstance(A['supported'],bool)and A['supported']is True
+def _reviews_semantically_valid(review:object,release_digest:str,profile_hash:str,evidence_refs:list[str])->bool:
+	F=evidence_refs;A=review
+	if not isinstance(A,dict):return False
 	if sorted(A.keys())!=sorted(FINAL_REVIEW_FIELDS):return False
-	if sorted(B.keys())!=sorted(FINAL_REVIEW_FIELDS):return False
-	for C in(A,B):
-		if C['schemaVersion']!=REVIEW_SCHEMA:return False
-		if C['verdict']not in REVIEW_VERDICTS:return False
-		if C['releaseDigest']!=release_digest:return False
-		if C['profileHash']!=profile_hash:return False
-		H=C['evidenceRefs']
-		if not isinstance(H,list):return False
-		if sorted(H)!=sorted(evidence_refs):return False
-		if not _is_sha256_text(C['rationaleHash']):return False
-	D=_normalize_blockers(A['materialBlockers']);E=_normalize_blockers(B['materialBlockers']);F=_normalize_missing_evidence(A['missingEvidence']);G=_normalize_missing_evidence(B['missingEvidence'])
-	if D is None or E is None or F is None or G is None:return False
-	if A['verdict']=='APPROVED'and(len(D)>0 or len(F)>0):return False
-	if B['verdict']=='APPROVED'and(len(E)>0 or len(G)>0):return False
-	return A['verdict']==B['verdict']and D==E and F==G
+	if A['schemaVersion']!=REVIEW_SCHEMA:return False
+	C=A['verdict']
+	if C not in REVIEW_VERDICTS:return False
+	if A['releaseDigest']!=release_digest:return False
+	if A['profileHash']!=profile_hash:return False
+	D=A['evidenceRefs']
+	if not isinstance(D,list):return False
+	if len(D)!=len(F):return False
+	for G in D:
+		if not _is_sha256_text(G):return False
+	if sorted(D)!=sorted(F):return False
+	if not _is_sha256_text(A['rationaleHash']):return False
+	B=_normalize_blockers(A['materialBlockers']);E=_normalize_missing_evidence(A['missingEvidence'])
+	if B is None or E is None:return False
+	if C=='APPROVED':return len(B)==0 and len(E)==0
+	if C=='REJECTED':return len(B)>0
+	if C=='REQUEST_MORE_INFO':return len(B)==0 and len(E)>0
+	return len(B)==0 and len(E)==0
 class AccessSeal(gl.Contract):
 	case_ids:DynArray[str];buyers:TreeMap[str,Address];vendors:TreeMap[str,Address];salts:TreeMap[str,str];profile_hashes:TreeMap[str,str];flows_hashes:TreeMap[str,str];subject_origins:TreeMap[str,str];evidence_deadlines:TreeMap[str,u256];hard_deadlines:TreeMap[str,u256];max_unresolved_retries_by_case:TreeMap[str,u256];escrow_amounts:TreeMap[str,u256];terms_hashes:TreeMap[str,str];lifecycles:TreeMap[str,str];vendor_acceptances:TreeMap[str,bool];reserved_by_case:TreeMap[str,u256];chain_ids:TreeMap[str,u256];contract_addresses:TreeMap[str,str];created_at_by_case:TreeMap[str,u256];epochs:TreeMap[str,u256];evidence_counts:TreeMap[str,u256];release_digests:TreeMap[str,str];evidence_envelopes:TreeMap[str,str];evidence_hashes:TreeMap[str,str];used_evidence_hashes:TreeMap[str,bool];used_evidence_nonces:TreeMap[str,bool];review_results:TreeMap[str,str];review_attempt_results:TreeMap[str,str];review_attempt_proof_ids:TreeMap[str,str];review_attempt_finalized:TreeMap[str,bool];review_attempt_decided_at:TreeMap[str,u256];review_attempt_finalized_at:TreeMap[str,u256];review_attempts:TreeMap[str,u256];review_proof_ids:TreeMap[str,str];review_finalized:TreeMap[str,bool];review_decided_at:TreeMap[str,u256];used_retry_ids:TreeMap[str,bool];cure_counts:TreeMap[str,u256];settlement_ids:TreeMap[str,str];settlement_kinds:TreeMap[str,str];settlement_reasons:TreeMap[str,str];settlement_recipients:TreeMap[str,Address];settlement_amounts:TreeMap[str,u256];settlement_epochs:TreeMap[str,u256];settlement_review_proofs:TreeMap[str,str];settlement_statuses:TreeMap[str,str];settlement_executors:TreeMap[str,Address];total_deposits:u256;total_reserved:u256;total_pending_dispatch:u256;total_dispatched_payouts:u256;total_dispatched_refunds:u256
 	def __init__(self)->None:self.total_deposits=u256(0);self.total_reserved=u256(0);self.total_pending_dispatch=u256(0);self.total_dispatched_payouts=u256(0);self.total_dispatched_refunds=u256(0)
@@ -331,95 +336,106 @@ class AccessSeal(gl.Contract):
 	def request_review(self,case_id:str)->None:
 		C=case_id;self._require_case(C)
 		if self.lifecycles[C]!=EVIDENCE_OPEN:raise gl.vm.UserError('evidence is not open for review')
-		I=self.epochs[C];K=self._epoch_key(C,I);O=self.evidence_counts[K]
+		H=self.epochs[C];K=self._epoch_key(C,H);O=self.evidence_counts[K]
 		if int(O)<2:raise gl.vm.UserError('review requires at least one supporting evidence item')
 		J=int(self._now());P=int(self.created_at_by_case[C])
 		if J>=P+int(self.hard_deadlines[C]):raise gl.vm.UserError('case hard deadline has expired')
 		if J<=P+int(self.evidence_deadlines[C]):raise gl.vm.UserError('review is not eligible before the evidence cutoff')
 		if K in self.review_results:raise gl.vm.UserError('review epoch is already finalized')
-		D=self.release_digests[K];E=self.profile_hashes[C];R=self.subject_origins[C];F:list[str]=[];L:list[str]=[];Q:list[object]=[]
+		D=self.release_digests[K];E=self.profile_hashes[C];Q=self.subject_origins[C];F:list[str]=[];M:list[str]=[];R:list[object]=[]
 		for V in range(int(O)):
-			S=self._evidence_key(C,I,u256(V));B=json.loads(self.evidence_envelopes[S]);T=self.evidence_hashes[S];G=str(B['evidenceType']);F.append(T)
-			if int(B['expiresAt'])>J and G not in L:L.append(G)
-			Q.append({'evidenceRef':T,'evidenceType':G,'expiresAt':int(B['expiresAt']),'fresh':int(B['expiresAt'])>J,'mediaType':str(B['mediaType']),'observedAt':int(B['observedAt']),'payloadSha256':str(B['payloadSha256']),'payloadUri':str(B['payloadUri']),'submittedAt':int(B['submittedAt'])})
+			S=self._evidence_key(C,H,u256(V));B=json.loads(self.evidence_envelopes[S]);T=self.evidence_hashes[S];G=str(B['evidenceType']);F.append(T)
+			if int(B['expiresAt'])>J and G not in M:M.append(G)
+			R.append({'evidenceRef':T,'evidenceType':G,'expiresAt':int(B['expiresAt']),'fresh':int(B['expiresAt'])>J,'mediaType':str(B['mediaType']),'observedAt':int(B['observedAt']),'payloadSha256':str(B['payloadSha256']),'payloadUri':str(B['payloadUri']),'submittedAt':int(B['submittedAt'])})
 		N:list[str]=[]
 		for G in MANDATORY_EVIDENCE_TYPES:
-			if G not in L:N.append(G)
-		if len(N)>0:H=_review_result('REQUEST_MORE_INFO',D,E,[],N,F,'mandatory evidence is missing, stale, or incomplete');self._record_review_and_schedule_finality(C,I,H);return
-		h=json.dumps(Q,sort_keys=True,separators=(',',':'),ensure_ascii=False)
+			if G not in M:N.append(G)
+		if len(N)>0:I=_review_result('REQUEST_MORE_INFO',D,E,[],N,F,'mandatory evidence is missing, stale, or incomplete');self._record_review_and_schedule_finality(C,H,I);return
+		g=json.dumps(R,sort_keys=True,separators=(',',':'),ensure_ascii=False)
 		def A(reason:str)->dict[str,object]:return _review_result('UNRESOLVED',D,E,[],[],F,reason)
-		def M(missing:list[str],reason:str)->dict[str,object]:A=list(missing);A.sort();return _review_result('REQUEST_MORE_INFO',D,E,[],A,F,reason)
+		def L(missing:list[str],reason:str)->dict[str,object]:A=list(missing);A.sort();return _review_result('REQUEST_MORE_INFO',D,E,[],A,F,reason)
 		def U()->dict[str,object]:
-			Z=json.loads(h);G:dict[str,dict[str,object]]={}
+			Y=json.loads(g);F:dict[str,dict[str,object]]={}
 			for B in MANDATORY_EVIDENCE_TYPES:
-				J:list[dict[str,object]]=[]
-				for a in Z:
-					if a['evidenceType']==B:J.append(a)
-				if len(J)==0:return M([B],'mandatory evidence envelope is missing')
-				if len(J)!=1:return A('evidence envelopes conflict by type')
-				if J[0]['fresh']is not True:return M([B],'mandatory evidence envelope is stale')
-				G[B]=J[0]
-			b=G['RELEASE_MANIFEST']
-			try:S=gl.nondet.web.get(str(b['payloadUri']),headers={'Accept':'application/json'})
+				I:list[dict[str,object]]=[]
+				for Z in Y:
+					if Z['evidenceType']==B:I.append(Z)
+				if len(I)==0:return L([B],'mandatory evidence envelope is missing')
+				if len(I)!=1:return A('evidence envelopes conflict by type')
+				if I[0]['fresh']is not True:return L([B],'mandatory evidence envelope is stale')
+				F[B]=I[0]
+			a=F['RELEASE_MANIFEST']
+			try:R=gl.nondet.web.get(str(a['payloadUri']),headers={'Accept':'application/json'})
 			except Exception:return A('release manifest could not be fetched')
-			if S.status!=200 or S.body is None:return A('release manifest returned an unavailable response')
-			K=S.body
-			if len(K)==0 or len(K)>MAX_MANIFEST_BYTES:return A('release manifest exceeded its byte bound')
-			c='sha256:'+sha256(K).hexdigest()
-			if c!=D or c!=b['payloadSha256']:return A('release manifest hash did not match its binding')
-			T=_parse_release_manifest(K,C,int(I),R,E)
-			if T is None:return A('release manifest was malformed or wrongly bound')
-			i=T['files'];d:dict[str,dict[str,object]]={};U:list[str]=[]
+			if R.status!=200 or R.body is None:return A('release manifest returned an unavailable response')
+			J=R.body
+			if len(J)==0 or len(J)>MAX_MANIFEST_BYTES:return A('release manifest exceeded its byte bound')
+			b='sha256:'+sha256(J).hexdigest()
+			if b!=D or b!=a['payloadSha256']:return A('release manifest hash did not match its binding')
+			S=_parse_release_manifest(J,C,int(H),Q,E)
+			if S is None:return A('release manifest was malformed or wrongly bound')
+			h=S['files'];c:dict[str,dict[str,object]]={};T:list[str]=[]
 			for B in MANIFEST_EVIDENCE_TYPES:
-				N:list[dict[str,object]]=[]
-				for e in i:
-					if e['evidenceType']==B:N.append(e)
-				if len(N)==0:U.append(B);continue
-				if len(N)!=1:return A('release manifest members conflict by type')
-				H=G[B];O=N[0]
-				if R+str(O['path'])!=H['payloadUri']or O['mediaType']!=H['mediaType']or O['sha256']!=H['payloadSha256']:return A('release manifest member conflicts with its evidence envelope')
-				d[B]=O
-			if len(U)>0:return M(U,'mandatory release manifest members are missing')
-			f=len(K);P:dict[str,bytes]={}
+				M:list[dict[str,object]]=[]
+				for d in h:
+					if d['evidenceType']==B:M.append(d)
+				if len(M)==0:T.append(B);continue
+				if len(M)!=1:return A('release manifest members conflict by type')
+				G=F[B];N=M[0]
+				if Q+str(N['path'])!=G['payloadUri']or N['mediaType']!=G['mediaType']or N['sha256']!=G['payloadSha256']:return A('release manifest member conflicts with its evidence envelope')
+				c[B]=N
+			if len(T)>0:return L(T,'mandatory release manifest members are missing')
+			e=len(J);O:dict[str,bytes]={}
 			for B in MANIFEST_EVIDENCE_TYPES:
-				H=G[B]
-				try:V=gl.nondet.web.get(str(H['payloadUri']),headers={'Accept':str(H['mediaType'])})
+				G=F[B]
+				try:U=gl.nondet.web.get(str(G['payloadUri']),headers={'Accept':str(G['mediaType'])})
 				except Exception:return A('mandatory artifact could not be fetched')
-				if V.status!=200 or V.body is None:return A('mandatory artifact returned an unavailable response')
-				L=V.body
-				if len(L)==0:return M([B],'mandatory artifact payload is empty')
-				W=MAX_JSON_ARTIFACT_BYTES
-				if B=='HTML_BUNDLE':W=MAX_HTML_BYTES
-				elif B=='SCREENSHOT':W=MAX_SCREENSHOT_BYTES
-				if len(L)>W:return A('mandatory artifact exceeded its byte bound')
-				f+=len(L)
-				if f>MAX_TOTAL_ARTIFACT_BYTES:return A('artifact set exceeded its total byte bound')
-				g='sha256:'+sha256(L).hexdigest()
-				if g!=H['payloadSha256']or g!=d[B]['sha256']:return A('mandatory artifact hash did not match')
-				P[B]=L
-			try:j=P['HTML_BUNDLE'].decode('utf-8')
+				if U.status!=200 or U.body is None:return A('mandatory artifact returned an unavailable response')
+				K=U.body
+				if len(K)==0:return L([B],'mandatory artifact payload is empty')
+				V=MAX_JSON_ARTIFACT_BYTES
+				if B=='HTML_BUNDLE':V=MAX_HTML_BYTES
+				elif B=='SCREENSHOT':V=MAX_SCREENSHOT_BYTES
+				if len(K)>V:return A('mandatory artifact exceeded its byte bound')
+				e+=len(K)
+				if e>MAX_TOTAL_ARTIFACT_BYTES:return A('artifact set exceeded its total byte bound')
+				f='sha256:'+sha256(K).hexdigest()
+				if f!=G['payloadSha256']or f!=c[B]['sha256']:return A('mandatory artifact hash did not match')
+				O[B]=K
+			try:i=O['HTML_BUNDLE'].decode('utf-8')
 			except UnicodeDecodeError:return A('HTML artifact was not valid UTF-8')
-			Q:dict[str,object]={}
+			P:dict[str,object]={}
 			for B in('DOM_FACTS','SCANNER_REPORT','CRITICAL_FLOW_TRACE'):
-				try:k=P[B].decode('utf-8');X=json.loads(k)
+				try:j=O[B].decode('utf-8');W=json.loads(j)
 				except(UnicodeDecodeError,TypeError,ValueError):return A('JSON artifact was malformed')
-				if not isinstance(X,dict):return A('JSON artifact must be an object')
-				try:json.dumps(X,allow_nan=False)
+				if not isinstance(W,dict):return A('JSON artifact must be an object')
+				try:json.dumps(W,allow_nan=False)
 				except(TypeError,ValueError):return A('JSON artifact contained non-finite numbers')
-				Q[B]=X
-			Y=P['SCREENSHOT']
-			if not Y.startswith(b'\x89PNG\r\n\x1a\n'):return A('screenshot artifact was not a PNG')
-			l=json.dumps({'artifacts':{'criticalFlowTrace':Q['CRITICAL_FLOW_TRACE'],'domFacts':Q['DOM_FACTS'],'html':j,'manifest':T,'scannerReport':Q['SCANNER_REPORT'],'screenshot':{'byteLength':len(Y),'mediaType':G['SCREENSHOT']['mediaType'],'payloadSha256':G['SCREENSHOT']['payloadSha256'],'payloadUri':G['SCREENSHOT']['payloadUri']}},'binding':{'caseId':C,'epoch':int(I),'profileHash':E,'releaseDigest':D,'subjectOrigin':R},'evidenceFacts':Z},sort_keys=True,separators=(',',':'),ensure_ascii=False);m=build_review_prompt(l)
-			try:n=gl.nondet.exec_prompt(m,response_format='json',images=[Y])
+				P[B]=W
+			X=O['SCREENSHOT']
+			if not X.startswith(b'\x89PNG\r\n\x1a\n'):return A('screenshot artifact was not a PNG')
+			k=json.dumps({'artifacts':{'criticalFlowTrace':P['CRITICAL_FLOW_TRACE'],'domFacts':P['DOM_FACTS'],'html':i,'manifest':S,'scannerReport':P['SCANNER_REPORT'],'screenshot':{'byteLength':len(X),'mediaType':F['SCREENSHOT']['mediaType'],'payloadSha256':F['SCREENSHOT']['payloadSha256'],'payloadUri':F['SCREENSHOT']['payloadUri']}},'binding':{'caseId':C,'epoch':int(H),'profileHash':E,'releaseDigest':D,'subjectOrigin':Q},'evidenceFacts':Y},sort_keys=True,separators=(',',':'),ensure_ascii=False);return{'reviewDataJson':k,'screenshotBody':X}
+		def W()->dict[str,object]:
+			B=U()
+			if'reviewDataJson'not in B:return B
+			C=str(B['reviewDataJson']);G=B['screenshotBody'];H=build_review_prompt(C)
+			try:I=gl.nondet.exec_prompt(H,response_format='json',images=[G])
 			except Exception:return A(MODEL_EXECUTION_FAILED)
-			return _safe_review_candidate(n,D,E,F)
-		def W(leader_result:gl.vm.Result)->bool:
-			A=leader_result
-			if not isinstance(A,gl.vm.Return):return False
-			B=U();return _reviews_semantically_equivalent(A.calldata,B,D,E,F)
-		H=gl.vm.run_nondet_unsafe(U,W)
-		if not _reviews_semantically_equivalent(H,H,D,E,F):H=A('consensus result failed final semantic validation')
-		self._record_review_and_schedule_finality(C,I,H)
+			return _safe_review_candidate(I,D,E,F)
+		def X(leader_result:gl.vm.Result)->bool:
+			B=leader_result
+			if not isinstance(B,gl.vm.Return):return False
+			C=B.calldata
+			if not _reviews_semantically_valid(C,D,E,F):return False
+			A=U()
+			if'reviewDataJson'not in A:return False
+			G=str(A['reviewDataJson']);H=A['screenshotBody'];I=build_review_validation_prompt(G,json.dumps(C,sort_keys=True,separators=(',',':')))
+			try:J=gl.nondet.exec_prompt(I,response_format='json',images=[H])
+			except Exception:return False
+			return _safe_support_candidate(J)
+		I=gl.vm.run_nondet_unsafe(W,X)
+		if not _reviews_semantically_valid(I,D,E,F):I=A('consensus result failed final semantic validation')
+		self._record_review_and_schedule_finality(C,H,I)
 	@gl.public.view
 	def get_review(self,case_id:str,epoch:u256)->str:
 		A=case_id;self._require_case(A);B=self._epoch_key(A,epoch)
