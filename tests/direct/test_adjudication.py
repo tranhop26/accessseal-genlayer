@@ -492,6 +492,29 @@ def test_semantic_only_candidate_receives_authoritative_contract_bindings(
     assert review["evidenceRefs"] == evidence_refs(contract, case_id)
 
 
+def test_mixed_type_model_candidate_keys_are_exact_bound_unresolved(
+    contract, direct_vm, buyer, vendor, monkeypatch
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    candidate = semantic_only_candidate()
+    candidate[1] = "malformed key"
+    mock_direct_model_candidate(monkeypatch, candidate)
+
+    contract.request_review(case_id)
+
+    assert json.loads(contract.get_review(case_id, 0)) == {
+        "schemaVersion": REVIEW_SCHEMA,
+        "verdict": "UNRESOLVED",
+        "releaseDigest": bound_release_digest(contract, case_id),
+        "profileHash": PROFILE_HASH,
+        "materialBlockers": [],
+        "missingEvidence": [],
+        "evidenceRefs": evidence_refs(contract, case_id),
+        "rationaleHash": rationale_hash("MODEL_OUTPUT_INVALID_SHAPE"),
+    }
+
+
 def test_production_shaped_evidence_is_reviewed_without_simplified_fixture_fields(
     contract, direct_vm, buyer, vendor
 ):
@@ -1271,6 +1294,83 @@ def test_validator_rejects_malformed_leader_key_types_without_raising(
     )
 
     assert direct_vm.run_validator(leader_result=leader_review) is False
+
+
+def test_validator_rejects_mixed_type_support_keys_without_raising(
+    contract, direct_vm, buyer, vendor, monkeypatch
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+    mock_adjudication(direct_vm, release)
+    mock_direct_model_candidate(
+        monkeypatch,
+        {"supported": True, 1: "malformed key"},
+    )
+
+    assert direct_vm.run_validator() is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "reordered-evidence-refs",
+        "blocker-alias",
+        "missing-evidence-alias",
+        "duplicate-blocker",
+        "duplicate-missing-evidence",
+        "unsorted-blockers",
+        "unsorted-missing-evidence",
+        "uppercase-rationale-hash",
+    ),
+)
+def test_validator_rejects_noncanonical_malicious_leader_review(
+    mutation, contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+    leader_review = json.loads(contract.get_review(case_id, 0))
+
+    if mutation == "reordered-evidence-refs":
+        leader_review["evidenceRefs"] = list(reversed(leader_review["evidenceRefs"]))
+    elif mutation == "blocker-alias":
+        leader_review["verdict"] = "REJECTED"
+        leader_review["materialBlockers"] = ["KEYBOARD TRAP"]
+    elif mutation == "missing-evidence-alias":
+        leader_review["verdict"] = "REQUEST_MORE_INFO"
+        leader_review["missingEvidence"] = ["critical-flow-trace"]
+    elif mutation == "duplicate-blocker":
+        leader_review["verdict"] = "REJECTED"
+        leader_review["materialBlockers"] = ["keyboard-trap", "keyboard-trap"]
+    elif mutation == "duplicate-missing-evidence":
+        leader_review["verdict"] = "REQUEST_MORE_INFO"
+        leader_review["missingEvidence"] = [
+            "CRITICAL_FLOW_TRACE",
+            "CRITICAL_FLOW_TRACE",
+        ]
+    elif mutation == "unsorted-blockers":
+        leader_review["verdict"] = "REJECTED"
+        leader_review["materialBlockers"] = [
+            "missing-form-label",
+            "keyboard-trap",
+        ]
+    elif mutation == "unsorted-missing-evidence":
+        leader_review["verdict"] = "REQUEST_MORE_INFO"
+        leader_review["missingEvidence"] = ["SCREENSHOT", "HTML_BUNDLE"]
+    else:
+        leader_review["rationaleHash"] = "sha256:" + "A" * 64
+
+    support_calls = []
+
+    def supported(_data):
+        support_calls.append(True)
+        return {"ok": {"supported": True}}
+
+    mock_adjudication(direct_vm, release, llm_handler=supported)
+
+    assert direct_vm.run_validator(leader_result=leader_review) is False
+    assert support_calls == []
 
 
 @pytest.mark.parametrize(

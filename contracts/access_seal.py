@@ -472,8 +472,11 @@ def _safe_review_candidate(
     )
     if not isinstance(candidate, dict):
         return invalid_shape
-    if sorted(candidate.keys()) != sorted(RAW_REVIEW_FIELDS):
+    if len(candidate) != len(RAW_REVIEW_FIELDS):
         return invalid_shape
+    for field in RAW_REVIEW_FIELDS:
+        if field not in candidate:
+            return invalid_shape
     if candidate["verdict"] not in REVIEW_VERDICTS:
         return _review_result(
             "UNRESOLVED",
@@ -542,7 +545,8 @@ def _safe_review_candidate(
 def _safe_support_candidate(candidate: object) -> bool:
     return (
         isinstance(candidate, dict)
-        and sorted(candidate.keys()) == ["supported"]
+        and len(candidate) == 1
+        and "supported" in candidate
         and isinstance(candidate["supported"], bool)
         and candidate["supported"] is True
     )
@@ -573,18 +577,20 @@ def _reviews_semantically_valid(
     references = review["evidenceRefs"]
     if not isinstance(references, list):
         return False
-    if len(references) != len(evidence_refs):
-        return False
     for reference in references:
         if not _is_sha256_text(reference):
             return False
-    if sorted(references) != sorted(evidence_refs):
+    if references != evidence_refs:
         return False
-    if not _is_sha256_text(review["rationaleHash"]):
+    if not _is_lowercase_sha256_text(review["rationaleHash"]):
         return False
     blockers = _normalize_blockers(review["materialBlockers"])
     missing = _normalize_missing_evidence(review["missingEvidence"])
     if blockers is None or missing is None:
+        return False
+    if review["materialBlockers"] != blockers:
+        return False
+    if review["missingEvidence"] != missing:
         return False
     if verdict == "APPROVED":
         return len(blockers) == 0 and len(missing) == 0

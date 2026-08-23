@@ -97,44 +97,47 @@ def _normalize_missing_evidence(values:object)->list[str]|None:
 		if A not in B:B.append(A)
 	B.sort();return B
 def _safe_review_candidate(candidate:object,release_digest:str,profile_hash:str,evidence_refs:list[str])->dict[str,object]:
-	D=evidence_refs;C=profile_hash;B=release_digest;A=candidate;I=_review_result('UNRESOLVED',B,C,[],[],D,MODEL_OUTPUT_INVALID_SHAPE)
-	if not isinstance(A,dict):return I
-	if sorted(A.keys())!=sorted(RAW_REVIEW_FIELDS):return I
+	D=evidence_refs;C=profile_hash;B=release_digest;A=candidate;F=_review_result('UNRESOLVED',B,C,[],[],D,MODEL_OUTPUT_INVALID_SHAPE)
+	if not isinstance(A,dict):return F
+	if len(A)!=len(RAW_REVIEW_FIELDS):return F
+	for K in RAW_REVIEW_FIELDS:
+		if K not in A:return F
 	if A['verdict']not in REVIEW_VERDICTS:return _review_result('UNRESOLVED',B,C,[],[],D,MODEL_OUTPUT_INVALID_CLAIMS)
-	F=_normalize_blockers(A['materialBlockers']);G=_normalize_missing_evidence(A['missingEvidence'])
-	if F is None or G is None:return _review_result('UNRESOLVED',B,C,[],[],D,MODEL_OUTPUT_INVALID_CLAIMS)
-	J=A['rationale'];H=_utf8_size(J)
-	if H is None or H==0 or H>MAX_REVIEW_RATIONALE_BYTES:return _review_result('UNRESOLVED',B,C,[],[],D,MODEL_OUTPUT_INVALID_CLAIMS)
+	G=_normalize_blockers(A['materialBlockers']);H=_normalize_missing_evidence(A['missingEvidence'])
+	if G is None or H is None:return _review_result('UNRESOLVED',B,C,[],[],D,MODEL_OUTPUT_INVALID_CLAIMS)
+	J=A['rationale'];I=_utf8_size(J)
+	if I is None or I==0 or I>MAX_REVIEW_RATIONALE_BYTES:return _review_result('UNRESOLVED',B,C,[],[],D,MODEL_OUTPUT_INVALID_CLAIMS)
 	E=str(A['verdict'])
-	if len(F)>0:E='REJECTED'
-	elif len(G)>0:E='REQUEST_MORE_INFO'
+	if len(G)>0:E='REJECTED'
+	elif len(H)>0:E='REQUEST_MORE_INFO'
 	elif E in('REJECTED','REQUEST_MORE_INFO'):return _review_result('UNRESOLVED',B,C,[],[],D,MODEL_OUTPUT_INVALID_CLAIMS)
-	return _review_result(E,B,C,F,G,D,J)
-def _safe_support_candidate(candidate:object)->bool:A=candidate;return isinstance(A,dict)and sorted(A.keys())==['supported']and isinstance(A['supported'],bool)and A['supported']is True
+	return _review_result(E,B,C,G,H,D,J)
+def _safe_support_candidate(candidate:object)->bool:A=candidate;return isinstance(A,dict)and len(A)==1 and'supported'in A and isinstance(A['supported'],bool)and A['supported']is True
 def _reviews_semantically_valid(review:object,release_digest:str,profile_hash:str,evidence_refs:list[str])->bool:
-	F=evidence_refs;A=review
+	A=review
 	if not isinstance(A,dict):return False
 	if len(A)!=len(FINAL_REVIEW_FIELDS):return False
-	for G in FINAL_REVIEW_FIELDS:
-		if G not in A:return False
+	for F in FINAL_REVIEW_FIELDS:
+		if F not in A:return False
 	if A['schemaVersion']!=REVIEW_SCHEMA:return False
-	C=A['verdict']
-	if C not in REVIEW_VERDICTS:return False
+	D=A['verdict']
+	if D not in REVIEW_VERDICTS:return False
 	if A['releaseDigest']!=release_digest:return False
 	if A['profileHash']!=profile_hash:return False
-	D=A['evidenceRefs']
-	if not isinstance(D,list):return False
-	if len(D)!=len(F):return False
-	for H in D:
-		if not _is_sha256_text(H):return False
-	if sorted(D)!=sorted(F):return False
-	if not _is_sha256_text(A['rationaleHash']):return False
-	B=_normalize_blockers(A['materialBlockers']);E=_normalize_missing_evidence(A['missingEvidence'])
-	if B is None or E is None:return False
-	if C=='APPROVED':return len(B)==0 and len(E)==0
-	if C=='REJECTED':return len(B)>0
-	if C=='REQUEST_MORE_INFO':return len(B)==0 and len(E)>0
-	return len(B)==0 and len(E)==0
+	E=A['evidenceRefs']
+	if not isinstance(E,list):return False
+	for G in E:
+		if not _is_sha256_text(G):return False
+	if E!=evidence_refs:return False
+	if not _is_lowercase_sha256_text(A['rationaleHash']):return False
+	B=_normalize_blockers(A['materialBlockers']);C=_normalize_missing_evidence(A['missingEvidence'])
+	if B is None or C is None:return False
+	if A['materialBlockers']!=B:return False
+	if A['missingEvidence']!=C:return False
+	if D=='APPROVED':return len(B)==0 and len(C)==0
+	if D=='REJECTED':return len(B)>0
+	if D=='REQUEST_MORE_INFO':return len(B)==0 and len(C)>0
+	return len(B)==0 and len(C)==0
 class AccessSeal(gl.Contract):
 	case_ids:DynArray[str];buyers:TreeMap[str,Address];vendors:TreeMap[str,Address];salts:TreeMap[str,str];profile_hashes:TreeMap[str,str];flows_hashes:TreeMap[str,str];subject_origins:TreeMap[str,str];evidence_deadlines:TreeMap[str,u256];hard_deadlines:TreeMap[str,u256];max_unresolved_retries_by_case:TreeMap[str,u256];escrow_amounts:TreeMap[str,u256];terms_hashes:TreeMap[str,str];lifecycles:TreeMap[str,str];vendor_acceptances:TreeMap[str,bool];reserved_by_case:TreeMap[str,u256];chain_ids:TreeMap[str,u256];contract_addresses:TreeMap[str,str];created_at_by_case:TreeMap[str,u256];epochs:TreeMap[str,u256];evidence_counts:TreeMap[str,u256];release_digests:TreeMap[str,str];evidence_envelopes:TreeMap[str,str];evidence_hashes:TreeMap[str,str];used_evidence_hashes:TreeMap[str,bool];used_evidence_nonces:TreeMap[str,bool];review_results:TreeMap[str,str];review_attempt_results:TreeMap[str,str];review_attempt_proof_ids:TreeMap[str,str];review_attempt_finalized:TreeMap[str,bool];review_attempt_decided_at:TreeMap[str,u256];review_attempt_finalized_at:TreeMap[str,u256];review_attempts:TreeMap[str,u256];review_proof_ids:TreeMap[str,str];review_finalized:TreeMap[str,bool];review_decided_at:TreeMap[str,u256];used_retry_ids:TreeMap[str,bool];cure_counts:TreeMap[str,u256];settlement_ids:TreeMap[str,str];settlement_kinds:TreeMap[str,str];settlement_reasons:TreeMap[str,str];settlement_recipients:TreeMap[str,Address];settlement_amounts:TreeMap[str,u256];settlement_epochs:TreeMap[str,u256];settlement_review_proofs:TreeMap[str,str];settlement_statuses:TreeMap[str,str];settlement_executors:TreeMap[str,Address];total_deposits:u256;total_reserved:u256;total_pending_dispatch:u256;total_dispatched_payouts:u256;total_dispatched_refunds:u256
 	def __init__(self)->None:self.total_deposits=u256(0);self.total_reserved=u256(0);self.total_pending_dispatch=u256(0);self.total_dispatched_payouts=u256(0);self.total_dispatched_refunds=u256(0)

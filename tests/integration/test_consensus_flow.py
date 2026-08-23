@@ -8,7 +8,9 @@ from gltest.types import TransactionStatus
 from conftest import (
     assert_accounting_conservation,
     assert_five_validator_consensus,
+    build_release,
     candidate,
+    EVIDENCE_TYPES,
     FLOWS_HASH,
     io_context,
     open_release,
@@ -21,55 +23,112 @@ from conftest import (
 from scripts.glsim_support import GenLayerSettlementReader, read_and_verify_settlement_proof
 
 
+def test_release_fixture_binds_runtime_case_and_complete_pages_scans_flows(
+    fixture_site,
+):
+    runtime_case_id = "runtime-case-id"
+    release = build_release(runtime_case_id, fixture_site)
+    dom_facts = json.loads(release["served"][PATHS["DOM_FACTS"]])
+    scanner_report = json.loads(release["served"][PATHS["SCANNER_REPORT"]])
+    flow_trace = json.loads(release["served"][PATHS["CRITICAL_FLOW_TRACE"]])
+    urls = [
+        ORIGIN + "/cases",
+        ORIGIN + "/cases/new",
+        ORIGIN + "/cases/" + runtime_case_id,
+    ]
+
+    assert release["manifest"]["caseId"] == runtime_case_id
+    assert flow_trace["caseId"] == runtime_case_id
+    assert [page["url"] for page in dom_facts["pages"]] == urls
+    assert [scan["url"] for scan in scanner_report["scans"]] == urls
+    assert [flow["id"] for flow in flow_trace["flows"]] == [
+        "workspace-navigation",
+        "create-case-preview",
+        "case-section-navigation",
+    ]
+    assert all(flow["steps"] for flow in flow_trace["flows"])
+    assert all(
+        set(step) == {
+            "checkpoint",
+            "page",
+            "action",
+            "expected",
+            "actual",
+            "passed",
+        }
+        for flow in flow_trace["flows"]
+        for step in flow["steps"]
+    )
+
+
+def test_release_fixture_uses_case_timeline_for_all_artifacts(fixture_site):
+    release = build_release("runtime-case-timeline", fixture_site)
+    observed_at = 1_786_579_500
+
+    assert {
+        json.loads(release["served"][PATHS[kind]])["observedAt"]
+        for kind in ("DOM_FACTS", "SCANNER_REPORT", "CRITICAL_FLOW_TRACE")
+    } == {observed_at}
+
+
+def test_submitted_envelopes_share_served_case_and_observation_time(
+    deployed_contract, actors, fixture_site
+):
+    case_id, release = open_release(
+        deployed_contract,
+        actors,
+        fixture_site,
+        "integration-evidence-bindings",
+    )
+    observed_at = json.loads(
+        release["served"][PATHS["CRITICAL_FLOW_TRACE"]]
+    )["observedAt"]
+    evidence = read_json(deployed_contract, "get_evidence", [case_id, 0])
+
+    assert len(evidence["envelopes"]) == len(EVIDENCE_TYPES) + 1
+    assert {item["caseId"] for item in evidence["envelopes"]} == {case_id}
+    assert {item["observedAt"] for item in evidence["envelopes"]} == {
+        observed_at
+    }
+    assert all(
+        item["observedAt"] <= item["submittedAt"] < item["expiresAt"]
+        for item in evidence["envelopes"]
+    )
+
+
 def test_five_validators_finalize_semantic_approval_and_contract_finality(
     deployed_contract, actors, fixture_site
 ):
     case_id, release = open_release(
         deployed_contract, actors, fixture_site, "integration-approved"
     )
-    assert json.loads(release["served"][PATHS["DOM_FACTS"]]) == {
-        "schemaVersion": "accessseal-dom-facts/1",
-        "observedAt": 1_787_381_551,
-        "pages": [
-            {
-                "url": ORIGIN + "/cases",
-                "formLabels": [
-                    {"control": "case-id", "label": "Import case ID"}
-                ],
-                "imageAlternatives": [],
-                "disabledStates": [],
-            }
-        ],
-    }
-    assert json.loads(release["served"][PATHS["SCANNER_REPORT"]]) == {
-        "schemaVersion": "accessseal-scanner-report/1",
-        "tool": "axe-core",
-        "observedAt": 1_787_381_551,
-        "scans": [
-            {
-                "url": ORIGIN + "/cases",
-                "violations": [],
-                "incomplete": [],
-                "passes": 1,
-            }
-        ],
-    }
-    assert json.loads(release["served"][PATHS["CRITICAL_FLOW_TRACE"]]) == {
-        "schemaVersion": "accessseal-critical-flow-trace/1",
-        "caseId": "bound-by-helper",
-        "flowsHash": FLOWS_HASH,
-        "observedAt": 1_787_381_551,
-        "flows": [
-            {"id": "workspace-navigation", "steps": [], "passed": True}
-        ],
-        "materialBlockers": {
-            "focus-obscured": False,
-            "inoperable-critical-flow": False,
-            "keyboard-trap": False,
-            "meaningless-alt-text": False,
-            "missing-form-label": False,
-        },
-    }
+    dom_facts = json.loads(release["served"][PATHS["DOM_FACTS"]])
+    scanner_report = json.loads(release["served"][PATHS["SCANNER_REPORT"]])
+    flow_trace = json.loads(release["served"][PATHS["CRITICAL_FLOW_TRACE"]])
+    urls = [
+        ORIGIN + "/cases",
+        ORIGIN + "/cases/new",
+        ORIGIN + "/cases/" + case_id,
+    ]
+    evidence = read_json(deployed_contract, "get_evidence", [case_id, 0])
+
+    assert release["manifest"]["caseId"] == case_id
+    assert flow_trace["caseId"] == case_id
+    assert flow_trace["flowsHash"] == FLOWS_HASH
+    assert [page["url"] for page in dom_facts["pages"]] == urls
+    assert [scan["url"] for scan in scanner_report["scans"]] == urls
+    assert [flow["id"] for flow in flow_trace["flows"]] == [
+        "workspace-navigation",
+        "create-case-preview",
+        "case-section-navigation",
+    ]
+    assert all(flow["passed"] and flow["steps"] for flow in flow_trace["flows"])
+    assert {
+        dom_facts["observedAt"],
+        scanner_report["observedAt"],
+        flow_trace["observedAt"],
+        *(item["observedAt"] for item in evidence["envelopes"]),
+    } == {release["observedAt"]}
     leader_candidate = candidate(
         deployed_contract, case_id, release, "APPROVED"
     )

@@ -232,8 +232,8 @@ function commands(overrides: Record<string, CommandResult> = {}) {
     "root-lint": result(actualRootLintOutput),
     "contract-schema": result(actualSchemaOutput),
     "root-typecheck": result("accessseal typecheck\ntsc --noEmit"),
-    direct: result("================ 240 passed in 9.0s ================"),
-    integration: result("================ 35 passed, 1 skipped in 9.0s ================"),
+    direct: result("================ 250 passed in 9.0s ================"),
+    integration: result("================ 38 passed, 1 skipped in 9.0s ================"),
     "root-scripts": result("ℹ tests 130\nℹ pass 130\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0"),
     "frontend-lint": result("0 warnings"),
     "frontend-typecheck": result("typecheck complete"),
@@ -269,8 +269,8 @@ test("only independent official readers, publication APIs, and actual command ou
     contractAddress: contract,
     safeTestConfig: false,
   });
-  assert.equal(proof.checks.find((item) => item.id === "direct")?.passed, 240);
-  assert.equal(proof.checks.find((item) => item.id === "integration")?.passed, 35);
+  assert.equal(proof.checks.find((item) => item.id === "direct")?.passed, 250);
+  assert.equal(proof.checks.find((item) => item.id === "integration")?.passed, 38);
   assert.equal(proof.checks.find((item) => item.id === "root-scripts")?.passed, 130);
   assert.equal(proof.checks.find((item) => item.id === "frontend-unit")?.passed, 128);
   assert.equal(proof.checks.find((item) => item.id === "root-lint")?.passed, 9);
@@ -384,9 +384,9 @@ test("accepts only canonical decimal-string u256 amounts and exact pinned absent
 
 test("rejects failed or count-spoofed command results rather than accepting declared PASS strings", async () => {
   for (const changed of [
-    { direct: result("240 passed", 1) },
-    { direct: result("239 passed") },
-    { integration: result("35 passed, 0 skipped") },
+    { direct: result("250 passed", 1) },
+    { direct: result("249 passed") },
+    { integration: result("38 passed, 0 skipped") },
     { "root-scripts": result("ℹ tests 129\nℹ pass 129\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") },
     { "frontend-unit": result("Test Files 16 passed (16)\nTests 127 passed (127)") },
     { "frontend-e2e-2": result("7 passed") },
@@ -413,12 +413,12 @@ for (const [name, stdout] of [
 }
 
 for (const [name, changed] of [
-  ["a prefixed direct total", { direct: result("================ 1240 passed in 9.0s ================") }],
-  ["a misleading direct line before the real contradictory summary", { direct: result("diagnostic: 240 passed\n================ 239 passed in 9.0s ================") }],
-  ["duplicate direct summaries", { direct: result("================ 240 passed in 9.0s ================\n================ 240 passed in 9.1s ================") }],
-  ["a pytest failure summary beside a passing summary", { direct: result("================ 240 passed in 9.0s ================\n================ 1 failed, 239 passed in 9.1s ================") }],
-  ["a prefixed integration total", { integration: result("================ 135 passed, 1 skipped in 9.0s ================") }],
-  ["duplicate contradictory integration summaries", { integration: result("================ 35 passed, 1 skipped in 9.0s ================\n================ 34 passed, 1 skipped in 9.1s ================") }],
+  ["a prefixed direct total", { direct: result("================ 1250 passed in 9.0s ================") }],
+  ["a misleading direct line before the real contradictory summary", { direct: result("diagnostic: 250 passed\n================ 249 passed in 9.0s ================") }],
+  ["duplicate direct summaries", { direct: result("================ 250 passed in 9.0s ================\n================ 250 passed in 9.1s ================") }],
+  ["a pytest failure summary beside a passing summary", { direct: result("================ 250 passed in 9.0s ================\n================ 1 failed, 249 passed in 9.1s ================") }],
+  ["a prefixed integration total", { integration: result("================ 138 passed, 1 skipped in 9.0s ================") }],
+  ["duplicate contradictory integration summaries", { integration: result("================ 38 passed, 1 skipped in 9.0s ================\n================ 37 passed, 1 skipped in 9.1s ================") }],
   ["a nonzero script failure count", { "root-scripts": result("ℹ tests 130\nℹ pass 130\nℹ fail 1\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
   ["a misleading script line before contradictory counts", { "root-scripts": result("ℹ tests 130\ndiagnostic pass 130\nℹ pass 129\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0") }],
   ["duplicate contradictory frontend summaries", { "frontend-unit": result("Test Files 16 passed (16)\nTests 128 passed (128)\nTests 127 passed (127)") }],
@@ -436,8 +436,8 @@ for (const [name, changed] of [
 
 for (const [name, id, expected, changed] of [
   ["lint", "root-lint", 9, { "root-lint": result(actualRootLintOutput.replaceAll("✓ Lint passed (3 checks)", ansi("✓ Lint passed (3 checks)"))) }],
-  ["direct pytest", "direct", 240, { direct: result(ansi("================ 240 passed in 9.0s ================")) }],
-  ["integration pytest", "integration", 35, { integration: result(ansi("================ 35 passed, 1 skipped in 9.0s ================")) }],
+  ["direct pytest", "direct", 250, { direct: result(ansi("================ 250 passed in 9.0s ================")) }],
+  ["integration pytest", "integration", 38, { integration: result(ansi("================ 38 passed, 1 skipped in 9.0s ================")) }],
   ["Node test", "root-scripts", 130, { "root-scripts": result(["ℹ tests 130", "ℹ pass 130", "ℹ fail 0", "ℹ cancelled 0", "ℹ skipped 0", "ℹ todo 0"].map((line) => ansi(line)).join("\n")) }],
   ["Vitest", "frontend-unit", 128, { "frontend-unit": result(`${ansi("Test Files 16 passed (16)")}\n${ansi("Tests 128 passed (128)")}`) }],
   ["Playwright", "frontend-e2e-1", 9, { "frontend-e2e-1": result(ansi("9 passed (31.0s)")) }],
@@ -449,8 +449,8 @@ for (const [name, id, expected, changed] of [
 }
 
 for (const [name, changed] of [
-  ["ANSI-colored pytest failure beside a valid summary", { direct: result(`================ 240 passed in 9.0s ================\n${ansi("================ 1 failed, 239 passed in 9.1s ================", 31)}`) }],
-  ["ANSI-colored integration contradiction beside a valid summary", { integration: result(`================ 35 passed, 1 skipped in 9.0s ================\n${ansi("================ 34 passed, 1 skipped in 9.1s ================", 31)}`) }],
+  ["ANSI-colored pytest failure beside a valid summary", { direct: result(`================ 250 passed in 9.0s ================\n${ansi("================ 1 failed, 249 passed in 9.1s ================", 31)}`) }],
+  ["ANSI-colored integration contradiction beside a valid summary", { integration: result(`================ 38 passed, 1 skipped in 9.0s ================\n${ansi("================ 37 passed, 1 skipped in 9.1s ================", 31)}`) }],
   ["ANSI-colored Node failure beside a valid summary", { "root-scripts": result(`${commands()["root-scripts"]!.stdout}\n${ansi("ℹ fail 1", 31)}`) }],
   ["ANSI-colored Vitest contradiction beside a valid summary", { "frontend-unit": result(`${commands()["frontend-unit"]!.stdout}\n${ansi("Tests 127 passed (127)", 31)}`) }],
   ["ANSI-colored Playwright failure beside a valid summary", { "frontend-e2e-1": result(`9 passed (31.0s)\n${ansi("1 failed", 31)}`) }],
