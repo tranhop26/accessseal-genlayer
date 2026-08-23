@@ -232,12 +232,12 @@ function commands(overrides: Record<string, CommandResult> = {}) {
     "root-lint": result(actualRootLintOutput),
     "contract-schema": result(actualSchemaOutput),
     "root-typecheck": result("accessseal typecheck\ntsc --noEmit"),
-    direct: result("214 passed in 9.0s"),
-    integration: result("31 passed, 1 skipped in 9.0s"),
-    "root-scripts": result("tests 45\npass 45\nfail 0"),
+    direct: result("240 passed in 9.0s"),
+    integration: result("35 passed, 1 skipped in 9.0s"),
+    "root-scripts": result("tests 95\npass 95\nfail 0"),
     "frontend-lint": result("0 warnings"),
     "frontend-typecheck": result("typecheck complete"),
-    "frontend-unit": result("Test Files 8 passed (8)\nTests 63 passed (63)"),
+    "frontend-unit": result("Test Files 16 passed (16)\nTests 128 passed (128)"),
     "frontend-build": result("Compiled successfully\nRoute (app)"),
     "frontend-e2e-1": result("9 passed (31.0s)"),
     "frontend-e2e-2": result("9 passed (31.1s)"),
@@ -259,7 +259,10 @@ test("only independent official readers, publication APIs, and actual command ou
     contractAddress: contract,
     safeTestConfig: false,
   });
-  assert.equal(proof.checks.find((item) => item.id === "direct")?.passed, 214);
+  assert.equal(proof.checks.find((item) => item.id === "direct")?.passed, 240);
+  assert.equal(proof.checks.find((item) => item.id === "integration")?.passed, 35);
+  assert.equal(proof.checks.find((item) => item.id === "root-scripts")?.passed, 95);
+  assert.equal(proof.checks.find((item) => item.id === "frontend-unit")?.passed, 128);
   assert.equal(proof.checks.find((item) => item.id === "root-lint")?.passed, 6);
   assert.equal(proof.proofRows.payout.childTransactionHash, payoutChild);
   assert.equal(proof.proofRows.payout.amount, "900719925474099312345");
@@ -371,9 +374,11 @@ test("accepts only canonical decimal-string u256 amounts and exact pinned absent
 
 test("rejects failed or count-spoofed command results rather than accepting declared PASS strings", async () => {
   for (const changed of [
-    { direct: result("214 passed", 1) },
-    { direct: result("213 passed") },
-    { integration: result("31 passed, 0 skipped") },
+    { direct: result("240 passed", 1) },
+    { direct: result("239 passed") },
+    { integration: result("35 passed, 0 skipped") },
+    { "root-scripts": result("tests 94\npass 94\nfail 0") },
+    { "frontend-unit": result("Test Files 16 passed (16)\nTests 127 passed (127)") },
     { "frontend-e2e-2": result("7 passed") },
     { "root-lint": result(actualRootLintOutput.replaceAll("Lint passed (3 checks)", "prompt lint missing")) },
     { "contract-schema": result('{"ok":false,"schema":{}}') },
