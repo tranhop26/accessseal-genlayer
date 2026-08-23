@@ -980,8 +980,13 @@ def test_validator_rejects_semantically_unsupported_favorable_verdict(
     assert direct_vm.run_validator() is False
 
 
+@pytest.mark.parametrize(
+    "supported, expected",
+    ((True, True), (False, False)),
+    ids=("supported", "unsupported"),
+)
 def test_validator_assesses_unresolved_leader_support(
-    contract, direct_vm, buyer, vendor
+    supported, expected, contract, direct_vm, buyer, vendor
 ):
     case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
 
@@ -1002,12 +1007,80 @@ def test_validator_assesses_unresolved_leader_support(
         prompt = data.get("prompt", "")
         assert '"verdict":"UNRESOLVED"' in prompt
         calls.append(prompt)
-        return {"ok": {"supported": True}}
+        return {"ok": {"supported": supported}}
 
     mock_adjudication(direct_vm, release, llm_handler=support_unresolved)
 
-    assert direct_vm.run_validator() is True
+    assert direct_vm.run_validator() is expected
     assert len(calls) == 1
+
+
+def test_validator_closes_matching_unavailable_evidence_diagnosis(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    leader_calls = []
+    mock_adjudication(
+        direct_vm,
+        release,
+        status_overrides={"RELEASE_MANIFEST": 503},
+        llm_handler=derived_llm_handler(calls=leader_calls),
+    )
+    contract.request_review(case_id)
+
+    review = json.loads(contract.get_review(case_id, 0))
+    assert review["verdict"] == "UNRESOLVED"
+    assert leader_calls == []
+
+    validator_calls = []
+    mock_adjudication(
+        direct_vm,
+        release,
+        status_overrides={"RELEASE_MANIFEST": 503},
+        llm_handler=derived_llm_handler(calls=validator_calls),
+    )
+
+    assert direct_vm.run_validator() is True
+    assert validator_calls == []
+
+
+def test_validator_rejects_bound_loader_diagnosis_mismatch(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(
+        direct_vm,
+        release,
+        status_overrides={"RELEASE_MANIFEST": 503},
+    )
+    contract.request_review(case_id)
+    leader_review = json.loads(contract.get_review(case_id, 0))
+
+    mock_adjudication(
+        direct_vm,
+        release,
+        body_overrides={"RELEASE_MANIFEST": b"{}"},
+    )
+
+    assert leader_review["verdict"] == "UNRESOLVED"
+    assert direct_vm.run_validator() is False
+
+
+def test_validator_rejects_malformed_leader_key_types_without_raising(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
+    mock_adjudication(direct_vm, release)
+    contract.request_review(case_id)
+    leader_review = json.loads(contract.get_review(case_id, 0))
+    leader_review[1] = "malformed key"
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=support_handler(supported=True),
+    )
+
+    assert direct_vm.run_validator(leader_result=leader_review) is False
 
 
 @pytest.mark.parametrize(

@@ -556,8 +556,11 @@ def _reviews_semantically_valid(
 ) -> bool:
     if not isinstance(review, dict):
         return False
-    if sorted(review.keys()) != sorted(FINAL_REVIEW_FIELDS):
+    if len(review) != len(FINAL_REVIEW_FIELDS):
         return False
+    for field in FINAL_REVIEW_FIELDS:
+        if field not in review:
+            return False
     if review["schemaVersion"] != REVIEW_SCHEMA:
         return False
     verdict = review["verdict"]
@@ -1616,7 +1619,7 @@ class AccessSeal(gl.Contract):
                 return False
             context = load_review_context()
             if "reviewDataJson" not in context:
-                return False
+                return context == leader_review
             review_data_json = str(context["reviewDataJson"])
             screenshot_body = context["screenshotBody"]
             validation_prompt = build_review_validation_prompt(

@@ -114,7 +114,9 @@ def _safe_support_candidate(candidate:object)->bool:A=candidate;return isinstanc
 def _reviews_semantically_valid(review:object,release_digest:str,profile_hash:str,evidence_refs:list[str])->bool:
 	F=evidence_refs;A=review
 	if not isinstance(A,dict):return False
-	if sorted(A.keys())!=sorted(FINAL_REVIEW_FIELDS):return False
+	if len(A)!=len(FINAL_REVIEW_FIELDS):return False
+	for G in FINAL_REVIEW_FIELDS:
+		if G not in A:return False
 	if A['schemaVersion']!=REVIEW_SCHEMA:return False
 	C=A['verdict']
 	if C not in REVIEW_VERDICTS:return False
@@ -123,8 +125,8 @@ def _reviews_semantically_valid(review:object,release_digest:str,profile_hash:st
 	D=A['evidenceRefs']
 	if not isinstance(D,list):return False
 	if len(D)!=len(F):return False
-	for G in D:
-		if not _is_sha256_text(G):return False
+	for H in D:
+		if not _is_sha256_text(H):return False
 	if sorted(D)!=sorted(F):return False
 	if not _is_sha256_text(A['rationaleHash']):return False
 	B=_normalize_blockers(A['materialBlockers']);E=_normalize_missing_evidence(A['missingEvidence'])
@@ -423,13 +425,13 @@ class AccessSeal(gl.Contract):
 			except Exception:return A(MODEL_EXECUTION_FAILED)
 			return _safe_review_candidate(I,D,E,F)
 		def X(leader_result:gl.vm.Result)->bool:
-			B=leader_result
-			if not isinstance(B,gl.vm.Return):return False
-			C=B.calldata
-			if not _reviews_semantically_valid(C,D,E,F):return False
+			C=leader_result
+			if not isinstance(C,gl.vm.Return):return False
+			B=C.calldata
+			if not _reviews_semantically_valid(B,D,E,F):return False
 			A=U()
-			if'reviewDataJson'not in A:return False
-			G=str(A['reviewDataJson']);H=A['screenshotBody'];I=build_review_validation_prompt(G,json.dumps(C,sort_keys=True,separators=(',',':')))
+			if'reviewDataJson'not in A:return A==B
+			G=str(A['reviewDataJson']);H=A['screenshotBody'];I=build_review_validation_prompt(G,json.dumps(B,sort_keys=True,separators=(',',':')))
 			try:J=gl.nondet.exec_prompt(I,response_format='json',images=[H])
 			except Exception:return False
 			return _safe_support_candidate(J)
