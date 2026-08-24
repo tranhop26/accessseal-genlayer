@@ -3,6 +3,8 @@ from hashlib import sha256
 
 import pytest
 
+from test_adjudication import open_reviewable_case
+
 
 PROFILE_HASH = "0x" + "11" * 32
 FLOWS_HASH = "0x" + "22" * 32
@@ -125,13 +127,21 @@ def envelope_for(harness, case_id, issuer_address, **overrides):
 
 
 def open_complete_early_seal_profile(
-    contract, case_id, vendor, *, omit_type=None, expires_at=1_786_580_000
+    contract,
+    case_id,
+    vendor,
+    *,
+    omit_type=None,
+    expires_at=1_786_580_000,
+    expires_at_by_type=None,
 ):
+    if expires_at_by_type is None:
+        expires_at_by_type = {}
     release = envelope_for(
         contract,
         case_id,
         vendor,
-        expiresAt=expires_at,
+        expiresAt=expires_at_by_type.get("RELEASE_MANIFEST", expires_at),
     )
     contract.as_(vendor).open_evidence(case_id, compact_json(release))
     for evidence_type in REQUIRED_EARLY_SEAL_TYPES[1:]:
@@ -146,7 +156,7 @@ def open_complete_early_seal_profile(
                     vendor,
                     action="APPEND_EVIDENCE",
                     evidenceType=evidence_type,
-                    expiresAt=expires_at,
+                    expiresAt=expires_at_by_type.get(evidence_type, expires_at),
                     nonce="early-seal-" + evidence_type.lower(),
                 )
             ),
@@ -1325,7 +1335,7 @@ def test_append_rejects_duplicate_type_before_consuming_evidence_domain(
     assert case_evidence_and_accounting(contract, case_id) == before
 
 
-def test_close_evidence_rejects_profile_with_envelope_expired_at_seal_time(
+def test_close_evidence_rejects_one_expired_supporting_envelope_at_seal_time(
     contract, direct_vm, buyer, vendor
 ):
     case_id = funded_case(contract, direct_vm, buyer, vendor)
@@ -1333,7 +1343,8 @@ def test_close_evidence_rejects_profile_with_envelope_expired_at_seal_time(
         contract,
         case_id,
         vendor,
-        expires_at=1_786_580_000,
+        expires_at=1_786_581_000,
+        expires_at_by_type={"DOM_FACTS": 1_786_580_000},
     )
     direct_vm.warp("2026-08-13T00:13:20+00:00")
     before = case_evidence_and_accounting(contract, case_id)
@@ -1341,6 +1352,71 @@ def test_close_evidence_rejects_profile_with_envelope_expired_at_seal_time(
     contract.as_(buyer).close_evidence.reverts(
         case_id,
         message="evidence profile contains expired evidence",
+    )
+
+    assert case_evidence_and_accounting(contract, case_id) == before
+
+
+def test_early_seal_rejects_manifestless_cure_epoch_without_mutation(
+    contract, direct_vm, buyer, vendor
+):
+    from genlayer import Address
+
+    case_id, _release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        supporting_evidence=("HTML_BUNDLE",),
+        salt="manifestless-cure-epoch",
+    )
+    contract.request_review(case_id)
+    finality = json.loads(contract.get_review_finality(case_id))
+    self_address = Address(contract.get_case_json(case_id)["contractAddress"])
+    contract.as_(self_address).confirm_review_finality(
+        case_id,
+        finality["epoch"],
+        finality["attempt"],
+        finality["proofId"],
+    )
+    contract.as_(vendor).start_cure(case_id)
+    assert contract.get_case_json(case_id)["epoch"] == 1
+    assert contract.get_case_json(case_id)["lifecycle"] == "EVIDENCE_OPEN"
+    before_case = contract.get_case_json(case_id)
+    before_evidence = json.loads(contract.get_evidence(case_id, 0))
+    before_accounting = json.loads(contract.get_accounting())
+    contract.get_evidence.reverts(
+        case_id,
+        1,
+        message="evidence epoch does not exist",
+    )
+
+    contract.as_(buyer).close_evidence.reverts(
+        case_id,
+        message="evidence profile is incomplete",
+    )
+
+    assert contract.get_case_json(case_id) == before_case
+    assert json.loads(contract.get_evidence(case_id, 0)) == before_evidence
+    assert json.loads(contract.get_accounting()) == before_accounting
+    contract.get_evidence.reverts(
+        case_id,
+        1,
+        message="evidence epoch does not exist",
+    )
+
+
+def test_close_evidence_rejects_hard_deadline_without_mutating_readback(
+    contract, direct_vm, buyer, vendor
+):
+    case_id = funded_case(contract, direct_vm, buyer, vendor)
+    open_complete_early_seal_profile(contract, case_id, vendor)
+    direct_vm.warp("2026-08-13T02:00:00+00:00")
+    before = case_evidence_and_accounting(contract, case_id)
+
+    contract.as_(buyer).close_evidence.reverts(
+        case_id,
+        message="case hard deadline has expired",
     )
 
     assert case_evidence_and_accounting(contract, case_id) == before

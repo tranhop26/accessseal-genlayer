@@ -1054,6 +1054,8 @@ class AccessSeal(gl.Contract):
         self, case_id: str, epoch: u256
     ) -> None:
         epoch_key = self._epoch_key(case_id, epoch)
+        if epoch_key not in self.evidence_counts:
+            raise gl.vm.UserError("evidence profile is incomplete")
         now = int(self._now())
         evidence_types: list[str] = []
         count = self.evidence_counts[epoch_key]
