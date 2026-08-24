@@ -184,6 +184,29 @@ def test_wrong_verdict_and_rmi_or_unresolved_never_prepare_settlement(
     )
 
 
+def test_hard_timeout_refunds_sealed_unreviewed_evidence(
+    contract, direct_vm, buyer, vendor, outsider
+):
+    case_id, _release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        salt="sealed-hard-timeout",
+        advance_to_cutoff=False,
+    )
+    contract.as_(buyer).close_evidence(case_id)
+
+    direct_vm.warp("2026-08-13T02:00:01+00:00")
+    contract.as_(outsider).timeout_refund(case_id)
+
+    settlement = json.loads(contract.get_settlement(case_id))
+    assert settlement["kind"] == "REFUND"
+    assert settlement["recipient"] == buyer.as_hex.lower()
+    assert settlement["reason"] == "HARD_TIMEOUT"
+    _assert_conservation(contract)
+
+
 def test_third_party_dispatches_finality_only_eoa_transfer_and_readback_is_honest(
     contract, direct_vm, buyer, vendor, outsider
 ):

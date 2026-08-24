@@ -1371,7 +1371,10 @@ class AccessSeal(gl.Contract):
     @gl.public.write
     def request_review(self, case_id: str) -> None:
         self._require_case(case_id)
-        if self.lifecycles[case_id] != EVIDENCE_OPEN:
+        if self.lifecycles[case_id] not in (
+            EVIDENCE_OPEN,
+            EVIDENCE_SEALED,
+        ):
             raise gl.vm.UserError("evidence is not open for review")
 
         epoch = self.epochs[case_id]
@@ -1385,7 +1388,10 @@ class AccessSeal(gl.Contract):
         created_at = int(self.created_at_by_case[case_id])
         if now >= created_at + int(self.hard_deadlines[case_id]):
             raise gl.vm.UserError("case hard deadline has expired")
-        if now <= created_at + int(self.evidence_deadlines[case_id]):
+        if (
+            not self.evidence_sealed[epoch_key]
+            and now <= created_at + int(self.evidence_deadlines[case_id])
+        ):
             raise gl.vm.UserError(
                 "review is not eligible before the evidence cutoff"
             )
@@ -1854,7 +1860,11 @@ class AccessSeal(gl.Contract):
         del self.review_proof_ids[epoch_key]
         del self.review_finalized[epoch_key]
         del self.review_decided_at[epoch_key]
-        self.lifecycles[case_id] = EVIDENCE_OPEN
+        self.lifecycles[case_id] = (
+            EVIDENCE_SEALED
+            if self.evidence_sealed[epoch_key]
+            else EVIDENCE_OPEN
+        )
         self.request_review(case_id)
 
     @gl.public.write
@@ -1899,7 +1909,11 @@ class AccessSeal(gl.Contract):
                 raise gl.vm.UserError(
                     "decided approval or rejection cannot time out"
                 )
-        elif self.lifecycles[case_id] not in (FUNDED, EVIDENCE_OPEN):
+        elif self.lifecycles[case_id] not in (
+            FUNDED,
+            EVIDENCE_OPEN,
+            EVIDENCE_SEALED,
+        ):
             raise gl.vm.UserError("case is not eligible for timeout refund")
         self._prepare_settlement_intent(
             case_id,
