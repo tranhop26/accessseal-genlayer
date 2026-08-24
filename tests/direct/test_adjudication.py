@@ -1544,6 +1544,35 @@ def test_review_rejects_the_hard_deadline(
     assert contract.get_case_json(case_id)["lifecycle"] == "EVIDENCE_OPEN"
 
 
+def test_sealed_review_rejects_exact_hard_deadline_without_state_changes(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, _release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        salt="sealed-exact-hard-deadline",
+        advance_to_cutoff=False,
+    )
+    contract.as_(buyer).close_evidence(case_id)
+    before_case = contract.get_case_json(case_id)
+    before_evidence = json.loads(contract.get_evidence(case_id, 0))
+    before_accounting = json.loads(contract.get_accounting())
+
+    direct_vm.warp("2026-08-13T02:00:00+00:00")
+    contract.request_review.reverts(
+        case_id,
+        message="case hard deadline has expired",
+    )
+
+    assert before_case["lifecycle"] == "EVIDENCE_SEALED"
+    assert before_case["evidenceSealed"] is True
+    assert contract.get_case_json(case_id) == before_case
+    assert json.loads(contract.get_evidence(case_id, 0)) == before_evidence
+    assert json.loads(contract.get_accounting()) == before_accounting
+
+
 def test_review_epoch_can_only_finalize_once(
     contract, direct_vm, buyer, vendor
 ):
