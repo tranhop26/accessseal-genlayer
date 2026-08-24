@@ -524,6 +524,36 @@ test("frozen schema policy rejects extra privilege and signature drift", () => {
   );
 });
 
+test("V3 schema exposes buyer evidence sealing and rejects privileged escape hatches", () => {
+  assert.deepEqual(schema.methods.close_evidence, {
+    params: [["case_id", "string"]],
+    kwparams: {},
+    readonly: false,
+    ret: "null",
+    payable: false,
+  });
+  for (const method of ["owner", "upgrade", "override_verdict"] as const) {
+    assert.throws(
+      () =>
+        verifyFrozenSchema({
+          ...schema,
+          methods: { ...schema.methods, [method]: schema.methods.close_evidence },
+        }),
+      /frozen schema/i,
+    );
+  }
+});
+
+test("deployment manifest accepts only the intentionally frozen classification", () => {
+  assert.throws(
+    () =>
+      validateDeploymentManifest(
+        manifest({ contractClassification: "UPGRADEABLE" as "INTENTIONALLY_FROZEN" }),
+      ),
+    /classification/i,
+  );
+});
+
 test("accounting readback explicitly selects finalized state", async () => {
   let readArgs: Record<string, unknown> | undefined;
   await verifyDeployment(
