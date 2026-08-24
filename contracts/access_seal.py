@@ -21,6 +21,14 @@ MANDATORY_EVIDENCE_TYPES = (
     "SCANNER_REPORT",
     "CRITICAL_FLOW_TRACE",
 )
+REQUIRED_EARLY_SEAL_EVIDENCE_TYPES = (
+    "RELEASE_MANIFEST",
+    "HTML_BUNDLE",
+    "SCREENSHOT",
+    "DOM_FACTS",
+    "SCANNER_REPORT",
+    "CRITICAL_FLOW_TRACE",
+)
 MATERIAL_BLOCKER_CODES = (
     "focus-obscured",
     "inoperable-critical-flow",
@@ -1042,6 +1050,24 @@ class AccessSeal(gl.Contract):
         ):
             raise gl.vm.UserError("evidence submission deadline has expired")
 
+    def _require_complete_fresh_evidence_profile(
+        self, case_id: str, epoch: u256
+    ) -> None:
+        epoch_key = self._epoch_key(case_id, epoch)
+        now = int(self._now())
+        evidence_types: list[str] = []
+        count = self.evidence_counts[epoch_key]
+        for index in range(int(count)):
+            evidence_key = self._evidence_key(case_id, epoch, u256(index))
+            envelope = json.loads(self.evidence_envelopes[evidence_key])
+            if int(envelope["expiresAt"]) <= now:
+                raise gl.vm.UserError("evidence profile contains expired evidence")
+            evidence_type = str(envelope["evidenceType"])
+            if evidence_type not in evidence_types:
+                evidence_types.append(evidence_type)
+        if sorted(evidence_types) != sorted(REQUIRED_EARLY_SEAL_EVIDENCE_TYPES):
+            raise gl.vm.UserError("evidence profile is incomplete")
+
     def _require_case(self, case_id: str) -> None:
         if case_id not in self.buyers:
             raise gl.vm.UserError("case does not exist")
@@ -1283,6 +1309,11 @@ class AccessSeal(gl.Contract):
         if envelope["releaseDigest"] != self.release_digests[epoch_key]:
             raise gl.vm.UserError("evidence release digest does not match epoch")
         count = self.evidence_counts[epoch_key]
+        for index in range(int(count)):
+            evidence_key = self._evidence_key(case_id, epoch, u256(index))
+            existing_envelope = json.loads(self.evidence_envelopes[evidence_key])
+            if existing_envelope["evidenceType"] == envelope["evidenceType"]:
+                raise gl.vm.UserError("evidence type is already present")
         if int(count) >= MAX_EVIDENCE_PER_EPOCH:
             raise gl.vm.UserError("evidence count limit reached")
         self._consume_evidence_domain(case_id, envelope, evidence_hash)
@@ -1290,6 +1321,25 @@ class AccessSeal(gl.Contract):
         self.evidence_envelopes[evidence_key] = canonical
         self.evidence_hashes[evidence_key] = evidence_hash
         self.evidence_counts[epoch_key] = u256(int(count) + 1)
+
+    @gl.public.write
+    def close_evidence(self, case_id: str) -> None:
+        self._require_case(case_id)
+        if gl.message.sender_address != self.buyers[case_id]:
+            raise gl.vm.UserError("only the buyer can close evidence")
+        if self.lifecycles[case_id] != EVIDENCE_OPEN:
+            raise gl.vm.UserError("evidence is not open")
+        now = int(self._now())
+        created_at = int(self.created_at_by_case[case_id])
+        if now >= created_at + int(self.hard_deadlines[case_id]):
+            raise gl.vm.UserError("case hard deadline has expired")
+        epoch = self.epochs[case_id]
+        self._require_complete_fresh_evidence_profile(case_id, epoch)
+        epoch_key = self._epoch_key(case_id, epoch)
+        self.evidence_sealed[epoch_key] = True
+        self.evidence_sealed_at[epoch_key] = u256(now)
+        self.evidence_sealed_by[epoch_key] = self.buyers[case_id]
+        self.lifecycles[case_id] = EVIDENCE_SEALED
 
     @gl.public.view
     def get_evidence(self, case_id: str, epoch: u256) -> str:

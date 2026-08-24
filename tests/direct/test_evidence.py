@@ -31,6 +31,14 @@ FIXTURE_HASH = (
     "sha256:13be58c176c1258e5e708362c3c8b0b9"
     "7750ccf4552632b95b4fe2a0f2840913"
 )
+REQUIRED_EARLY_SEAL_TYPES = (
+    "RELEASE_MANIFEST",
+    "HTML_BUNDLE",
+    "SCREENSHOT",
+    "DOM_FACTS",
+    "SCANNER_REPORT",
+    "CRITICAL_FLOW_TRACE",
+)
 
 
 FIXTURE_ENVELOPE = {
@@ -114,6 +122,43 @@ def envelope_for(harness, case_id, issuer_address, **overrides):
     }
     value.update(overrides)
     return value
+
+
+def open_complete_early_seal_profile(
+    contract, case_id, vendor, *, omit_type=None, expires_at=1_786_580_000
+):
+    release = envelope_for(
+        contract,
+        case_id,
+        vendor,
+        expiresAt=expires_at,
+    )
+    contract.as_(vendor).open_evidence(case_id, compact_json(release))
+    for evidence_type in REQUIRED_EARLY_SEAL_TYPES[1:]:
+        if evidence_type == omit_type:
+            continue
+        contract.as_(vendor).append_evidence(
+            case_id,
+            compact_json(
+                envelope_for(
+                    contract,
+                    case_id,
+                    vendor,
+                    action="APPEND_EVIDENCE",
+                    evidenceType=evidence_type,
+                    expiresAt=expires_at,
+                    nonce="early-seal-" + evidence_type.lower(),
+                )
+            ),
+        )
+
+
+def case_evidence_and_accounting(contract, case_id):
+    return (
+        contract.get_case_json(case_id),
+        json.loads(contract.get_evidence(case_id, 0)),
+        json.loads(contract.get_accounting()),
+    )
 
 
 def test_canonical_evidence_hash_matches_fixed_sha256_vector(contract):
@@ -1124,15 +1169,19 @@ def test_append_rejects_invalid_envelopes_without_mutating_evidence(
 @pytest.mark.parametrize(
     ("replay_mutation", "message"),
     [
-        ({}, "evidence hash already used"),
+        ({}, "evidence type is already present"),
         (
-            {"payloadUri": ORIGIN + "/evidence/scanner-report-v2.json"},
+            {
+                "evidenceType": "HTML_BUNDLE",
+                "mediaType": "text/html",
+                "payloadUri": ORIGIN + "/evidence/index.html",
+            },
             "evidence nonce already used for action",
         ),
     ],
-    ids=("hash", "nonce"),
+    ids=("type-before-hash", "nonce-different-type"),
 )
-def test_append_rejects_duplicate_hash_or_action_nonce(
+def test_append_rejects_duplicate_type_or_action_nonce(
     contract, direct_vm, buyer, vendor, replay_mutation, message
 ):
     case_id = funded_case(contract, direct_vm, buyer, vendor)
@@ -1189,34 +1238,150 @@ def test_open_requires_release_manifest_and_bounded_nonce(
     assert contract.get_case_json(case_id)["lifecycle"] == "FUNDED"
 
 
-def test_append_enforces_per_epoch_count_limit(
+def test_buyer_seals_exact_complete_fresh_evidence_profile_before_cutoff(
+    contract, direct_vm, buyer, vendor
+):
+    case_id = funded_case(contract, direct_vm, buyer, vendor)
+    open_complete_early_seal_profile(contract, case_id, vendor)
+
+    contract.as_(buyer).close_evidence(case_id)
+
+    case = contract.get_case_json(case_id)
+    assert case["lifecycle"] == "EVIDENCE_SEALED"
+    assert case["evidenceSealed"] is True
+    assert case["evidenceSealedAt"] == 1_786_579_200
+    assert case["evidenceSealedBy"] == str(buyer).lower()
+    evidence = json.loads(contract.get_evidence(case_id, 0))
+    assert [item["evidenceType"] for item in evidence["envelopes"]] == list(
+        REQUIRED_EARLY_SEAL_TYPES
+    )
+
+
+@pytest.mark.parametrize("actor", ("vendor", "outsider"))
+def test_early_seal_rejects_nonbuyer_without_mutating_readback(
+    contract, direct_vm, buyer, vendor, outsider, actor
+):
+    case_id = funded_case(contract, direct_vm, buyer, vendor)
+    open_complete_early_seal_profile(contract, case_id, vendor)
+    before = case_evidence_and_accounting(contract, case_id)
+
+    contract.as_({"vendor": vendor, "outsider": outsider}[actor]).close_evidence.reverts(
+        case_id,
+        message="only the buyer can close evidence",
+    )
+
+    assert case_evidence_and_accounting(contract, case_id) == before
+
+
+@pytest.mark.parametrize("omitted_type", REQUIRED_EARLY_SEAL_TYPES[1:])
+def test_early_seal_rejects_each_missing_required_supporting_type_without_mutation(
+    contract, direct_vm, buyer, vendor, omitted_type
+):
+    case_id = funded_case(contract, direct_vm, buyer, vendor)
+    open_complete_early_seal_profile(
+        contract,
+        case_id,
+        vendor,
+        omit_type=omitted_type,
+    )
+    before = case_evidence_and_accounting(contract, case_id)
+
+    contract.as_(buyer).close_evidence.reverts(
+        case_id,
+        message="evidence profile is incomplete",
+    )
+
+    assert case_evidence_and_accounting(contract, case_id) == before
+
+
+def test_append_rejects_duplicate_type_before_consuming_evidence_domain(
     contract, direct_vm, buyer, vendor
 ):
     case_id = funded_case(contract, direct_vm, buyer, vendor)
     release = envelope_for(contract, case_id, vendor)
+    first = envelope_for(
+        contract,
+        case_id,
+        vendor,
+        action="APPEND_EVIDENCE",
+        evidenceType="SCANNER_REPORT",
+        nonce="scanner-first",
+    )
+    duplicate_type = {
+        **first,
+        "nonce": "scanner-second",
+        "payloadUri": ORIGIN + "/evidence/scanner-report-second.json",
+    }
     contract.as_(vendor).open_evidence(case_id, compact_json(release))
-    for index in range(31):
-        appended = envelope_for(
-            contract,
-            case_id,
-            vendor,
-            action="APPEND_EVIDENCE",
-            evidenceType="DOM_FACTS",
-            nonce=f"facts-{index}",
-        )
-        contract.as_(vendor).append_evidence(case_id, compact_json(appended))
-    overflow = envelope_for(
+    contract.as_(vendor).append_evidence(case_id, compact_json(first))
+    before = case_evidence_and_accounting(contract, case_id)
+
+    contract.as_(vendor).append_evidence.reverts(
+        case_id,
+        compact_json(duplicate_type),
+        message="evidence type is already present",
+    )
+
+    assert case_evidence_and_accounting(contract, case_id) == before
+
+
+def test_close_evidence_rejects_profile_with_envelope_expired_at_seal_time(
+    contract, direct_vm, buyer, vendor
+):
+    case_id = funded_case(contract, direct_vm, buyer, vendor)
+    open_complete_early_seal_profile(
+        contract,
+        case_id,
+        vendor,
+        expires_at=1_786_580_000,
+    )
+    direct_vm.warp("2026-08-13T00:13:20+00:00")
+    before = case_evidence_and_accounting(contract, case_id)
+
+    contract.as_(buyer).close_evidence.reverts(
+        case_id,
+        message="evidence profile contains expired evidence",
+    )
+
+    assert case_evidence_and_accounting(contract, case_id) == before
+
+
+def test_close_evidence_rejects_second_close_without_mutating_readback(
+    contract, direct_vm, buyer, vendor
+):
+    case_id = funded_case(contract, direct_vm, buyer, vendor)
+    open_complete_early_seal_profile(contract, case_id, vendor)
+    contract.as_(buyer).close_evidence(case_id)
+    before = case_evidence_and_accounting(contract, case_id)
+
+    contract.as_(buyer).close_evidence.reverts(
+        case_id,
+        message="evidence is not open",
+    )
+
+    assert case_evidence_and_accounting(contract, case_id) == before
+
+
+def test_append_rejects_after_early_seal_without_mutating_readback(
+    contract, direct_vm, buyer, vendor
+):
+    case_id = funded_case(contract, direct_vm, buyer, vendor)
+    open_complete_early_seal_profile(contract, case_id, vendor)
+    contract.as_(buyer).close_evidence(case_id)
+    appended = envelope_for(
         contract,
         case_id,
         vendor,
         action="APPEND_EVIDENCE",
         evidenceType="DOM_FACTS",
-        nonce="facts-overflow",
+        nonce="post-seal",
     )
+    before = case_evidence_and_accounting(contract, case_id)
 
     contract.as_(vendor).append_evidence.reverts(
         case_id,
-        compact_json(overflow),
-        message="evidence count limit reached",
+        compact_json(appended),
+        message="evidence is not open",
     )
-    assert len(json.loads(contract.get_evidence(case_id, 0))["envelopes"]) == 32
+
+    assert case_evidence_and_accounting(contract, case_id) == before
