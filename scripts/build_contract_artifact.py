@@ -22,7 +22,7 @@ MINIFIER_OPTIONS = {
     "rename_locals": True,
     "preserve_locals": ["self"],
     "rename_globals": False,
-    "hoist_literals": False,
+    "hoist_literals": True,
     "constant_folding": True,
     "combine_imports": True,
     "prefer_single_line": True,

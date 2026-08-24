@@ -26,7 +26,7 @@ function schema(path: string): unknown {
 test("compact artifact remains GenVM-valid after local-name compaction", () => {
   const result = lint("contracts/access_seal_deploy.py");
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /Methods: 22 \(8 view, 14 write\)/);
+  assert.match(result.stdout, /Methods: 23 \(8 view, 15 write\)/);
 });
 
 test("compact artifact exposes the exact readable contract schema", () => {

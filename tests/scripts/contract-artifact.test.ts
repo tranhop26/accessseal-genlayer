@@ -95,10 +95,12 @@ functions = {
 }
 nodes = []
 for node in tree.body:
-    if isinstance(node, ast.Assign) and any(
-        isinstance(target, ast.Name) and target.id in constants for target in node.targets
-    ):
-        nodes.append(node)
+    if isinstance(node, ast.Assign):
+        names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        if any(name in constants for name in names) or (
+            names and all(name.startswith("_") for name in names) and isinstance(node.value, ast.Constant)
+        ):
+            nodes.append(node)
     elif isinstance(node, ast.FunctionDef) and node.name in functions:
         nodes.append(node)
 namespace = {"json": json, "sha256": sha256}
@@ -144,6 +146,45 @@ test("builds the exact dependency-bound artifact deterministically within the Br
     artifactSha256: sha256(first),
     readableSha256: sha256(readable),
   });
+});
+
+test("compacts repeated literals below the deploy limit without changing behavior", async () => {
+  const root = await fixture();
+  const sourcePath = join(root, "contracts/access_seal.py");
+  const header = (await readFile(sourcePath, "utf8")).split("\n", 1)[0];
+  const literal = "accessseal-repeated-literal-".repeat(80);
+  const functions = Array.from(
+    { length: 25 },
+    (_, index) => `def value_${index}():\n    return ${JSON.stringify(literal)}\n`,
+  ).join("\n");
+  await writeFile(sourcePath, `${header}\n${functions}`, "utf8");
+
+  const firstRun = run(root, "--write");
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+  const artifactPath = join(root, "contracts/access_seal_deploy.py");
+  const first = await readFile(artifactPath);
+  const secondRun = run(root, "--write");
+  assert.equal(secondRun.status, 0, secondRun.stderr);
+  assert.deepEqual(await readFile(artifactPath), first);
+  assert.ok(first.byteLength <= 48_000, `artifact is ${first.byteLength} bytes`);
+
+  const behavior = spawnSync(
+    "python",
+    [
+      "-c",
+      [
+        "import importlib.util, json, sys",
+        "spec=importlib.util.spec_from_file_location('artifact',sys.argv[1])",
+        "module=importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(module)",
+        "print(json.dumps([getattr(module,f'value_{i}')() for i in range(25)]))",
+      ].join(";"),
+      artifactPath,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(behavior.status, 0, behavior.stderr);
+  assert.deepEqual(JSON.parse(behavior.stdout), Array(25).fill(literal));
 });
 
 test("tracked artifact preserves semantic-only review bindings from readable source", async () => {

@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 
@@ -19,6 +20,7 @@ from conftest import (
     read_json,
     record_evidence,
     rpc,
+    submit_complete_evidence,
 )
 from scripts.glsim_support import GenLayerSettlementReader, read_and_verify_settlement_proof
 
@@ -205,6 +207,48 @@ def test_five_validators_finalize_semantic_approval_and_contract_finality(
             "finality": finality["status"],
         },
     )
+
+
+def test_early_seal_reviews_complete_evidence_before_cutoff_from_deployed_source(
+    deployed_contract, actors, fixture_site
+):
+    buyer, vendor, reviewer, _ = actors
+    case_id, release = open_release(
+        deployed_contract,
+        actors,
+        fixture_site,
+        "integration-early-seal-approved",
+    )
+    case = read_json(deployed_contract, "get_case", [case_id])
+    deployed_source = base64.b64decode(
+        rpc("gen_getContractCode", [case["contractAddress"]])
+    ).decode("utf-8")
+
+    assert "def close_evidence(" in deployed_source
+    submit_complete_evidence(deployed_contract, case_id, buyer, vendor)
+
+    rpc("accessseal_resetValidatorTelemetry", [])
+    receipt = deployed_contract.connect(reviewer).request_review([case_id]).transact(
+        wait_transaction_status=TransactionStatus.FINALIZED,
+        transaction_context=io_context(
+            release,
+            candidate(deployed_contract, case_id, release, "APPROVED"),
+            when=release["transactionTime"],
+        ),
+    )
+
+    telemetry = rpc("accessseal_getValidatorTelemetry", [])
+    assert_five_validator_consensus(receipt, telemetry)
+    assert read_json(deployed_contract, "get_review", [case_id, 0])["verdict"] == (
+        "APPROVED"
+    )
+    assert read_json(deployed_contract, "get_review_finality", [case_id])["status"] == (
+        "FINALIZED"
+    )
+    decided = read_json(deployed_contract, "get_case", [case_id])
+    assert decided["lifecycle"] == "DECIDED"
+    assert decided["evidenceSealed"] is True
+    assert decided["evidenceSealedBy"] == buyer.address.lower()
 
 
 def test_glsim_exposes_eoa_dispatch_limit_without_claiming_recipient_delivery(

@@ -73,7 +73,7 @@ const HASH = /^[0-9a-f]{64}$/;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 const GIT_COMMIT = /^[0-9a-f]{40,64}$/;
 export const ACCESSSEAL_FROZEN_SCHEMA_SHA256 =
-  "06596ec28d3b6c7932b4aeb7a6e72ee112dcbd3bea125f22ecd43e4cb7d2ba88";
+  "e6417d8be197f2ad760a3a44ddc6dcfb3b6011ceb9d462270b190ee8e85033b2";
 const ACCOUNTING_KEYS = [
   "dispatchedPayouts",
   "dispatchedRefunds",
