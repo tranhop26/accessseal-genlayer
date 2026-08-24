@@ -19,6 +19,9 @@ const caseJson = (overrides: Record<string, unknown> = {}) =>
     contractAddress: address,
     escrowAmount: "1000000000000000000",
     evidenceDeadline: 86400,
+    evidenceSealed: false,
+    evidenceSealedAt: 0,
+    evidenceSealedBy: `0x${"0".repeat(40)}`,
     flowsHash: digest,
     hardDeadline: 604800,
     lifecycle: "DRAFT",
@@ -45,6 +48,38 @@ describe("AccessSeal contract adapter", () => {
       args: [`0x${"d".repeat(64)}`],
       transactionHashVariant: "latest-final",
     });
+  });
+
+  it("parses the V3 evidence seal readback and submits the exact close method", async () => {
+    const readContract = vi.fn().mockResolvedValue(
+      caseJson({
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: buyer,
+        lifecycle: "EVIDENCE_SEALED",
+      }),
+    );
+    const writeContract = vi.fn().mockResolvedValue(`0x${"e".repeat(64)}`);
+    const client = new AccessSealClient(
+      { connect: vi.fn(), readContract, writeContract } as never,
+      address,
+      "studionet",
+    );
+
+    await expect(client.readCase(`0x${"d".repeat(64)}`)).resolves.toMatchObject({
+      evidenceSealed: true,
+      evidenceSealedAt: 1_701_234_567,
+      evidenceSealedBy: buyer,
+      lifecycle: "EVIDENCE_SEALED",
+    });
+    await client.closeEvidence("case-1");
+
+    expect(writeContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        functionName: "close_evidence",
+        args: ["case-1"],
+      }),
+    );
   });
 
   it("parses u256 tokens above 2^53 without losing a wei and rejects already-parsed readbacks", async () => {

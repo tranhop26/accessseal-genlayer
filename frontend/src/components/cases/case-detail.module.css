@@ -133,9 +133,13 @@
 }
 
 .errorNotice {
+  align-items: center;
   background: #fff5f3;
   border-left-color: var(--as-danger);
   color: var(--as-danger);
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
 }
 
 .inlineState,
@@ -630,7 +634,8 @@
 @media (max-width: 479px) {
   .summaryHeader,
   .summaryAction,
-  .dispatchState {
+  .dispatchState,
+  .errorNotice {
     align-items: stretch;
     flex-direction: column;
   }

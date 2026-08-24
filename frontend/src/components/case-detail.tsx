@@ -11,6 +11,7 @@ import { useWallet } from "@/providers/wallet-provider";
 import {
   reconcileCase,
   trackTransaction,
+  type PendingAction,
   type ReconciledCase,
   type TransactionState,
 } from "@/lib/transactions";
@@ -19,6 +20,7 @@ import {
   hashEvidence,
   validateEvidenceForCase,
   type EvidenceEnvelopeV1,
+  type EvidenceType,
 } from "@/lib/evidence";
 import { CaseSkeleton, ErrorState } from "./skeletons";
 import { StatusPanel } from "./status-panel";
@@ -44,6 +46,18 @@ import {
 } from "@/lib/access-seal";
 
 const REVIEW_TX_PREFIX = "accessseal.review-tx.v1:";
+const REQUIRED_EARLY_SEAL_EVIDENCE_TYPES: readonly EvidenceType[] = [
+  "RELEASE_MANIFEST",
+  "HTML_BUNDLE",
+  "SCREENSHOT",
+  "DOM_FACTS",
+  "SCANNER_REPORT",
+  "CRITICAL_FLOW_TRACE",
+];
+
+function currentUnixTimestamp() {
+  return Math.floor(Date.now() / 1000);
+}
 
 type PriorityAction =
   | "ACCEPT_TERMS"
@@ -102,6 +116,11 @@ export function CaseDetail({ caseId }: { caseId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [tx, setTx] = useState<TransactionState | null>(null);
+  const [walletConfirmation, setWalletConfirmation] =
+    useState<PendingAction | null>(null);
+  const [awaitingSealReadback, setAwaitingSealReadback] =
+    useState<Hash | null>(null);
+  const awaitingSealReadbackRef = useRef<Hash | null>(null);
   const [writeBusy, setWriteBusy] = useState(false);
   const writeLock = useRef(false);
   const [evidenceJson, setEvidenceJson] = useState("");
@@ -119,7 +138,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     childTransaction: null,
     recipientBalanceConfirmed: false,
   });
-  const [now] = useState(() => Math.floor(Date.now() / 1000));
+  const [now, setNow] = useState(currentUnixTimestamp);
   const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -128,6 +147,21 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         throw new Error("Public contract reader is unavailable.");
       const next = await reconcileCase(wallet.readContract, caseId);
       setData(next);
+      const pendingSealHash = awaitingSealReadbackRef.current;
+      if (pendingSealHash && next.case.evidenceSealed) {
+        setTx((current) =>
+          current?.hash === pendingSealHash
+            ? {
+                hash: pendingSealHash,
+                phase: "FINALIZED_SUCCESS",
+                message:
+                  "Finalized execution and sealed authoritative readback confirmed.",
+              }
+            : current,
+        );
+        awaitingSealReadbackRef.current = null;
+        setAwaitingSealReadback(null);
+      }
       try {
         setEvidence(
           await wallet.readContract.readEvidence(caseId, next.case.epoch),
@@ -178,17 +212,30 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     const task = window.setTimeout(() => void refresh(), 0);
     return () => window.clearTimeout(task);
   }, [refresh]);
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setNow(currentUnixTimestamp()),
+      1_000,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
   const actor = wallet.address?.toLowerCase();
   const isBuyer = actor === data?.case.buyer.toLowerCase();
+  const isConnectedBuyer = wallet.status === "connected" && isBuyer;
   const isVendor = actor === data?.case.vendor.toLowerCase();
   const finalized = data?.reviewFinality?.status === "FINALIZED";
-  async function run(operation: () => Promise<Hash>, rememberReview = false) {
+  async function run(
+    operation: () => Promise<Hash>,
+    rememberReview = false,
+    action?: PendingAction,
+  ) {
     if (writeLock.current) return;
     if (!wallet.sdk) {
       setError("Connect a wallet before sending a transaction.");
       return;
     }
     setError("");
+    if (action) setWalletConfirmation(action);
     writeLock.current = true;
     setWriteBusy(true);
     try {
@@ -201,9 +248,25 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         async () => {
           if (!wallet.readContract)
             throw new Error("Public contract reader is unavailable.");
+          if (action === "close_evidence") {
+            awaitingSealReadbackRef.current = hash;
+            setAwaitingSealReadback(hash);
+          }
           reconciled.value = await reconcileCase(wallet.readContract, caseId);
           setData(reconciled.value);
+          if (
+            action === "close_evidence" &&
+            !reconciled.value.case.evidenceSealed
+          ) {
+            setAwaitingSealReadback(hash);
+            return false;
+          }
+          if (action === "close_evidence") {
+            awaitingSealReadbackRef.current = null;
+            setAwaitingSealReadback(null);
+          }
         },
+        action,
       );
       const current = reconciled.value;
       if (
@@ -234,6 +297,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         cause instanceof Error ? cause.message : "Transaction was rejected.",
       );
     } finally {
+      setWalletConfirmation(null);
       writeLock.current = false;
       setWriteBusy(false);
     }
@@ -283,7 +347,44 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     !!isVendor &&
     !!data &&
     ["FUNDED", "EVIDENCE_OPEN"].includes(data.case.lifecycle);
-  const canRequestReview = data?.case.lifecycle === "EVIDENCE_OPEN";
+  const currentEpochEvidence = (evidence?.envelopes ?? []).filter(
+    (envelope) => envelope.epoch === data?.case.epoch,
+  );
+  function currentSealEvidenceTypes(timestamp: number) {
+    return currentEpochEvidence
+      .filter((envelope) => envelope.expiresAt > timestamp)
+      .map((envelope) => envelope.evidenceType);
+  }
+  function hasCompleteSealEvidenceAt(timestamp: number) {
+    const types = currentSealEvidenceTypes(timestamp);
+    const missing = REQUIRED_EARLY_SEAL_EVIDENCE_TYPES.filter(
+      (type) => !types.includes(type),
+    );
+    return (
+      types.length === REQUIRED_EARLY_SEAL_EVIDENCE_TYPES.length &&
+      new Set(types).size === REQUIRED_EARLY_SEAL_EVIDENCE_TYPES.length &&
+      missing.length === 0
+    );
+  }
+  const currentEpochEvidenceTypes = currentSealEvidenceTypes(now);
+  const missingSealEvidenceTypes = REQUIRED_EARLY_SEAL_EVIDENCE_TYPES.filter(
+    (type) => !currentEpochEvidenceTypes.includes(type),
+  );
+  const hasCompleteSealEvidence = hasCompleteSealEvidenceAt(now);
+  const expiredSealEvidenceTypes = REQUIRED_EARLY_SEAL_EVIDENCE_TYPES.filter(
+    (type) =>
+      currentEpochEvidence.some(
+        (envelope) =>
+          envelope.evidenceType === type && envelope.expiresAt <= now,
+      ),
+  );
+  const buyerCanSeeSealAction =
+    !!isConnectedBuyer && data?.case.lifecycle === "EVIDENCE_OPEN";
+  const canCloseEvidence =
+    buyerCanSeeSealAction && hasCompleteSealEvidence && !!wallet.contract;
+  const canRequestReview = ["EVIDENCE_OPEN", "EVIDENCE_SEALED"].includes(
+    data?.case.lifecycle ?? "",
+  );
   const canCure =
     !!isVendor &&
     finalized &&
@@ -351,6 +452,14 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     if (wallet.contract)
       void run(() => wallet.contract!.requestReview(caseId), true);
   }
+  function closeEvidence() {
+    if (!hasCompleteSealEvidenceAt(currentUnixTimestamp())) {
+      setError("Evidence is no longer complete and current for sealing.");
+      return;
+    }
+    if (wallet.contract)
+      void run(() => wallet.contract!.closeEvidence(caseId), false, "close_evidence");
+  }
   function startCure() {
     if (wallet.contract) void run(() => wallet.contract!.startCure(caseId));
   }
@@ -399,7 +508,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       "DRAFT",
       "FUNDED",
       "EVIDENCE_OPEN",
-      "REVIEW_PENDING",
+      "EVIDENCE_SEALED",
       "DECIDED",
       "SETTLEMENT_PENDING",
       "DISPATCHED_FINALIZED",
@@ -501,10 +610,25 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       </section>
       {error && (
         <div className={styles.errorNotice} role="alert">
-          {error}
+          <span>{error}</span>
+          <Button variant="ghost" onClick={() => void refresh()} disabled={loading}>
+            Retry readback
+          </Button>
         </div>
       )}
+      {walletConfirmation === "close_evidence" && (
+        <section className={styles.pendingCallout} role="status" aria-live="polite">
+          Confirm the seal in your wallet. No lifecycle change is shown until
+          final execution and contract readback both succeed.
+        </section>
+      )}
       {tx && <StatusPanel state={tx} />}
+      {awaitingSealReadback && (
+        <section className={styles.pendingCallout} role="status" aria-live="polite">
+          Finalized execution is waiting for sealed evidence readback. Refresh
+          readback before requesting review.
+        </section>
+      )}
       <ol className={styles.lifecycle} aria-label="Case lifecycle" tabIndex={0}>
         {timeline.map((stage) => {
           const current = stage === data.case.lifecycle;
@@ -726,6 +850,81 @@ export function CaseDetail({ caseId }: { caseId: string }) {
             Existing evidence remains visible below.
           </p>
         )}
+        {data.case.lifecycle === "EVIDENCE_OPEN" && buyerCanSeeSealAction && (
+          <section className={styles.actionCard} aria-labelledby="seal-evidence-title">
+            <span className={styles.eyebrow}>Buyer-controlled evidence seal</span>
+            <h3 id="seal-evidence-title">Close complete evidence</h3>
+            <p>
+              Closing requires six exact current-epoch evidence types. The
+              lifecycle remains unchanged until finalized execution and
+              authoritative sealed readback agree.
+            </p>
+            <Button
+              disabled={!canCloseEvidence || writeBusy || !!awaitingSealReadback}
+              onClick={closeEvidence}
+            >
+              Close evidence &amp; enable review
+            </Button>
+            {!hasCompleteSealEvidence && (
+              <p className={styles.inlineState}>
+                Missing evidence types: {missingSealEvidenceTypes.join(", ")}
+                . Submit all six exact current-epoch evidence types before the
+                buyer can close evidence.
+              </p>
+            )}
+            {expiredSealEvidenceTypes.length > 0 && (
+              <p className={styles.inlineState}>
+                Expired evidence types: {expiredSealEvidenceTypes.join(", ")}
+                . Replace them with fresh current-epoch evidence before
+                closing.
+              </p>
+            )}
+            {hasCompleteSealEvidence && !wallet.contract && (
+              <p className={styles.inlineState}>
+                The buyer wallet is connected for reading, but a transaction
+                signer is unavailable. Reconnect the wallet before sealing.
+              </p>
+            )}
+          </section>
+        )}
+        {data.case.lifecycle === "EVIDENCE_OPEN" && !isConnectedBuyer && (
+          <section className={styles.actionCard} aria-labelledby="buyer-wallet-title">
+            <span className={styles.eyebrow}>Buyer-controlled evidence seal</span>
+            <h3 id="buyer-wallet-title">Buyer wallet required</h3>
+            <p>
+              Connect the buyer wallet to close evidence. The vendor and other
+              wallets cannot end the evidence period.
+            </p>
+            {wallet.status === "connected" ? (
+              <Button onClick={() => void wallet.changeAccount()}>
+                Change wallet
+              </Button>
+            ) : (
+              <Button onClick={() => void wallet.connect()}>
+                Connect buyer wallet
+              </Button>
+            )}
+          </section>
+        )}
+        {data.case.lifecycle === "EVIDENCE_SEALED" && data.case.evidenceSealed && (
+          <section className={styles.actionCard} aria-labelledby="sealed-evidence-title">
+            <span className={styles.eyebrow}>Authoritative readback</span>
+            <h3 id="sealed-evidence-title">Evidence sealed</h3>
+            <p>
+              The buyer sealed this epoch at {" "}
+              {new Date(data.case.evidenceSealedAt * 1000).toISOString()}. A
+              review may now be requested without waiting for the cutoff.
+            </p>
+            <dl className={styles.compactDl}>
+              <div>
+                <dt>Sealed by</dt>
+                <dd>
+                  <code>{data.case.evidenceSealedBy}</code>
+                </dd>
+              </div>
+            </dl>
+          </section>
+        )}
         {evidence && <EvidenceInspector evidence={evidence} now={now} />}
         {!evidence && (
           <p className={styles.inlineState}>
@@ -751,8 +950,9 @@ export function CaseDetail({ caseId }: { caseId: string }) {
             <span className={styles.eyebrow}>Semantic review</span>
             <h3>Request validator consensus</h3>
             <p>
-              The request becomes eligible only after the contract evidence
-              cutoff; failed eligibility leaves state unchanged.
+              {data.case.lifecycle === "EVIDENCE_SEALED"
+                ? "The authoritative seal makes review eligible now."
+                : "If the buyer does not seal, the contract evidence cutoff remains the fallback review path."}
             </p>
             <Button disabled={writeBusy} onClick={requestReview}>
               Request intelligent review

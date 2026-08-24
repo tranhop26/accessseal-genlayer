@@ -21,6 +21,7 @@ export type TransactionState = {
   hash: `0x${string}`;
   message: string;
 };
+export type PendingAction = "close_evidence";
 type Receipt = {
   statusName?: string;
   status_name?: string;
@@ -49,7 +50,8 @@ export async function trackTransaction(
   client: ReceiptClient,
   hash: `0x${string}`,
   onState: (value: TransactionState) => void,
-  reconcile?: () => Promise<void>,
+  reconcile?: (action?: PendingAction) => Promise<void | false>,
+  action?: PendingAction,
 ): Promise<TransactionState> {
   onState(
     state(
@@ -129,7 +131,7 @@ export async function trackTransaction(
   );
   onState(reconciling);
   if (!reconcile) return reconciling;
-  await reconcile();
+  if ((await reconcile(action)) === false) return reconciling;
   const result = state(
     hash,
     "FINALIZED_SUCCESS",

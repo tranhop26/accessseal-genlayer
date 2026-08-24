@@ -1,5 +1,5 @@
 import { abi } from "genlayer-js";
-import { hexToBytes, keccak256, stringToHex } from "viem";
+import { hexToBytes, keccak256, stringToHex, type Address } from "viem";
 import type { PublicNetwork, SdkNetwork } from "./config";
 import { canonicalizeEvidence, type EvidenceEnvelopeV1 } from "./evidence";
 
@@ -10,6 +10,9 @@ export type CaseRecord = {
   contractAddress: string;
   escrowAmount: bigint;
   evidenceDeadline: number;
+  evidenceSealed: boolean;
+  evidenceSealedAt: number;
+  evidenceSealedBy: Address;
   flowsHash: string;
   hardDeadline: number;
   lifecycle: string;
@@ -106,6 +109,9 @@ const CASE_KEYS = [
   "epoch",
   "escrowAmount",
   "evidenceDeadline",
+  "evidenceSealed",
+  "evidenceSealedAt",
+  "evidenceSealedBy",
   "flowsHash",
   "hardDeadline",
   "lifecycle",
@@ -330,6 +336,13 @@ export class AccessSealClient {
       contractAddress: text(r.contractAddress, "Contract", ADDRESS),
       escrowAmount: amount(r.escrowAmount, "Escrow amount"),
       evidenceDeadline: count(r.evidenceDeadline, "Evidence deadline"),
+      evidenceSealed: r.evidenceSealed as boolean,
+      evidenceSealedAt: count(r.evidenceSealedAt, "Evidence sealed time"),
+      evidenceSealedBy: text(
+        r.evidenceSealedBy,
+        "Evidence sealed by",
+        ADDRESS,
+      ) as Address,
       flowsHash: text(r.flowsHash, "Flows hash", HASH),
       hardDeadline: count(r.hardDeadline, "Hard deadline"),
       lifecycle: text(r.lifecycle, "Lifecycle"),
@@ -345,15 +358,15 @@ export class AccessSealClient {
     };
     if (
       typeof r.vendorAccepted !== "boolean" ||
+      typeof r.evidenceSealed !== "boolean" ||
       ![
         "DRAFT",
         "FUNDED",
         "EVIDENCE_OPEN",
-        "REVIEW_PENDING",
+        "EVIDENCE_SEALED",
         "DECIDED",
         "SETTLEMENT_PENDING",
         "DISPATCHED_FINALIZED",
-        "CANCELLED",
       ].includes(result.lifecycle) ||
       result.caseId !== caseId ||
       result.contractAddress !== this.address.toLowerCase()
@@ -533,6 +546,9 @@ export class AccessSealClient {
   }
   async appendEvidence(caseId: string, e: EvidenceEnvelopeV1) {
     return this.write("append_evidence", [caseId, canonicalizeEvidence(e)]);
+  }
+  closeEvidence(caseId: string) {
+    return this.write("close_evidence", [caseId]);
   }
   requestReview(caseId: string) {
     return this.write("request_review", [caseId]);

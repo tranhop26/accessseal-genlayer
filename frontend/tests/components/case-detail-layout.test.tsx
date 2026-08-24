@@ -5,12 +5,31 @@ import { CaseDetail } from "@/components/case-detail";
 import { StatusPanel } from "@/components/status-panel";
 import { useWallet } from "@/providers/wallet-provider";
 import type { ReconciledCase } from "@/lib/transactions";
+import type { EvidenceEnvelopeV1, EvidenceType } from "@/lib/evidence";
+import type { EvidenceRecord, Hash } from "@/lib/access-seal";
 
 vi.mock("@/providers/wallet-provider", () => ({ useWallet: vi.fn() }));
 
 const CASE_ID = `0x${"1".repeat(64)}`;
 const BUYER = `0x${"2".repeat(40)}` as const;
 const VENDOR = `0x${"3".repeat(40)}` as const;
+const REQUIRED_EVIDENCE_TYPES: EvidenceType[] = [
+  "RELEASE_MANIFEST",
+  "HTML_BUNDLE",
+  "SCREENSHOT",
+  "DOM_FACTS",
+  "SCANNER_REPORT",
+  "CRITICAL_FLOW_TRACE",
+];
+
+const mediaTypes: Record<EvidenceType, string> = {
+  RELEASE_MANIFEST: "application/json",
+  HTML_BUNDLE: "text/html",
+  SCREENSHOT: "image/png",
+  DOM_FACTS: "application/json",
+  SCANNER_REPORT: "application/json",
+  CRITICAL_FLOW_TRACE: "application/json",
+};
 
 function finalizedReadback(): ReconciledCase {
   return {
@@ -21,6 +40,9 @@ function finalizedReadback(): ReconciledCase {
       contractAddress: `0x${"4".repeat(40)}`,
       escrowAmount: 100n,
       evidenceDeadline: 2_000,
+      evidenceSealed: false,
+      evidenceSealedAt: 0,
+      evidenceSealedBy: `0x${"0".repeat(40)}`,
       flowsHash: `0x${"5".repeat(64)}`,
       hardDeadline: 3_000,
       lifecycle: "DECIDED",
@@ -81,7 +103,73 @@ function finalizedReadback(): ReconciledCase {
   };
 }
 
-function mockWallet(readback: ReconciledCase) {
+function evidenceReadback(
+  types: EvidenceType[],
+  epoch = 0,
+): EvidenceRecord {
+  const releaseDigest = `sha256:${"8".repeat(64)}` as const;
+  return {
+    caseId: CASE_ID,
+    epoch,
+    releaseDigest,
+    hashes: types.map(
+      (_, index) => `sha256:${String(index).padStart(64, "0")}`,
+    ),
+    envelopes: types.map(
+      (evidenceType, index) =>
+        ({
+          schemaVersion: "accessseal-evidence/1",
+          chainId: "61999",
+          contract: `0x${"4".repeat(40)}`,
+          caseId: CASE_ID,
+          epoch,
+          action: index === 0 ? "OPEN_RELEASE" : "APPEND_EVIDENCE",
+          subjectOrigin: "https://audit.example",
+          profileVersion: "accessseal-static/1",
+          releaseDigest,
+          evidenceType,
+          issuer: VENDOR,
+          payloadUri: `https://audit.example/evidence-${index}`,
+          payloadSha256:
+            evidenceType === "RELEASE_MANIFEST"
+              ? releaseDigest
+              : `sha256:${String(index + 1).padStart(64, "0")}`,
+          mediaType: mediaTypes[evidenceType],
+          observedAt: 1_000,
+          submittedAt: 1_000,
+          expiresAt: 9_999_999_999,
+          nonce: `nonce-${index}`,
+        }) satisfies EvidenceEnvelopeV1,
+    ),
+  };
+}
+
+function evidenceOpenReadback(
+  sealed = false,
+  epoch = 0,
+): ReconciledCase {
+  const readback = finalizedReadback();
+  readback.case.lifecycle = sealed ? "EVIDENCE_SEALED" : "EVIDENCE_OPEN";
+  readback.case.epoch = epoch;
+  readback.case.evidenceSealed = sealed;
+  readback.case.evidenceSealedAt = sealed ? 1_701_234_567 : 0;
+  readback.case.evidenceSealedBy = sealed ? BUYER : `0x${"0".repeat(40)}`;
+  readback.review = null;
+  readback.reviewFinality = null;
+  readback.reviewAttempt = null;
+  return readback;
+}
+
+function mockWallet(
+  readback: ReconciledCase,
+  options: {
+    address?: string | null;
+    changeAccount?: () => Promise<void>;
+    contract?: Record<string, unknown> | null;
+    evidence?: EvidenceRecord | null;
+    sdk?: Record<string, unknown> | null;
+  } = {},
+) {
   const readContract = {
     readCase: vi.fn().mockResolvedValue(readback.case),
     readReview: vi.fn().mockResolvedValue(readback.review),
@@ -93,9 +181,11 @@ function mockWallet(readback: ReconciledCase) {
           .fn()
           .mockRejectedValue(new Error("settlement intent does not exist")),
     readAccounting: vi.fn().mockResolvedValue(readback.accounting),
-    readEvidence: vi
-      .fn()
-      .mockRejectedValue(new Error("evidence epoch does not exist")),
+    readEvidence: options.evidence
+      ? vi.fn().mockResolvedValue(options.evidence)
+      : vi
+          .fn()
+          .mockRejectedValue(new Error("evidence epoch does not exist")),
     appealEligibility: vi.fn().mockResolvedValue({
       available: false,
       reason:
@@ -108,13 +198,14 @@ function mockWallet(readback: ReconciledCase) {
   };
   vi.mocked(useWallet).mockReturnValue({
     status: "connected",
-    address: BUYER,
+    address: options.address ?? BUYER,
     error: null,
-    contract: null,
+    contract: options.contract ?? null,
     readContract,
-    sdk: null,
+    sdk: options.sdk ?? null,
     config: null,
     connect: vi.fn(),
+    changeAccount: options.changeAccount ?? vi.fn(),
     disconnect: vi.fn(),
   } as never);
   return readContract;
@@ -261,5 +352,334 @@ describe("case detail document layout", () => {
         name: "Execute prepared settlement",
       }),
     ).toBeEnabled();
+  });
+
+  it("shows the buyer a disabled seal action with the exact missing evidence types", async () => {
+    const incomplete = evidenceOpenReadback();
+    mockWallet(incomplete, {
+      evidence: evidenceReadback([
+        "RELEASE_MANIFEST",
+        "HTML_BUNDLE",
+        "HTML_BUNDLE",
+        "DOM_FACTS",
+        "SCANNER_REPORT",
+        "CRITICAL_FLOW_TRACE",
+      ]),
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    const button = await screen.findByRole("button", {
+      name: "Close evidence & enable review",
+    });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/missing evidence types/i)).toHaveTextContent(
+      "SCREENSHOT",
+    );
+    expect(
+      screen.getAllByText(/six exact current-epoch evidence types/i),
+    ).toHaveLength(2);
+  });
+
+  it("hides the seal action for a wrong wallet and lets the user change wallets", async () => {
+    const changeAccount = vi.fn().mockResolvedValue(undefined);
+    mockWallet(evidenceOpenReadback(), {
+      address: VENDOR,
+      changeAccount,
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+    });
+    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    await screen.findByText("Evidence trail");
+    expect(
+      screen.queryByRole("button", {
+        name: "Close evidence & enable review",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/connect the buyer wallet to close evidence/i),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Change wallet" }));
+    expect(changeAccount).toHaveBeenCalledTimes(1);
+  });
+
+  it("enables the seal action only for the complete authoritative current epoch", async () => {
+    mockWallet(evidenceOpenReadback(), {
+      contract: { closeEvidence: vi.fn() },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      await screen.findByRole("button", {
+        name: "Close evidence & enable review",
+      }),
+    ).toBeEnabled();
+  });
+
+  it("revalidates evidence freshness before submitting a seal", async () => {
+    let currentTime = 1_700_000_000_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => currentTime);
+    try {
+      const evidence = evidenceReadback(REQUIRED_EVIDENCE_TYPES);
+      evidence.envelopes[0].expiresAt = Math.floor(currentTime / 1000) + 1;
+      const closeEvidence = vi.fn();
+      mockWallet(evidenceOpenReadback(), {
+        contract: { closeEvidence },
+        evidence,
+      });
+      const user = userEvent.setup();
+
+      render(<CaseDetail caseId={CASE_ID} />);
+      expect(
+        await screen.findByRole("button", {
+          name: "Close evidence & enable review",
+        }),
+      ).toBeEnabled();
+
+      currentTime += 2_000;
+      await user.click(
+        screen.getByRole("button", { name: "Close evidence & enable review" }),
+      );
+
+      expect(closeEvidence).not.toHaveBeenCalled();
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Evidence is no longer complete and current for sealing.",
+      );
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("disables the seal action when a required authoritative envelope is expired", async () => {
+    const evidence = evidenceReadback(REQUIRED_EVIDENCE_TYPES);
+    evidence.envelopes[2] = {
+      ...evidence.envelopes[2]!,
+      expiresAt: 0,
+    };
+    mockWallet(evidenceOpenReadback(), {
+      contract: { closeEvidence: vi.fn() },
+      evidence,
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      await screen.findByRole("button", {
+        name: "Close evidence & enable review",
+      }),
+    ).toBeDisabled();
+    expect(screen.getByText(/expired evidence types/i)).toHaveTextContent(
+      "SCREENSHOT",
+    );
+  });
+
+  it("separates wallet confirmation, submission, and consensus pending seal states", async () => {
+    let resolveClose: ((hash: Hash) => void) | undefined;
+    let resolveAccepted: ((receipt: Record<string, string>) => void) | undefined;
+    const closeEvidence = vi.fn(
+      () =>
+        new Promise<Hash>((resolve) => {
+          resolveClose = resolve;
+        }),
+    );
+    const waitForTransactionReceipt = vi.fn(
+      () =>
+        new Promise<Record<string, string>>((resolve) => {
+          resolveAccepted = resolve;
+        }),
+    );
+    mockWallet(evidenceOpenReadback(), {
+      contract: { closeEvidence },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: { waitForTransactionReceipt },
+    });
+    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Close evidence & enable review",
+      }),
+    );
+    expect(await screen.findByText(/confirm the seal in your wallet/i)).toBeVisible();
+
+    resolveClose?.(`0x${"a".repeat(64)}`);
+    expect(
+      await screen.findByRole("heading", { name: "Transaction submitted" }),
+    ).toBeVisible();
+
+    resolveAccepted?.({
+      statusName: "ACCEPTED",
+      txExecutionResultName: "FINISHED_WITH_RETURN",
+    });
+    expect(await screen.findByText(/accepted by validators/i)).toBeVisible();
+  });
+
+  it("does not show seal success when final execution has no sealed readback", async () => {
+    const readback = evidenceOpenReadback();
+    mockWallet(readback, {
+      contract: { closeEvidence: vi.fn().mockResolvedValue(`0x${"b".repeat(64)}`) },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
+    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Close evidence & enable review",
+      }),
+    );
+
+    expect(
+      await screen.findByText(/waiting for sealed evidence readback/i),
+    ).toBeVisible();
+    expect(
+      screen
+        .getByRole("heading", { name: "Transaction finalized" })
+        .closest("[role='status']"),
+    ).not.toHaveAttribute("data-tone", "success");
+    expect(
+      screen.getByRole("button", { name: "Close evidence & enable review" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Refresh readback" })).toBeEnabled();
+    expect(screen.getByText(/fallback review path/i)).toBeVisible();
+  });
+
+  it("shows seal success and enables review only after sealed authoritative readback", async () => {
+    const opened = evidenceOpenReadback();
+    const sealed = evidenceOpenReadback(true);
+    const reader = mockWallet(opened, {
+      contract: { closeEvidence: vi.fn().mockResolvedValue(`0x${"d".repeat(64)}`) },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
+    reader.readCase
+      .mockResolvedValueOnce(opened.case)
+      .mockResolvedValue(sealed.case);
+    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Close evidence & enable review",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback confirmed",
+      }),
+    ).toBeVisible();
+    expect(screen.getByText("Evidence sealed")).toBeVisible();
+    for (const button of screen.getAllByRole("button", {
+      name: "Request intelligent review",
+    }))
+      expect(button).toBeEnabled();
+  });
+
+  it("surfaces a seal readback error and retries the read without resubmitting", async () => {
+    const opened = evidenceOpenReadback();
+    const sealed = evidenceOpenReadback(true);
+    const closeEvidence = vi.fn().mockResolvedValue(`0x${"e".repeat(64)}`);
+    const reader = mockWallet(opened, {
+      contract: { closeEvidence },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
+    reader.readCase
+      .mockResolvedValueOnce(opened.case)
+      .mockRejectedValueOnce(new Error("Finalized seal readback offline"))
+      .mockResolvedValue(sealed.case);
+    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Close evidence & enable review",
+      }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Finalized seal readback offline",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Retry readback" }));
+    await waitFor(() => expect(reader.readCase).toHaveBeenCalledTimes(3));
+    expect(closeEvidence).toHaveBeenCalledTimes(1);
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback confirmed",
+      }),
+    ).toBeVisible();
+  });
+
+  it("reconstructs a sealed readback without local state and enables immediate review", async () => {
+    localStorage.clear();
+    mockWallet(evidenceOpenReadback(true), {
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(await screen.findByText("Evidence sealed")).toBeVisible();
+    expect(screen.getByText("evidence sealed").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    for (const button of screen.getAllByRole("button", {
+      name: "Request intelligent review",
+    }))
+      expect(button).toBeEnabled();
+  });
+
+  it("shows wallet rejection and execution errors without disabling a retry", async () => {
+    const closeEvidence = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Wallet rejected the seal"))
+      .mockResolvedValueOnce(`0x${"c".repeat(64)}`);
+    mockWallet(evidenceOpenReadback(), {
+      contract: { closeEvidence },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_ERROR",
+        }),
+      },
+    });
+    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+    const button = await screen.findByRole("button", {
+      name: "Close evidence & enable review",
+    });
+    await user.click(button);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Wallet rejected the seal",
+    );
+    expect(button).toBeEnabled();
+
+    await user.click(button);
+    expect(await screen.findByText(/execution error/i)).toBeVisible();
+    expect(button).toBeEnabled();
   });
 });
