@@ -15,10 +15,14 @@ import {
   filterDashboardCases,
   type DashboardCase,
 } from "@/components/cases/case-dashboard-model";
-import { CasesDashboard } from "@/components/cases/cases-dashboard";
+import {
+  CasesDashboard,
+  loadKnownCase,
+} from "@/components/cases/cases-dashboard";
 import styles from "@/components/cases/cases.module.css";
-import type {
-  CaseRecord,
+import {
+  AccessSealClient,
+  type CaseRecord,
   EvidenceRecord,
   ReviewFinality,
   ReviewRecord,
@@ -27,7 +31,7 @@ import { useWallet } from "@/providers/wallet-provider";
 
 vi.mock("@/providers/wallet-provider", () => ({ useWallet: vi.fn() }));
 
-const address = `0x${"1".repeat(40)}`;
+const address = `0x${"1".repeat(40)}` as `0x${string}`;
 const vendor = `0x${"2".repeat(40)}`;
 const profileHash = `0x${"3".repeat(64)}`;
 const caseIds = {
@@ -41,6 +45,7 @@ const evidenceCaseIds = {
   present: `sha256:${"f".repeat(64)}`,
   error: `sha256:${"0".repeat(64)}`,
 };
+const sealedCaseId = `sha256:${"9".repeat(64)}`;
 
 function caseRecord(
   caseId: string,
@@ -70,6 +75,23 @@ function caseRecord(
     vendor,
     vendorAccepted: true,
   };
+}
+
+function sealedCaseRecord(caseId: string): CaseRecord {
+  return {
+    ...caseRecord(caseId, "EVIDENCE_SEALED"),
+    evidenceSealed: true,
+    evidenceSealedAt: 1_701_234_567,
+    evidenceSealedBy: address,
+  };
+}
+
+function serializedCaseRecord(record: CaseRecord): string {
+  return JSON.stringify({
+    ...record,
+    escrowAmount: record.escrowAmount.toString(),
+    reserved: record.reserved.toString(),
+  });
 }
 
 const approvedReview: ReviewRecord = {
@@ -154,6 +176,7 @@ function mockReader() {
         throw new Error("Finalized RPC unavailable");
       if (Object.values(evidenceCaseIds).includes(caseId))
         return caseRecord(caseId, "EVIDENCE_OPEN");
+      if (caseId === sealedCaseId) return sealedCaseRecord(caseId);
       if (caseId === caseIds.funded)
         return caseRecord(caseId, "FUNDED", 9_007_199_254_740_993_123_456_789n);
       if (caseId === caseIds.pending)
@@ -162,6 +185,7 @@ function mockReader() {
     }),
     readEvidence: vi.fn(async (caseId: string) => {
       if (caseId === evidenceCaseIds.present) return evidenceRecord(caseId);
+      if (caseId === sealedCaseId) return evidenceRecord(caseId);
       if (caseId === evidenceCaseIds.absent)
         throw new Error("evidence epoch does not exist");
       if (caseId === evidenceCaseIds.error)
@@ -276,6 +300,93 @@ describe("authoritative cases dashboard model", () => {
       readyToSettle: 0,
     });
   });
+
+  it("classifies V3 sealed evidence as review-ready while retaining legacy V2 review rows", () => {
+    const sealed = {
+      ...row(sealedCaseId, "EVIDENCE_SEALED"),
+      case: sealedCaseRecord(sealedCaseId),
+      evidence: evidenceRecord(sealedCaseId),
+    };
+    const legacy = row(caseIds.pending, "REVIEW_PENDING");
+
+    expect(deriveDashboardMetrics([sealed, legacy])).toEqual({
+      total: 2,
+      awaitingEvidence: 0,
+      underReview: 2,
+      readyToSettle: 0,
+    });
+    expect(
+      filterDashboardCases([sealed, legacy], {
+        lifecycle: "EVIDENCE_SEALED",
+        verdict: "ALL",
+      }).map(({ caseId }) => caseId),
+    ).toEqual([sealedCaseId]);
+  });
+
+  it("loads V3 seals and legacy V2 lifecycle rows through the production client adapter", async () => {
+    const contract = `0x${"4".repeat(40)}` as `0x${string}`;
+    const v3CaseId = `0x${"a".repeat(64)}`;
+    const legacyCaseId = `0x${"b".repeat(64)}`;
+    const makeClient = (record: CaseRecord) => {
+      const raw = vi.fn(async ({ functionName }: { functionName: string }) => {
+        if (functionName === "get_case") return serializedCaseRecord(record);
+        if (functionName === "get_evidence") {
+          const evidence = evidenceRecord(record.caseId);
+          return JSON.stringify({
+            ...evidence,
+            envelopes: evidence.envelopes.map((envelope) => ({
+              ...envelope,
+              caseId: record.caseId,
+              payloadSha256: evidence.releaseDigest,
+            })),
+          });
+        }
+        if (functionName === "get_accounting")
+          return JSON.stringify({
+            dispatchedPayouts: "0",
+            dispatchedRefunds: "0",
+            pendingDispatch: "0",
+            reserved: "25",
+            totalDeposits: "25",
+          });
+        if (functionName === "get_review")
+          throw new Error("gen_call failed: review does not exist");
+        if (functionName === "get_review_finality")
+          throw new Error(
+            "gen_call failed: review finality proof does not exist",
+          );
+        throw new Error("gen_call failed: settlement intent does not exist");
+      });
+      return {
+        raw,
+        client: new AccessSealClient({ readContract: raw } as never, contract),
+      };
+    };
+
+    const v3 = makeClient(sealedCaseRecord(v3CaseId));
+    const loadedV3 = await loadKnownCase(v3.client, v3CaseId);
+    expect(loadedV3).toMatchObject({
+      caseId: v3CaseId,
+      case: expect.objectContaining({ lifecycle: "EVIDENCE_SEALED" }),
+      evidence: expect.objectContaining({ caseId: v3CaseId }),
+      readError: null,
+    });
+    expect(v3.raw).toHaveBeenCalledWith(
+      expect.objectContaining({
+        functionName: "get_evidence",
+        args: [v3CaseId, 2],
+      }),
+    );
+
+    const legacy = makeClient(caseRecord(legacyCaseId, "REVIEW_PENDING"));
+    const loadedLegacy = await loadKnownCase(legacy.client, legacyCaseId);
+    expect(loadedLegacy).toMatchObject({
+      caseId: legacyCaseId,
+      case: expect.objectContaining({ lifecycle: "REVIEW_PENDING" }),
+      evidence: null,
+      readError: null,
+    });
+  });
 });
 
 describe("authoritative cases dashboard", () => {
@@ -347,6 +458,35 @@ describe("authoritative cases dashboard", () => {
     expect(
       screen.getAllByText("Finalized RPC unavailable").length,
     ).toBeGreaterThan(0);
+  });
+
+  it("reads and filters V3 sealed evidence without omitting the case", async () => {
+    localStorage.setItem(
+      "accessseal.case-ids.v1",
+      JSON.stringify([sealedCaseId]),
+    );
+    const reader = mockReader();
+    vi.mocked(useWallet).mockReturnValue({ readContract: reader } as never);
+    const user = userEvent.setup();
+
+    render(<CasesDashboard />);
+
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("table")).getByText("EVIDENCE_SEALED"),
+      ).toBeVisible(),
+    );
+    expect(reader.readEvidence).toHaveBeenCalledWith(sealedCaseId, 2);
+    await user.selectOptions(
+      screen.getByLabelText("Lifecycle filter"),
+      "EVIDENCE_SEALED",
+    );
+    expect(
+      within(screen.getByRole("table")).getByText(sealedCaseId),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Under review").nextElementSibling,
+    ).toHaveTextContent("1");
   });
 
   it("explains empty discovery without implying contract enumeration", async () => {

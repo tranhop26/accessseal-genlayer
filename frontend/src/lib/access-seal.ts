@@ -101,6 +101,7 @@ type SdkClient = {
 const ADDRESS = /^0x[0-9a-f]{40}$/;
 const HASH = /^0x[0-9a-f]{64}$/;
 const SHA = /^sha256:[0-9a-f]{64}$/;
+const ZERO_ADDRESS = `0x${"0".repeat(40)}`;
 const CASE_KEYS = [
   "buyer",
   "caseId",
@@ -262,7 +263,8 @@ function decodeGenVmUserError(value: unknown): string | undefined {
     return;
   try {
     const decoded = abi.calldata.decode(hexToBytes(`0x${data}`));
-    if (!(decoded instanceof Map) || decoded.get("kind") !== "UserError") return;
+    if (!(decoded instanceof Map) || decoded.get("kind") !== "UserError")
+      return;
     const message = decoded.get("data");
     return typeof message === "string" ? message : undefined;
   } catch {
@@ -356,22 +358,37 @@ export class AccessSealClient {
       vendor: text(r.vendor, "Vendor", ADDRESS),
       vendorAccepted: r.vendorAccepted as boolean,
     };
+    const hasSealMetadata =
+      result.evidenceSealedAt !== 0 ||
+      result.evidenceSealedBy.toLowerCase() !== ZERO_ADDRESS;
+    const preSealLifecycle = ["DRAFT", "FUNDED", "EVIDENCE_OPEN"].includes(
+      result.lifecycle,
+    );
+    const sealTupleIsConsistent = result.evidenceSealed
+      ? result.evidenceSealedAt > 0 &&
+        result.evidenceSealedBy.toLowerCase() !== ZERO_ADDRESS &&
+        result.evidenceSealedBy.toLowerCase() === result.buyer.toLowerCase() &&
+        !preSealLifecycle
+      : !hasSealMetadata && result.lifecycle !== "EVIDENCE_SEALED";
     if (
       typeof r.vendorAccepted !== "boolean" ||
       typeof r.evidenceSealed !== "boolean" ||
+      !sealTupleIsConsistent ||
       ![
         "DRAFT",
         "FUNDED",
         "EVIDENCE_OPEN",
         "EVIDENCE_SEALED",
+        "REVIEW_PENDING",
         "DECIDED",
         "SETTLEMENT_PENDING",
         "DISPATCHED_FINALIZED",
+        "CANCELLED",
       ].includes(result.lifecycle) ||
       result.caseId !== caseId ||
       result.contractAddress !== this.address.toLowerCase()
     )
-      throw new Error("Case readback binding is invalid.");
+      throw new Error("Case evidence seal readback binding is invalid.");
     return result;
   }
   async readReview(caseId: string, epoch: number) {
@@ -708,6 +725,74 @@ export type ReviewTxBinding = {
   releaseDigest: string;
   proofId: string;
 };
+export type PendingCloseEvidenceBinding = {
+  action: "close_evidence";
+  account: Address;
+  caseId: string;
+  chainId: number;
+  contract: Address;
+  hash: Hash;
+};
+export const PENDING_CLOSE_EVIDENCE_PREFIX =
+  "accessseal.pending-close-evidence.v1:";
+
+export function pendingCloseEvidenceStorageKey(caseId: string) {
+  return `${PENDING_CLOSE_EVIDENCE_PREFIX}${caseId}`;
+}
+export function parsePendingCloseEvidenceBinding(
+  value: string | null,
+): PendingCloseEvidenceBinding | null {
+  if (!value) return null;
+  try {
+    const binding = JSON.parse(value) as PendingCloseEvidenceBinding;
+    if (
+      !binding ||
+      typeof binding !== "object" ||
+      Object.keys(binding).sort().join(",") !==
+        "account,action,caseId,chainId,contract,hash" ||
+      binding.action !== "close_evidence" ||
+      !HASH.test(binding.hash) ||
+      !HASH.test(binding.caseId) ||
+      !Number.isSafeInteger(binding.chainId) ||
+      !ADDRESS.test(binding.contract) ||
+      !ADDRESS.test(binding.account)
+    )
+      return null;
+    return binding;
+  } catch {
+    return null;
+  }
+}
+export function validatePendingCloseEvidenceBinding(
+  binding: PendingCloseEvidenceBinding | null,
+  expected: Omit<PendingCloseEvidenceBinding, "action" | "hash">,
+): binding is PendingCloseEvidenceBinding {
+  return (
+    !!binding &&
+    binding.caseId === expected.caseId &&
+    binding.chainId === expected.chainId &&
+    binding.contract.toLowerCase() === expected.contract.toLowerCase() &&
+    binding.account.toLowerCase() === expected.account.toLowerCase()
+  );
+}
+export function hasAuthoritativeEvidenceSeal(
+  record: Pick<
+    CaseRecord,
+    | "buyer"
+    | "evidenceSealed"
+    | "evidenceSealedAt"
+    | "evidenceSealedBy"
+    | "lifecycle"
+  >,
+) {
+  return (
+    record.lifecycle === "EVIDENCE_SEALED" &&
+    record.evidenceSealed &&
+    record.evidenceSealedAt > 0 &&
+    record.evidenceSealedBy.toLowerCase() !== ZERO_ADDRESS &&
+    record.evidenceSealedBy.toLowerCase() === record.buyer.toLowerCase()
+  );
+}
 export function parseReviewTxBinding(
   value: string | null,
 ): ReviewTxBinding | null {

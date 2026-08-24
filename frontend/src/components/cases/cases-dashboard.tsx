@@ -52,14 +52,17 @@ function readKnownIds(): string[] {
   }
 }
 
-async function loadKnownCase(
+export async function loadKnownCase(
   reader: AccessSealClient,
   caseId: string,
 ): Promise<DashboardCase> {
   try {
     const reconciled = await reconcileCase(reader, caseId);
     let evidence: EvidenceRecord | null = null;
-    if (reconciled.case.lifecycle === "EVIDENCE_OPEN") {
+    if (
+      reconciled.case.lifecycle === "EVIDENCE_OPEN" ||
+      reconciled.case.lifecycle === "EVIDENCE_SEALED"
+    ) {
       try {
         evidence = await reader.readEvidence(caseId, reconciled.case.epoch);
       } catch (cause) {
@@ -299,6 +302,7 @@ export function CasesDashboard() {
                 <option value="DRAFT">DRAFT</option>
                 <option value="FUNDED">FUNDED</option>
                 <option value="EVIDENCE_OPEN">EVIDENCE_OPEN</option>
+                <option value="EVIDENCE_SEALED">EVIDENCE_SEALED</option>
                 <option value="REVIEW_PENDING">REVIEW_PENDING</option>
                 <option value="DECIDED">DECIDED</option>
                 <option value="SETTLEMENT_PENDING">SETTLEMENT_PENDING</option>

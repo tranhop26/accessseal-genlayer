@@ -66,12 +66,14 @@ describe("AccessSeal contract adapter", () => {
       "studionet",
     );
 
-    await expect(client.readCase(`0x${"d".repeat(64)}`)).resolves.toMatchObject({
-      evidenceSealed: true,
-      evidenceSealedAt: 1_701_234_567,
-      evidenceSealedBy: buyer,
-      lifecycle: "EVIDENCE_SEALED",
-    });
+    await expect(client.readCase(`0x${"d".repeat(64)}`)).resolves.toMatchObject(
+      {
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: buyer,
+        lifecycle: "EVIDENCE_SEALED",
+      },
+    );
     await client.closeEvidence("case-1");
 
     expect(writeContract).toHaveBeenCalledWith(
@@ -81,6 +83,100 @@ describe("AccessSeal contract adapter", () => {
       }),
     );
   });
+
+  it.each([
+    [
+      "requires the sealed flag for EVIDENCE_SEALED",
+      {
+        lifecycle: "EVIDENCE_SEALED",
+        evidenceSealed: false,
+        evidenceSealedAt: 0,
+        evidenceSealedBy: `0x${"0".repeat(40)}`,
+      },
+    ],
+    [
+      "rejects a sealed flag without a timestamp",
+      {
+        lifecycle: "EVIDENCE_SEALED",
+        evidenceSealed: true,
+        evidenceSealedAt: 0,
+        evidenceSealedBy: buyer,
+      },
+    ],
+    [
+      "rejects a sealed flag without a sealing account",
+      {
+        lifecycle: "EVIDENCE_SEALED",
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: `0x${"0".repeat(40)}`,
+      },
+    ],
+    [
+      "rejects a seal attributed to someone other than the buyer",
+      {
+        lifecycle: "EVIDENCE_SEALED",
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: vendor,
+      },
+    ],
+    [
+      "rejects unsealed state with a sealing timestamp",
+      {
+        lifecycle: "EVIDENCE_OPEN",
+        evidenceSealed: false,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: `0x${"0".repeat(40)}`,
+      },
+    ],
+    [
+      "rejects unsealed state with a sealing account",
+      {
+        lifecycle: "EVIDENCE_OPEN",
+        evidenceSealed: false,
+        evidenceSealedAt: 0,
+        evidenceSealedBy: buyer,
+      },
+    ],
+    [
+      "rejects a sealed tuple while evidence remains open",
+      {
+        lifecycle: "EVIDENCE_OPEN",
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: buyer,
+      },
+    ],
+  ])("%s", async (_name, overrides) => {
+    const client = new AccessSealClient(
+      { readContract: vi.fn().mockResolvedValue(caseJson(overrides)) } as never,
+      address,
+    );
+
+    await expect(client.readCase(`0x${"d".repeat(64)}`)).rejects.toThrow(
+      /seal/i,
+    );
+  });
+
+  it.each(["REVIEW_PENDING", "CANCELLED"])(
+    "parses legacy V2 %s rows with an unsealed tuple",
+    async (lifecycle) => {
+      const client = new AccessSealClient(
+        {
+          readContract: vi.fn().mockResolvedValue(caseJson({ lifecycle })),
+        } as never,
+        address,
+      );
+
+      await expect(
+        client.readCase(`0x${"d".repeat(64)}`),
+      ).resolves.toMatchObject({
+        lifecycle,
+        evidenceSealed: false,
+      });
+    },
+  );
 
   it("parses u256 tokens above 2^53 without losing a wei and rejects already-parsed readbacks", async () => {
     const valid = new AccessSealClient(
@@ -267,7 +363,9 @@ describe("AccessSeal contract adapter", () => {
       rationaleHash: `sha256:${"c".repeat(64)}`,
     };
     const client = new AccessSealClient(
-      { readContract: vi.fn().mockResolvedValue(JSON.stringify(review)) } as never,
+      {
+        readContract: vi.fn().mockResolvedValue(JSON.stringify(review)),
+      } as never,
       address,
     );
     await expect(client.readReview("case-1", 0)).resolves.toEqual(review);
@@ -285,7 +383,9 @@ describe("AccessSeal contract adapter", () => {
       rationaleHash: `sha256:${"d".repeat(64)}`,
     };
     const client = new AccessSealClient(
-      { readContract: vi.fn().mockResolvedValue(JSON.stringify(v2Review)) } as never,
+      {
+        readContract: vi.fn().mockResolvedValue(JSON.stringify(v2Review)),
+      } as never,
       address,
     );
 
@@ -296,20 +396,34 @@ describe("AccessSeal contract adapter", () => {
     const wrapped = new Error(
       "An internal error was received.\n\nDetails: UserError(message='evidence epoch does not exist')\nVersion: viem@2.55.16",
     );
-    expect(matchesExactUserError(wrapped, "evidence epoch does not exist")).toBe(true);
+    expect(
+      matchesExactUserError(wrapped, "evidence epoch does not exist"),
+    ).toBe(true);
     expect(matchesExactUserError(wrapped, "review does not exist")).toBe(false);
-    expect(matchesExactUserError(new Error("RPC offline"), "evidence epoch does not exist")).toBe(false);
+    expect(
+      matchesExactUserError(
+        new Error("RPC offline"),
+        "evidence epoch does not exist",
+      ),
+    ).toBe(false);
   });
 
   it("decodes the exact Bradbury GenVM UserError payload without accepting another error", () => {
-    const rpcError = Object.assign(new Error("Missing or invalid parameters."), {
-      cause: {
-        code: -32000,
-        data: "1604646174618402736574746c656d656e7420696e74656e7420646f6573206e6f74206578697374046b696e644c557365724572726f72",
+    const rpcError = Object.assign(
+      new Error("Missing or invalid parameters."),
+      {
+        cause: {
+          code: -32000,
+          data: "1604646174618402736574746c656d656e7420696e74656e7420646f6573206e6f74206578697374046b696e644c557365724572726f72",
+        },
       },
-    });
-    expect(matchesExactUserError(rpcError, "settlement intent does not exist")).toBe(true);
-    expect(matchesExactUserError(rpcError, "review does not exist")).toBe(false);
+    );
+    expect(
+      matchesExactUserError(rpcError, "settlement intent does not exist"),
+    ).toBe(true);
+    expect(matchesExactUserError(rpcError, "review does not exist")).toBe(
+      false,
+    );
     expect(
       matchesExactUserError(
         Object.assign(new Error("Missing or invalid parameters."), {

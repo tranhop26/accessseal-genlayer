@@ -37,7 +37,11 @@ export function deriveDashboardMetrics(
       (row.case.lifecycle === "EVIDENCE_OPEN" && row.evidence === null)
     )
       awaitingEvidence += 1;
-    if (row.case.lifecycle === "REVIEW_PENDING") underReview += 1;
+    if (
+      row.case.lifecycle === "REVIEW_PENDING" ||
+      row.case.lifecycle === "EVIDENCE_SEALED"
+    )
+      underReview += 1;
     if (
       row.finality?.status === "FINALIZED" &&
       (row.review?.verdict === "APPROVED" ||
