@@ -152,6 +152,7 @@ MANIFEST_FILE_FIELDS = (
 DRAFT = "DRAFT"
 FUNDED = "FUNDED"
 EVIDENCE_OPEN = "EVIDENCE_OPEN"
+EVIDENCE_SEALED = "EVIDENCE_SEALED"
 DECIDED = "DECIDED"
 SETTLEMENT_PENDING = "SETTLEMENT_PENDING"
 DISPATCHED_FINALIZED = "DISPATCHED_FINALIZED"
@@ -621,6 +622,9 @@ class AccessSeal(gl.Contract):
     contract_addresses: TreeMap[str, str]
     created_at_by_case: TreeMap[str, u256]
     epochs: TreeMap[str, u256]
+    evidence_sealed: TreeMap[str, bool]
+    evidence_sealed_at: TreeMap[str, u256]
+    evidence_sealed_by: TreeMap[str, Address]
     evidence_counts: TreeMap[str, u256]
     release_digests: TreeMap[str, str]
     evidence_envelopes: TreeMap[str, str]
@@ -1142,8 +1146,12 @@ class AccessSeal(gl.Contract):
         self.contract_addresses[case_id] = contract_text
         self.created_at_by_case[case_id] = self._now()
         self.epochs[case_id] = u256(0)
+        epoch_key = self._epoch_key(case_id, u256(0))
+        self.evidence_sealed[epoch_key] = False
+        self.evidence_sealed_at[epoch_key] = u256(0)
+        self.evidence_sealed_by[epoch_key] = Address(bytes(20))
         self.cure_counts[case_id] = u256(0)
-        self.review_attempts[self._epoch_key(case_id, u256(0))] = u256(0)
+        self.review_attempts[epoch_key] = u256(0)
         return case_id
 
     @gl.public.write
@@ -1182,6 +1190,7 @@ class AccessSeal(gl.Contract):
     @gl.public.view
     def get_case(self, case_id: str) -> str:
         self._require_case(case_id)
+        epoch_key = self._epoch_key(case_id, self.epochs[case_id])
         return json.dumps(
             {
                 "buyer": self._address_text(self.buyers[case_id]),
@@ -1190,6 +1199,11 @@ class AccessSeal(gl.Contract):
                 "contractAddress": self.contract_addresses[case_id],
                 "escrowAmount": int(self.escrow_amounts[case_id]),
                 "evidenceDeadline": int(self.evidence_deadlines[case_id]),
+                "evidenceSealed": self.evidence_sealed[epoch_key],
+                "evidenceSealedAt": int(self.evidence_sealed_at[epoch_key]),
+                "evidenceSealedBy": self._address_text(
+                    self.evidence_sealed_by[epoch_key]
+                ),
                 "flowsHash": self.flows_hashes[case_id],
                 "hardDeadline": int(self.hard_deadlines[case_id]),
                 "lifecycle": self.lifecycles[case_id],
@@ -1755,7 +1769,11 @@ class AccessSeal(gl.Contract):
         new_epoch = u256(int(self.epochs[case_id]) + 1)
         self.cure_counts[case_id] = u256(int(self.cure_counts[case_id]) + 1)
         self.epochs[case_id] = new_epoch
-        self.review_attempts[self._epoch_key(case_id, new_epoch)] = u256(0)
+        epoch_key = self._epoch_key(case_id, new_epoch)
+        self.evidence_sealed[epoch_key] = False
+        self.evidence_sealed_at[epoch_key] = u256(0)
+        self.evidence_sealed_by[epoch_key] = Address(bytes(20))
+        self.review_attempts[epoch_key] = u256(0)
         self.lifecycles[case_id] = EVIDENCE_OPEN
 
     @gl.public.write

@@ -93,6 +93,40 @@ def test_canonical_hashes_match_fixed_known_vectors(
     assert case["termsHash"] == expected_terms_hash
 
 
+def test_new_case_exposes_initial_evidence_seal_state(
+    contract, buyer, vendor
+):
+    case_id = create_case(contract, buyer, vendor)
+    case = contract.get_case_json(case_id)
+
+    assert set(case) == {
+        "buyer",
+        "caseId",
+        "chainId",
+        "contractAddress",
+        "escrowAmount",
+        "evidenceDeadline",
+        "evidenceSealed",
+        "evidenceSealedAt",
+        "evidenceSealedBy",
+        "flowsHash",
+        "hardDeadline",
+        "lifecycle",
+        "epoch",
+        "maxUnresolvedRetries",
+        "profileHash",
+        "reserved",
+        "salt",
+        "subjectOrigin",
+        "termsHash",
+        "vendor",
+        "vendorAccepted",
+    }
+    assert case["evidenceSealed"] is False
+    assert case["evidenceSealedAt"] == 0
+    assert case["evidenceSealedBy"] == "0x0000000000000000000000000000000000000000"
+
+
 def test_buyer_vendor_funding_handshake(contract, buyer, vendor, outsider):
     case_id = contract.as_(buyer).create_case(
         "buyer-release-001",
