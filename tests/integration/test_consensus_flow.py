@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+from datetime import datetime
 
 import pytest
 from gltest.assertions import tx_execution_failed
@@ -9,6 +10,7 @@ from gltest.types import TransactionStatus
 from conftest import (
     assert_accounting_conservation,
     assert_five_validator_consensus,
+    BASE_TIME,
     build_release,
     candidate,
     EVIDENCE_TYPES,
@@ -17,6 +19,7 @@ from conftest import (
     open_release,
     ORIGIN,
     PATHS,
+    PROJECT_ROOT,
     read_json,
     record_evidence,
     rpc,
@@ -222,10 +225,15 @@ def test_early_seal_reviews_complete_evidence_before_cutoff_from_deployed_source
     case = read_json(deployed_contract, "get_case", [case_id])
     deployed_source = base64.b64decode(
         rpc("gen_getContractCode", [case["contractAddress"]])
-    ).decode("utf-8")
+    )
+    tracked_artifact = (PROJECT_ROOT / "contracts/access_seal_deploy.py").read_bytes()
 
-    assert "def close_evidence(" in deployed_source
+    assert deployed_source == tracked_artifact
     submit_complete_evidence(deployed_contract, case_id, buyer, vendor)
+    sealed = read_json(deployed_contract, "get_case", [case_id])
+    created_at = int(datetime.fromisoformat(BASE_TIME).timestamp())
+    evidence_cutoff = created_at + case["evidenceDeadline"]
+    assert sealed["evidenceSealedAt"] < evidence_cutoff
 
     rpc("accessseal_resetValidatorTelemetry", [])
     receipt = deployed_contract.connect(reviewer).request_review([case_id]).transact(
@@ -239,6 +247,8 @@ def test_early_seal_reviews_complete_evidence_before_cutoff_from_deployed_source
 
     telemetry = rpc("accessseal_getValidatorTelemetry", [])
     assert_five_validator_consensus(receipt, telemetry)
+    review_attempt = read_json(deployed_contract, "get_review_attempt", [case_id, 0, 0])
+    assert review_attempt["decidedAt"] < evidence_cutoff
     assert read_json(deployed_contract, "get_review", [case_id, 0])["verdict"] == (
         "APPROVED"
     )
