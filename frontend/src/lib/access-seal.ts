@@ -731,6 +731,7 @@ export type PendingCloseEvidenceBinding = {
   caseId: string;
   chainId: number;
   contract: Address;
+  epoch: number;
   hash: Hash;
 };
 export const PENDING_CLOSE_EVIDENCE_PREFIX =
@@ -749,11 +750,13 @@ export function parsePendingCloseEvidenceBinding(
       !binding ||
       typeof binding !== "object" ||
       Object.keys(binding).sort().join(",") !==
-        "account,action,caseId,chainId,contract,hash" ||
+        "account,action,caseId,chainId,contract,epoch,hash" ||
       binding.action !== "close_evidence" ||
       !HASH.test(binding.hash) ||
       !HASH.test(binding.caseId) ||
       !Number.isSafeInteger(binding.chainId) ||
+      !Number.isSafeInteger(binding.epoch) ||
+      binding.epoch < 0 ||
       !ADDRESS.test(binding.contract) ||
       !ADDRESS.test(binding.account)
     )
@@ -763,7 +766,7 @@ export function parsePendingCloseEvidenceBinding(
     return null;
   }
 }
-export function validatePendingCloseEvidenceBinding(
+export function matchesPendingCloseEvidenceContext(
   binding: PendingCloseEvidenceBinding | null,
   expected: Omit<PendingCloseEvidenceBinding, "action" | "hash">,
 ): binding is PendingCloseEvidenceBinding {
@@ -773,6 +776,15 @@ export function validatePendingCloseEvidenceBinding(
     binding.chainId === expected.chainId &&
     binding.contract.toLowerCase() === expected.contract.toLowerCase() &&
     binding.account.toLowerCase() === expected.account.toLowerCase()
+  );
+}
+export function validatePendingCloseEvidenceBinding(
+  binding: PendingCloseEvidenceBinding | null,
+  expected: Omit<PendingCloseEvidenceBinding, "action" | "hash">,
+): binding is PendingCloseEvidenceBinding {
+  return (
+    matchesPendingCloseEvidenceContext(binding, expected) &&
+    binding.epoch === expected.epoch
   );
 }
 export function hasAuthoritativeEvidenceSeal(

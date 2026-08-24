@@ -40,7 +40,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function persistPendingSeal(hash: Hash, account = BUYER) {
+function persistPendingSeal(
+  hash: Hash,
+  { account = BUYER, epoch = 0 }: { account?: string; epoch?: number } = {},
+) {
   localStorage.setItem(
     `${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`,
     JSON.stringify({
@@ -49,6 +52,7 @@ function persistPendingSeal(hash: Hash, account = BUYER) {
       caseId: CASE_ID,
       chainId: 61999,
       contract: `0x${"4".repeat(40)}`,
+      epoch,
       hash,
     }),
   );
@@ -540,6 +544,7 @@ describe("case detail document layout", () => {
       caseId: CASE_ID,
       chainId: 61999,
       contract: `0x${"4".repeat(40)}`,
+      epoch: 0,
       hash: `0x${"a".repeat(64)}`,
     });
 
@@ -585,6 +590,156 @@ describe("case detail document layout", () => {
     });
     expect(await screen.findByText(/accepted by validators/i)).toBeVisible();
     expect(closeEvidence).not.toHaveBeenCalled();
+  });
+
+  it("retries a persisted undetermined seal receipt with its original hash", async () => {
+    const hash = `0x${"e".repeat(64)}` as Hash;
+    const opened = evidenceOpenReadback();
+    const sealed = evidenceOpenReadback(true);
+    const closeEvidence = vi.fn();
+    const waitForTransactionReceipt = vi
+      .fn()
+      .mockResolvedValueOnce({ statusName: "UNDETERMINED" })
+      .mockResolvedValueOnce({
+        statusName: "FINALIZED",
+        txExecutionResultName: "FINISHED_WITH_RETURN",
+      });
+    persistPendingSeal(hash);
+    const reader = mockWallet(opened, {
+      contract: { closeEvidence },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: { waitForTransactionReceipt },
+    });
+    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Transaction undetermined" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Retry transaction status" }),
+    ).toBeEnabled();
+    expect(closeEvidence).not.toHaveBeenCalled();
+
+    reader.readCase.mockResolvedValue(sealed.case);
+    await user.click(
+      screen.getByRole("button", { name: "Retry transaction status" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback confirmed",
+      }),
+    ).toBeVisible();
+    expect(closeEvidence).not.toHaveBeenCalled();
+    expect(waitForTransactionReceipt).toHaveBeenCalledTimes(2);
+    expect(
+      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+    ).toBeNull();
+  });
+
+  it("retries a persisted receipt RPC failure without resending a submitted seal", async () => {
+    const hash = `0x${"f".repeat(64)}` as Hash;
+    const opened = evidenceOpenReadback();
+    const sealed = evidenceOpenReadback(true);
+    const closeEvidence = vi.fn().mockResolvedValue(hash);
+    const waitForTransactionReceipt = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Receipt RPC unavailable"))
+      .mockResolvedValueOnce({
+        statusName: "FINALIZED",
+        txExecutionResultName: "FINISHED_WITH_RETURN",
+      });
+    const reader = mockWallet(opened, {
+      contract: { closeEvidence },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: { waitForTransactionReceipt },
+    });
+    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Close evidence & enable review",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Retry transaction status" }),
+    ).toBeEnabled();
+    expect(screen.getByText(/receipt rpc unavailable/i)).toBeVisible();
+    expect(closeEvidence).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(
+        localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`)!,
+      ),
+    ).toMatchObject({ hash, epoch: 0 });
+
+    reader.readCase.mockResolvedValue(sealed.case);
+    await user.click(
+      screen.getByRole("button", { name: "Retry transaction status" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback confirmed",
+      }),
+    ).toBeVisible();
+    expect(closeEvidence).toHaveBeenCalledTimes(1);
+    expect(waitForTransactionReceipt).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears a legacy unbound pending seal instead of blocking a new evidence epoch", async () => {
+    const hash = `0x${"a".repeat(64)}` as Hash;
+    localStorage.setItem(
+      `${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`,
+      JSON.stringify({
+        action: "close_evidence",
+        account: BUYER,
+        caseId: CASE_ID,
+        chainId: 61999,
+        contract: `0x${"4".repeat(40)}`,
+        hash,
+      }),
+    );
+    const opened = evidenceOpenReadback(false, 1);
+    mockWallet(opened, {
+      contract: { closeEvidence: vi.fn() },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES, 1),
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Close evidence & enable review" }),
+      ).toBeEnabled(),
+    );
+    expect(
+      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+    ).toBeNull();
+  });
+
+  it("clears a stale epoch-bound pending seal without blocking the current epoch", async () => {
+    const hash = `0x${"b".repeat(64)}` as Hash;
+    persistPendingSeal(hash, { epoch: 0 });
+    const opened = evidenceOpenReadback(false, 1);
+    mockWallet(opened, {
+      contract: { closeEvidence: vi.fn() },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES, 1),
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Close evidence & enable review" }),
+      ).toBeEnabled(),
+    );
+    expect(
+      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+    ).toBeNull();
   });
 
   it("reuses a restored finalized seal hash for readback retry without a duplicate send", async () => {

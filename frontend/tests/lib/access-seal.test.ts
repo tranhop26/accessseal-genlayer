@@ -3,7 +3,9 @@ import {
   AccessSealClient,
   deriveCaseBindings,
   matchesExactUserError,
+  parsePendingCloseEvidenceBinding,
   parseReviewTxBinding,
+  validatePendingCloseEvidenceBinding,
   validateReviewTxBinding,
 } from "@/lib/access-seal";
 
@@ -38,6 +40,58 @@ const caseJson = (overrides: Record<string, unknown> = {}) =>
   });
 
 describe("AccessSeal contract adapter", () => {
+  it("requires an exact epoch-bound pending seal record and rejects legacy unbound records", () => {
+    const binding = {
+      action: "close_evidence" as const,
+      account: buyer as `0x${string}`,
+      caseId: `0x${"d".repeat(64)}`,
+      chainId: 61999,
+      contract: address,
+      epoch: 2,
+      hash: `0x${"e".repeat(64)}` as `0x${string}`,
+    };
+
+    const parsed = parsePendingCloseEvidenceBinding(JSON.stringify(binding));
+    expect(parsed).toEqual(binding);
+    expect(
+      parsePendingCloseEvidenceBinding(
+        JSON.stringify(
+          Object.fromEntries(
+            Object.entries(binding).filter(([key]) => key !== "epoch"),
+          ),
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      parsePendingCloseEvidenceBinding(
+        JSON.stringify({ ...binding, epoch: -1 }),
+      ),
+    ).toBeNull();
+    expect(
+      parsePendingCloseEvidenceBinding(
+        JSON.stringify({ ...binding, epoch: 1.5 }),
+      ),
+    ).toBeNull();
+    expect(
+      validatePendingCloseEvidenceBinding(parsed, {
+        account: binding.account,
+        caseId: binding.caseId,
+        chainId: binding.chainId,
+        contract: binding.contract,
+        epoch: 2,
+      }),
+    ).toBe(true);
+    expect(
+      validatePendingCloseEvidenceBinding(parsed, {
+        account: binding.account,
+        caseId: binding.caseId,
+        chainId: binding.chainId,
+        contract: binding.contract,
+        epoch: 3,
+      }),
+    ).toBe(false);
+  });
+
   it("uses exact finalized read method names and argument order", async () => {
     const readContract = vi.fn().mockResolvedValue(caseJson());
     const client = new AccessSealClient({ readContract } as never, address);
