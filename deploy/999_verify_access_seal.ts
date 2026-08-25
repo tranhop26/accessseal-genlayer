@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -370,10 +371,64 @@ export function deploymentToSettlementProofEnvironment(
   };
 }
 
+type FileIdentity = {
+  dev: bigint;
+  ino: bigint;
+};
+
+type PinnedManifest = {
+  body: string;
+  identity: FileIdentity;
+};
+
+type CheckedDirectory = {
+  path: string;
+  identity: FileIdentity;
+};
+
+type V3CandidateDirectory = CheckedDirectory & {
+  deploymentArtifactSha256: string;
+};
+
+type V3CandidateSnapshot = {
+  root: CheckedDirectory;
+  candidates: V3CandidateDirectory[];
+};
+
+type V3RequestedManifest = {
+  deploymentArtifactSha256: string;
+  path: string;
+  identity: FileIdentity;
+};
+
+export type TestOnlyV3LookupHooks = {
+  afterV3PathInspection?: (path: string) => Promise<void>;
+  beforeV3CandidateRevalidation?: () => Promise<void>;
+};
+
 export async function readDeploymentManifest(
   repoRoot: string,
   network: NetworkName,
   contractAddress?: string,
+): Promise<DeploymentManifest> {
+  return readDeploymentManifestInternal(repoRoot, network, contractAddress);
+}
+
+/** Test-only race boundary. Public lookup always uses an empty hook set. */
+export async function __testOnlyReadDeploymentManifest(
+  repoRoot: string,
+  network: NetworkName,
+  contractAddress: string | undefined,
+  hooks: TestOnlyV3LookupHooks,
+): Promise<DeploymentManifest> {
+  return readDeploymentManifestInternal(repoRoot, network, contractAddress, hooks);
+}
+
+async function readDeploymentManifestInternal(
+  repoRoot: string,
+  network: NetworkName,
+  contractAddress?: string,
+  hooks: TestOnlyV3LookupHooks = {},
 ): Promise<DeploymentManifest> {
   const v3Root = resolve(
     repoRoot,
@@ -382,33 +437,29 @@ export async function readDeploymentManifest(
     network,
     "v3",
   );
-  const parseV3 = async (root: string, path: string): Promise<DeploymentManifest> => {
-    await assertSafeRegularFile(root, path);
-    const body = await readFile(path, "utf8");
-    await assertSafeRegularFile(root, path);
+  const parseV3 = async (
+    root: string,
+    path: string,
+  ): Promise<{ manifest: DeploymentManifest; identity: FileIdentity }> => {
+    const pinned = await readPinnedManifest(root, path, hooks.afterV3PathInspection);
     const manifest = validateDeploymentManifest(
-      JSON.parse(body) as DeploymentManifest,
+      JSON.parse(pinned.body) as DeploymentManifest,
     );
     if ((manifest as { contractVersion?: unknown }).contractVersion !== "V3") {
       throw new Error("V3 deployment manifest contract version is invalid");
     }
-    return manifest;
+    return { manifest, identity: pinned.identity };
   };
   if (contractAddress) {
     if (!ADDRESS.test(contractAddress)) {
       throw new Error("verification contract address is invalid");
     }
     const target = `${contractAddress.toLowerCase()}.json`;
-    let directories: Array<{ path: string; deploymentArtifactSha256: string }>;
-    let realV3Root: string;
+    let snapshot: V3CandidateSnapshot;
+    let requested: V3RequestedManifest[];
     try {
-      realV3Root = await assertRealDirectory(v3Root);
-      directories = (await readdir(realV3Root, { withFileTypes: true }))
-        .filter((entry) => HASH.test(entry.name))
-        .map((entry) => ({
-          path: resolve(realV3Root, entry.name),
-          deploymentArtifactSha256: entry.name,
-        }));
+      snapshot = await scanV3CandidateDirectories(v3Root);
+      requested = await scanV3RequestedManifests(snapshot, target);
     } catch (error) {
       if (error instanceof Error && /ENOENT/.test(error.message)) {
         throw new Error("V3 deployment manifest is unavailable for the requested contract address");
@@ -416,44 +467,62 @@ export async function readDeploymentManifest(
       throw error;
     }
     const matches = await Promise.all(
-      directories.map(async (directory) => {
-        const realDirectory = await assertRealDirectory(directory.path);
-        const path = resolve(realDirectory, target);
+      requested.map(async (candidate) => {
         try {
-          const manifest = await parseV3(realV3Root, path);
+          const parsed = await parseV3(snapshot.root.path, candidate.path);
+          assertSameFileIdentity(
+            candidate.identity,
+            parsed.identity,
+            "V3 deployment manifest changed during lookup",
+          );
+          const manifest = parsed.manifest;
           if (manifest.contractAddress.toLowerCase() !== contractAddress.toLowerCase()) {
             throw new Error("V3 deployment manifest requested contract address mismatch");
           }
-          if (manifest.deploymentArtifactSha256 !== directory.deploymentArtifactSha256) {
+          if (manifest.deploymentArtifactSha256 !== candidate.deploymentArtifactSha256) {
             throw new Error("V3 deployment manifest artifact hash does not match containing directory");
           }
-          return manifest;
+          return { manifest, path: candidate.path, identity: parsed.identity };
         } catch (error) {
           if (error instanceof Error && /ENOENT/.test(error.message)) return null;
           throw error;
         }
       }),
     );
-    const found = matches.filter((manifest): manifest is DeploymentManifest => manifest !== null);
+    const found = matches.filter((manifest): manifest is NonNullable<typeof manifest> => manifest !== null);
     if (found.length !== 1) {
       throw new Error(
         found.length
           ? "V3 deployment manifest address is ambiguous"
-          : "V3 deployment manifest is unavailable for the requested contract address",
+        : "V3 deployment manifest is unavailable for the requested contract address",
       );
     }
-    return found[0];
+    await hooks.beforeV3CandidateRevalidation?.();
+    const revalidated = await scanV3CandidateDirectories(v3Root);
+    const revalidatedRequested = await scanV3RequestedManifests(revalidated, target);
+    if (
+      !sameV3CandidateSnapshot(snapshot, revalidated) ||
+      !sameV3RequestedManifests(requested, revalidatedRequested)
+    ) {
+      throw new Error("V3 deployment manifest candidates changed during lookup");
+    }
+    const selected = found[0];
+    const current = await inspectPinnedManifestPath(revalidated.root.path, selected.path);
+    assertSameFileIdentity(
+      selected.identity,
+      current,
+      "V3 deployment manifest changed during lookup",
+    );
+    return selected.manifest;
   }
   const artifact = new Uint8Array(
     await readFile(resolve(repoRoot, "contracts", "access_seal_deploy.py")),
   );
   const artifactHash = sourceHash(artifact);
-  let realV3Root: string;
   try {
-    realV3Root = await assertRealDirectory(v3Root);
-    const directory = await assertRealDirectory(resolve(realV3Root, artifactHash));
-    const names = await readdir(directory);
-    const candidates = names.filter((name) => /^0x[0-9a-f]{40}\.json$/.test(name));
+    const root = await inspectRealDirectory(v3Root);
+    const directory = await inspectRealDirectory(resolve(root.path, artifactHash));
+    const candidates = await listAddressManifestCandidates(directory.path);
     const selected = contractAddress
       ? `${contractAddress.toLowerCase()}.json`
       : candidates.length === 1
@@ -464,16 +533,190 @@ export async function readDeploymentManifest(
         "V3 deployment manifest is ambiguous; provide --contract-address for the exact deployment",
       );
     }
-    return await parseV3(realV3Root, resolve(directory, selected));
+    const path = resolve(directory.path, selected);
+    const parsed = await parseV3(root.path, path);
+    const revalidatedRoot = await inspectRealDirectory(v3Root);
+    const revalidatedDirectory = await inspectRealDirectory(resolve(revalidatedRoot.path, artifactHash));
+    if (
+      !sameFileIdentity(root.identity, revalidatedRoot.identity) ||
+      !sameFileIdentity(directory.identity, revalidatedDirectory.identity) ||
+      !sameStringArray(candidates, await listAddressManifestCandidates(revalidatedDirectory.path))
+    ) {
+      throw new Error("V3 deployment manifest candidates changed during lookup");
+    }
+    const current = await inspectPinnedManifestPath(revalidatedRoot.path, path);
+    assertSameFileIdentity(parsed.identity, current, "V3 deployment manifest changed during lookup");
+    return parsed.manifest;
   } catch (error) {
     if (!(error instanceof Error) || !/ENOENT/.test(error.message)) throw error;
   }
-  const legacyDirectory = await assertRealDirectory(resolve(repoRoot, "work", "deployments"));
-  const legacyPath = resolve(legacyDirectory, `${network}.json`);
-  await assertSafeRegularFile(legacyDirectory, legacyPath);
-  const legacyBody = await readFile(legacyPath, "utf8");
-  await assertSafeRegularFile(legacyDirectory, legacyPath);
-  return validateDeploymentManifest(JSON.parse(legacyBody) as DeploymentManifest);
+  const legacyDirectory = await inspectRealDirectory(resolve(repoRoot, "work", "deployments"));
+  const legacyPath = resolve(legacyDirectory.path, `${network}.json`);
+  const legacy = await readPinnedManifest(legacyDirectory.path, legacyPath);
+  return validateDeploymentManifest(JSON.parse(legacy.body) as DeploymentManifest);
+}
+
+async function readPinnedManifest(
+  root: string,
+  path: string,
+  afterPathInspection?: (path: string) => Promise<void>,
+): Promise<PinnedManifest> {
+  const beforeOpen = await inspectPinnedManifestPath(root, path);
+  await afterPathInspection?.(path);
+  const handle = await open(path, manifestReadFlags());
+  try {
+    const openedMetadata = await handle.stat({ bigint: true });
+    if (!openedMetadata.isFile()) throw new Error("opened V3 deployment manifest is not a regular file");
+    const opened = fileIdentity(openedMetadata, "opened V3 deployment manifest");
+    assertSameFileIdentity(beforeOpen, opened, "V3 deployment manifest changed during lookup");
+    const pathAfterOpen = await inspectPinnedManifestPath(root, path);
+    assertSameFileIdentity(opened, pathAfterOpen, "V3 deployment manifest changed during lookup");
+
+    const body = (await handle.readFile()).toString("utf8");
+    const handleAfterReadMetadata = await handle.stat({ bigint: true });
+    if (!handleAfterReadMetadata.isFile()) {
+      throw new Error("opened V3 deployment manifest is not a regular file");
+    }
+    const handleAfterRead = fileIdentity(handleAfterReadMetadata, "opened V3 deployment manifest");
+    const pathAfterRead = await inspectPinnedManifestPath(root, path);
+    assertSameFileIdentity(opened, handleAfterRead, "V3 deployment manifest changed during lookup");
+    assertSameFileIdentity(handleAfterRead, pathAfterRead, "V3 deployment manifest changed during lookup");
+    return { body, identity: handleAfterRead };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function inspectPinnedManifestPath(root: string, path: string): Promise<FileIdentity> {
+  await assertSafeRegularFile(root, path);
+  const metadata = await lstat(path, { bigint: true });
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw new Error("V3 deployment manifest must remain a physically contained regular file");
+  }
+  return fileIdentity(metadata, "V3 deployment manifest path");
+}
+
+async function scanV3CandidateDirectories(v3Root: string): Promise<V3CandidateSnapshot> {
+  const root = await inspectRealDirectory(v3Root);
+  const names = (await readdir(root.path, { withFileTypes: true }))
+    .filter((entry) => HASH.test(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+  const candidates = await Promise.all(
+    names.map(async (name) => ({
+      ...(await inspectRealDirectory(resolve(root.path, name))),
+      deploymentArtifactSha256: name,
+    })),
+  );
+  return { root, candidates };
+}
+
+async function scanV3RequestedManifests(
+  snapshot: V3CandidateSnapshot,
+  target: string,
+): Promise<V3RequestedManifest[]> {
+  const candidates = await Promise.all(
+    snapshot.candidates.map(async (directory) => {
+      const path = resolve(directory.path, target);
+      try {
+        return {
+          deploymentArtifactSha256: directory.deploymentArtifactSha256,
+          path,
+          identity: await inspectPinnedManifestPath(snapshot.root.path, path),
+        };
+      } catch (error) {
+        if (error instanceof Error && /ENOENT/.test(error.message)) return null;
+        throw error;
+      }
+    }),
+  );
+  return candidates.filter((candidate): candidate is V3RequestedManifest => candidate !== null);
+}
+
+async function inspectRealDirectory(path: string): Promise<CheckedDirectory> {
+  const realPath = await assertRealDirectory(path);
+  const metadata = await lstat(realPath, { bigint: true });
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    throw new Error("V3 deployment manifest directory is not a real directory");
+  }
+  return { path: realPath, identity: fileIdentity(metadata, "V3 deployment manifest directory") };
+}
+
+async function listAddressManifestCandidates(directory: string): Promise<string[]> {
+  return (await readdir(directory))
+    .filter((name) => /^0x[0-9a-f]{40}\.json$/.test(name))
+    .sort();
+}
+
+function sameV3CandidateSnapshot(
+  first: V3CandidateSnapshot,
+  second: V3CandidateSnapshot,
+): boolean {
+  return (
+    first.root.path === second.root.path &&
+    sameFileIdentity(first.root.identity, second.root.identity) &&
+    first.candidates.length === second.candidates.length &&
+    first.candidates.every((candidate, index) => {
+      const other = second.candidates[index];
+      return (
+        candidate.path === other.path &&
+        candidate.deploymentArtifactSha256 === other.deploymentArtifactSha256 &&
+        sameFileIdentity(candidate.identity, other.identity)
+      );
+    })
+  );
+}
+
+function sameV3RequestedManifests(
+  first: V3RequestedManifest[],
+  second: V3RequestedManifest[],
+): boolean {
+  return (
+    first.length === second.length &&
+    first.every((candidate, index) => {
+      const other = second[index];
+      return (
+        candidate.deploymentArtifactSha256 === other.deploymentArtifactSha256 &&
+        candidate.path === other.path &&
+        sameFileIdentity(candidate.identity, other.identity)
+      );
+    })
+  );
+}
+
+function sameStringArray(first: string[], second: string[]): boolean {
+  return first.length === second.length && first.every((value, index) => value === second[index]);
+}
+
+function fileIdentity(
+  metadata: { dev: bigint; ino: bigint },
+  description: string,
+): FileIdentity {
+  const identity = { dev: metadata.dev, ino: metadata.ino };
+  if (
+    identity.dev === 0n &&
+    identity.ino === 0n
+  ) {
+    throw new Error(`${description} cannot establish a stable filesystem identity`);
+  }
+  return identity;
+}
+
+function assertSameFileIdentity(first: FileIdentity, second: FileIdentity, message: string): void {
+  if (!sameFileIdentity(first, second)) throw new Error(message);
+}
+
+function sameFileIdentity(first: FileIdentity, second: FileIdentity): boolean {
+  return first.dev === second.dev && first.ino === second.ino;
+}
+
+function manifestReadFlags(): number {
+  const noFollow = (constants as Record<string, number | undefined>).O_NOFOLLOW;
+  // Windows lacks O_NOFOLLOW. Its fallback is only accepted with the pinned-handle
+  // identity checks before and after the read above; absent stable identity, lookup fails closed.
+  return typeof noFollow === "number" && noFollow !== 0
+    ? constants.O_RDONLY | noFollow
+    : constants.O_RDONLY;
 }
 
 export default async function main(

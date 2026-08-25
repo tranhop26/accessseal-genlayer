@@ -1,15 +1,13 @@
-import { readFile, unlink } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { basename } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
   atomicWriteJsonExclusive,
-  assertRealDirectory,
-  assertSafeRegularFile,
   canonicalJsonHash,
+  removeExclusiveJsonInstall,
   sourceHash,
-  type AtomicWriteJsonExclusiveOptions,
+  type ExclusiveJsonInstallReceipt,
 } from "../scripts/source-hash.ts";
 import {
   NETWORK_CHAIN_IDS,
@@ -48,7 +46,6 @@ export type V3ManifestPath = {
 type DeployOptions = {
   network: string;
   repoRoot?: string;
-  exclusiveInstallOptions?: AtomicWriteJsonExclusiveOptions;
 };
 
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -105,7 +102,6 @@ async function preflightV3ManifestDestination(
   repoRoot: string,
   network: NetworkName,
   deploymentArtifactSha256: string,
-  exclusiveInstallOptions: AtomicWriteJsonExclusiveOptions | undefined,
 ): Promise<void> {
   const directory = deploymentManifestDirectory(
     repoRoot,
@@ -113,20 +109,20 @@ async function preflightV3ManifestDestination(
     deploymentArtifactSha256,
   );
   const probe = join(directory, `.accessseal-preflight-${randomUUID()}.probe`);
+  let probeReceipt: ExclusiveJsonInstallReceipt | undefined;
   let probeError: unknown;
   try {
-    await atomicWriteJsonExclusive(probe, { preflight: "accessseal-v3" }, exclusiveInstallOptions);
+    probeReceipt = await atomicWriteJsonExclusive(probe, { preflight: "accessseal-v3" });
   } catch (error) {
     probeError = error;
   }
   let cleanupError: unknown;
-  try {
-    const realDirectory = await assertRealDirectory(directory);
-    const physicalProbe = join(realDirectory, basename(probe));
-    await assertSafeRegularFile(realDirectory, physicalProbe);
-    await unlink(physicalProbe);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupError = error;
+  if (probeReceipt) {
+    try {
+      await removeExclusiveJsonInstall(probeReceipt);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupError = error;
+    }
   }
   if (probeError || cleanupError) {
     const detail = [probeError, cleanupError]
@@ -164,7 +160,6 @@ export async function deployAccessSeal(
     repoRoot,
     network,
     deploymentArtifactSha256,
-    options.exclusiveInstallOptions,
   );
 
   const expectedSchema = await client.getContractSchemaForCode(deploymentArtifact);
@@ -212,7 +207,7 @@ export async function deployAccessSeal(
     contractAddress,
     deploymentArtifactSha256,
   });
-  await atomicWriteJsonExclusive(path, manifest, options.exclusiveInstallOptions);
+  await atomicWriteJsonExclusive(path, manifest);
   return manifest;
 }
 

@@ -1,21 +1,149 @@
 import { createHash, randomUUID } from "node:crypto";
-import { link, lstat, mkdir, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { execFile } from "node:child_process";
+import { link, lstat, mkdir, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, toNamespacedPath } from "node:path";
+import { promisify } from "node:util";
 
 type DirectoryIdentity = {
   path: string;
   realPath: string;
-  dev: number;
-  ino: number;
+  dev: bigint;
+  ino: bigint;
 };
 
-export type AtomicWriteJsonExclusiveOptions = {
-  operations?: {
-    link?: (existingPath: string, newPath: string) => Promise<void>;
-    unlink?: (path: string) => Promise<void>;
-    beforeLink?: () => Promise<void>;
-  };
+type FileIdentity = {
+  dev: bigint;
+  ino: bigint;
 };
+
+type PlatformFileIdentity = string;
+
+export type TestOnlyExclusiveInstallOperations = {
+  link?: (existingPath: string, newPath: string) => Promise<void>;
+  unlink?: (path: string) => Promise<void>;
+  beforeLink?: () => Promise<void>;
+  afterInstall?: (directory: string, destination: string) => Promise<void>;
+  beforeOwnedCleanupUnlink?: (destination: string) => Promise<void>;
+  beforePlatformOwnedCleanup?: (destination: string) => Promise<void>;
+};
+
+export type ExclusiveJsonInstallReceipt = {
+  directory: DirectoryIdentity;
+  destination: string;
+  identity: FileIdentity;
+  platformIdentity: PlatformFileIdentity;
+};
+
+const testOnlyExclusiveInstallOperations = new AsyncLocalStorage<TestOnlyExclusiveInstallOperations>();
+const testOnlyReceiptOperations = new WeakMap<ExclusiveJsonInstallReceipt, TestOnlyExclusiveInstallOperations>();
+const execFileAsync = promisify(execFile);
+
+const WINDOWS_FILE_HANDLE_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class AccessSealWindowsFileHandle {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct BY_HANDLE_FILE_INFORMATION {
+    public uint FileAttributes;
+    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+    public uint VolumeSerialNumber;
+    public uint FileSizeHigh;
+    public uint FileSizeLow;
+    public uint NumberOfLinks;
+    public uint FileIndexHigh;
+    public uint FileIndexLow;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct FILE_DISPOSITION_INFO {
+    [MarshalAs(UnmanagedType.Bool)]
+    public bool DeleteFile;
+  }
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern SafeFileHandle CreateFile(
+    string fileName,
+    uint desiredAccess,
+    uint shareMode,
+    IntPtr securityAttributes,
+    uint creationDisposition,
+    uint flagsAndAttributes,
+    IntPtr templateFile);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool GetFileInformationByHandle(
+    SafeFileHandle file,
+    out BY_HANDLE_FILE_INFORMATION information);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool SetFileInformationByHandle(
+    SafeFileHandle file,
+    int fileInformationClass,
+    ref FILE_DISPOSITION_INFO information,
+    uint informationSize);
+
+  public static string InspectOrDelete(string path, string expected, bool deleteFile) {
+    const uint GENERIC_READ = 0x80000000;
+    const uint DELETE = 0x00010000;
+    const uint FILE_SHARE_READ = 0x00000001;
+    const uint FILE_SHARE_WRITE = 0x00000002;
+    const uint FILE_SHARE_DELETE = 0x00000004;
+    const uint OPEN_EXISTING = 3;
+    const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+    const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+    const int FileDispositionInfo = 4;
+
+    using (SafeFileHandle file = CreateFile(
+      path,
+      GENERIC_READ | DELETE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      IntPtr.Zero,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+      IntPtr.Zero)) {
+      if (file.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+      BY_HANDLE_FILE_INFORMATION information;
+      if (!GetFileInformationByHandle(file, out information)) {
+        throw new Win32Exception(Marshal.GetLastWin32Error());
+      }
+      string identity = information.VolumeSerialNumber.ToString("x8") + ":" +
+        information.FileIndexHigh.ToString("x8") + information.FileIndexLow.ToString("x8");
+      if (expected != "NONE" && identity != expected) return "MISMATCH";
+      if (deleteFile) {
+        FILE_DISPOSITION_INFO disposition = new FILE_DISPOSITION_INFO();
+        disposition.DeleteFile = true;
+        if (!SetFileInformationByHandle(
+          file,
+          FileDispositionInfo,
+          ref disposition,
+          (uint)Marshal.SizeOf(typeof(FILE_DISPOSITION_INFO)))) {
+          throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+      }
+      return identity;
+    }
+  }
+}
+'@
+
+$expected = $env:ACCESSSEAL_EXPECTED_FILE_ID
+$deleteFile = $env:ACCESSSEAL_DELETE_FILE -eq '1'
+[Console]::Out.Write([AccessSealWindowsFileHandle]::InspectOrDelete(
+  $env:ACCESSSEAL_MANIFEST_PATH,
+  $expected,
+  $deleteFile
+))
+`;
 
 export function sourceHash(bytes: Uint8Array): string {
   if (!(bytes instanceof Uint8Array)) {
@@ -101,7 +229,7 @@ export async function assertSafeRegularFile(root: string, path: string): Promise
   const parts = child.split(sep);
   for (let index = 0; index < parts.length; index += 1) {
     current = join(current, parts[index]);
-    const metadata = await lstat(current);
+    const metadata = await lstat(current, { bigint: true });
     if (metadata.isSymbolicLink()) {
       throw new Error(`deployment manifest path contains a symbolic link or junction: ${current}`);
     }
@@ -120,27 +248,66 @@ export async function assertSafeRegularFile(root: string, path: string): Promise
 export async function atomicWriteJsonExclusive(
   path: string,
   value: unknown,
-  options: AtomicWriteJsonExclusiveOptions = {},
-): Promise<void> {
-  const body = `${canonicalJson(value)}\n`;
+): Promise<ExclusiveJsonInstallReceipt> {
+  return atomicWriteJsonExclusiveInternal(
+    path,
+    value,
+    testOnlyExclusiveInstallOperations.getStore() ?? {},
+  );
+}
+
+/** Test-only lower-level fault boundary; public deployment cannot select an installer. */
+export async function __testOnlyWithExclusiveInstallOperations<T>(
+  operations: TestOnlyExclusiveInstallOperations,
+  action: () => Promise<T>,
+): Promise<T> {
+  if (process.env.ACCESSSEAL_TEST_ONLY_EXCLUSIVE_INSTALL !== "1") {
+    throw new Error("exclusive installation fault injection is only available to the Node test runner");
+  }
+  return testOnlyExclusiveInstallOperations.run(operations, async () => {
+    try {
+      return await action();
+    } finally {
+      testOnlyExclusiveInstallOperations.disable();
+    }
+  });
+}
+
+async function atomicWriteJsonExclusiveInternal(
+  path: string,
+  value: unknown,
+  operations: TestOnlyExclusiveInstallOperations,
+): Promise<ExclusiveJsonInstallReceipt> {
+  const body = Buffer.from(`${canonicalJson(value)}\n`, "utf8");
   const directory = await inspectRealDirectory(dirname(path), true);
   const destination = join(directory.realPath, basename(resolve(path)));
   const temporary = join(
     directory.realPath,
     `.${basename(destination)}.${process.pid}.${randomUUID()}.tmp`,
   );
-  const install = options.operations?.link ?? link;
-  const remove = options.operations?.unlink ?? unlink;
-  let installed = false;
+  const install = operations.link ?? link;
+  const remove = operations.unlink ?? unlink;
+  let finalLinkCompleted = false;
+  let installationVerified = false;
+  let receipt: ExclusiveJsonInstallReceipt | undefined;
   let installError: unknown;
   try {
     await assertSafeExclusiveDestination(destination);
     await writeFile(temporary, body, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    await options.operations?.beforeLink?.();
+    await operations.beforeLink?.();
     await assertUnchangedDirectory(directory);
     await assertSafeExclusiveDestination(destination);
     await install(temporary, destination);
-    installed = true;
+    finalLinkCompleted = true;
+    const identity = await assertExclusiveInstallation(directory, temporary, destination, body);
+    installationVerified = true;
+    receipt = {
+      directory: { ...directory },
+      destination,
+      identity,
+      platformIdentity: await inspectPlatformFileIdentity(destination),
+    };
+    testOnlyReceiptOperations.set(receipt, operations);
   } catch (error) {
     installError = error;
   }
@@ -149,14 +316,134 @@ export async function atomicWriteJsonExclusive(
     await remove(temporary);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      const phase = installed
+      const phase = installationVerified
         ? "final manifest installed but staging cleanup failed"
+        : finalLinkCompleted
+          ? "final manifest link completed but post-install verification failed and staging cleanup failed"
         : "manifest installation failed and staging cleanup failed";
-      throw new Error(`${phase}; manual recovery required for ${temporary}: ${errorMessage(error)}`);
+      const installationDetail = installError
+        ? `; original installation error: ${errorMessage(installError)}`
+        : "";
+      throw new Error(
+        `${phase}; manual recovery required for ${temporary}: ${errorMessage(error)}${installationDetail}`,
+      );
     }
   }
   if (installError) {
     throw installError;
+  }
+  if (!receipt) throw new Error("exclusive manifest installation completed without a verified receipt");
+  await operations.afterInstall?.(receipt.directory.realPath, receipt.destination);
+  await assertExclusiveReceiptUnchanged(receipt, body);
+  return receipt;
+}
+
+export async function removeExclusiveJsonInstall(receipt: ExclusiveJsonInstallReceipt): Promise<void> {
+  const destination = await assertOwnedExclusiveJsonInstall(receipt);
+  await testOnlyReceiptOperations.get(receipt)?.beforeOwnedCleanupUnlink?.(destination);
+  await assertOwnedExclusiveJsonInstall(receipt);
+  await testOnlyReceiptOperations.get(receipt)?.beforePlatformOwnedCleanup?.(destination);
+  await deletePlatformOwnedFile(destination, receipt.platformIdentity);
+  testOnlyReceiptOperations.delete(receipt);
+}
+
+async function assertOwnedExclusiveJsonInstall(
+  receipt: ExclusiveJsonInstallReceipt,
+): Promise<string> {
+  const directory = await inspectRealDirectory(receipt.directory.path, false);
+  if (
+    directory.realPath !== receipt.directory.realPath ||
+    !sameStrictFileIdentity(directory, receipt.directory)
+  ) {
+    throw new Error("exclusive manifest directory changed before owned-probe cleanup; manual recovery required");
+  }
+  if (!hasStableFileIdentity(receipt.identity)) {
+    throw new Error("exclusive manifest probe has no stable filesystem identity; manual recovery required");
+  }
+  const destination = join(directory.realPath, basename(receipt.destination));
+  if (destination !== receipt.destination) {
+    throw new Error("exclusive manifest probe destination changed before cleanup; manual recovery required");
+  }
+  const current = await inspectRegularFile(destination, "owned exclusive manifest probe");
+  if (!sameStrictFileIdentity(current, receipt.identity)) {
+    throw new Error("exclusive manifest probe changed before cleanup; manual recovery required");
+  }
+  return destination;
+}
+
+async function assertExclusiveReceiptUnchanged(
+  receipt: ExclusiveJsonInstallReceipt,
+  expectedBytes: Buffer,
+): Promise<void> {
+  await assertUnchangedDirectory(receipt.directory);
+  const current = await inspectRegularFile(receipt.destination, "exclusive manifest");
+  if (!sameStrictFileIdentity(current, receipt.identity)) {
+    throw new Error("exclusive manifest changed after post-install verification");
+  }
+  if (await inspectPlatformFileIdentity(receipt.destination) !== receipt.platformIdentity) {
+    throw new Error("exclusive manifest changed after post-install verification");
+  }
+  assertExpectedBytes(await readFile(receipt.destination), expectedBytes, "exclusive manifest");
+}
+
+async function inspectPlatformFileIdentity(path: string): Promise<PlatformFileIdentity> {
+  if (process.platform !== "win32") {
+    throw new Error(
+      "exclusive manifest installation requires a handle-bound filesystem identity primitive on this platform",
+    );
+  }
+  return runWindowsFileHandleOperation(path);
+}
+
+async function deletePlatformOwnedFile(
+  path: string,
+  expectedIdentity: PlatformFileIdentity,
+): Promise<void> {
+  if (process.platform !== "win32") {
+    throw new Error(
+      "exclusive manifest probe cleanup requires a handle-bound deletion primitive on this platform; manual recovery required",
+    );
+  }
+  const actualIdentity = await runWindowsFileHandleOperation(path, expectedIdentity, true);
+  if (actualIdentity !== expectedIdentity) {
+    throw new Error("exclusive manifest probe changed before cleanup; manual recovery required");
+  }
+}
+
+async function runWindowsFileHandleOperation(
+  path: string,
+  expectedIdentity?: PlatformFileIdentity,
+  deleteFile = false,
+): Promise<PlatformFileIdentity> {
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", WINDOWS_FILE_HANDLE_SCRIPT],
+      {
+        windowsHide: true,
+        maxBuffer: 64 * 1024,
+        env: {
+          ...process.env,
+          ACCESSSEAL_MANIFEST_PATH: toNamespacedPath(path),
+          ACCESSSEAL_EXPECTED_FILE_ID: expectedIdentity ?? "NONE",
+          ACCESSSEAL_DELETE_FILE: deleteFile ? "1" : "0",
+        },
+      },
+    );
+    const identity = stdout.trim();
+    if (!/^[0-9a-f]{8}:[0-9a-f]{16}$/i.test(identity)) {
+      throw new Error(identity === "MISMATCH"
+        ? "exclusive manifest probe changed before cleanup; manual recovery required"
+        : "Windows handle-bound filesystem identity primitive returned an invalid result");
+    }
+    return identity.toLowerCase();
+  } catch (error) {
+    if (error instanceof Error && /exclusive manifest probe changed before cleanup/i.test(error.message)) {
+      throw error;
+    }
+    throw new Error(
+      `Windows handle-bound filesystem operation failed; manual recovery required: ${errorMessage(error)}`,
+    );
   }
 }
 
@@ -181,7 +468,7 @@ async function inspectRealDirectory(path: string, create: boolean): Promise<Dire
       throw new Error(`deployment manifest directory ancestor must be a real directory, not a symbolic link or junction: ${current}`);
     }
   }
-  const metadata = await lstat(absolute);
+  const metadata = await lstat(absolute, { bigint: true });
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
     throw new Error(`deployment manifest directory ancestor must be a real directory, not a symbolic link or junction: ${absolute}`);
   }
@@ -215,6 +502,76 @@ async function assertSafeExclusiveDestination(path: string): Promise<void> {
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+async function assertExclusiveInstallation(
+  directory: DirectoryIdentity,
+  temporary: string,
+  destination: string,
+  expectedBytes: Buffer,
+): Promise<FileIdentity> {
+  await assertUnchangedDirectory(directory);
+  const stageBeforeRead = await inspectRegularFile(temporary, "staging manifest");
+  const finalBeforeRead = await inspectRegularFile(destination, "final manifest");
+  assertMatchingIdentity(stageBeforeRead, finalBeforeRead, "staging and final manifests do not identify the same file");
+
+  const [stageBytes, finalBytes] = await Promise.all([readFile(temporary), readFile(destination)]);
+  assertExpectedBytes(stageBytes, expectedBytes, "staging manifest");
+  assertExpectedBytes(finalBytes, expectedBytes, "final manifest");
+
+  await assertUnchangedDirectory(directory);
+  const stageAfterRead = await inspectRegularFile(temporary, "staging manifest");
+  const finalAfterRead = await inspectRegularFile(destination, "final manifest");
+  assertMatchingIdentity(stageBeforeRead, stageAfterRead, "staging manifest changed during post-install verification");
+  assertMatchingIdentity(finalBeforeRead, finalAfterRead, "final manifest changed during post-install verification");
+  assertMatchingIdentity(stageAfterRead, finalAfterRead, "staging and final manifests do not identify the same file");
+  return finalAfterRead;
+}
+
+async function inspectRegularFile(path: string, label: string): Promise<FileIdentity> {
+  let metadata;
+  try {
+    metadata = await lstat(path, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`${label} is missing after exclusive installation`);
+    }
+    throw error;
+  }
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw new Error(`${label} is not a regular file after exclusive installation`);
+  }
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+
+function assertMatchingIdentity(
+  first: FileIdentity,
+  second: FileIdentity,
+  message: string,
+): void {
+  if (!hasStableFileIdentity(first) || !hasStableFileIdentity(second)) return;
+  if (first.dev !== second.dev || first.ino !== second.ino) throw new Error(message);
+}
+
+function hasStableFileIdentity(identity: FileIdentity): boolean {
+  return identity.dev !== 0n || identity.ino !== 0n;
+}
+
+function sameStrictFileIdentity(first: FileIdentity, second: FileIdentity): boolean {
+  return (
+    hasStableFileIdentity(first) &&
+    hasStableFileIdentity(second) &&
+    first.dev === second.dev &&
+    first.ino === second.ino
+  );
+}
+
+function assertExpectedBytes(actual: Buffer, expected: Buffer, label: string): void {
+  const actualHash = sourceHash(actual);
+  const expectedHash = sourceHash(expected);
+  if (!actual.equals(expected) || actualHash !== expectedHash) {
+    throw new Error(`${label} does not contain the expected bytes after exclusive installation`);
   }
 }
 
