@@ -15,6 +15,9 @@ let target = "";
 let replacement = "";
 let displacedOwned = "";
 let rejectPathnameUnlink = false;
+let expectedPublishedBytes: string | undefined;
+let expectedPublishedDestination: string | undefined;
+let observedCompleteStage = false;
 
 const nativeFs = {
   link: realFs.link,
@@ -32,7 +35,17 @@ const nativeFs = {
 };
 
 const mockedFs = {
-    link: nativeFs.link,
+    link: async (...args: Parameters<typeof realFs.link>) => {
+      if (
+        expectedPublishedBytes !== undefined &&
+        resolve(String(args[1])) === expectedPublishedDestination
+      ) {
+        assert.equal(await nativeFs.readFile(args[0], "utf8"), expectedPublishedBytes);
+        await assert.rejects(nativeFs.lstat(args[1]), { code: "ENOENT" });
+        observedCompleteStage = true;
+      }
+      return nativeFs.link(...args);
+    },
     lstat: async (...args: Parameters<typeof realFs.lstat>) => {
       const metadata = await nativeFs.lstat(...args);
       if (
@@ -82,19 +95,53 @@ mock.module(
 const {
   atomicWriteJsonExclusive,
   canonicalJson,
+  ensurePersistentPosixJsonCapability,
   removeExclusiveJsonInstall,
 } = await import("../../../scripts/source-hash.ts?posix-cleanup-race");
+
+test("POSIX persistent capability reuse does not accumulate retained aliases", async () => {
+  const directory = await nativeFs.mkdtemp(join(tmpdir(), "accessseal-posix-capability-"));
+  const destination = resolve(directory, ".accessseal-v3.preflight.json");
+  const value = { schemaVersion: "capability/1" };
+  try {
+    await ensurePersistentPosixJsonCapability(destination, value);
+    const firstEntries = (await nativeFs.readdir(directory)).sort();
+    await ensurePersistentPosixJsonCapability(destination, value);
+    assert.deepEqual((await nativeFs.readdir(directory)).sort(), firstEntries);
+    assert.equal(firstEntries.length, 2);
+  } finally {
+    await nativeFs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("POSIX exclusive install publishes complete bytes without pathname cleanup", async () => {
   const directory = await nativeFs.mkdtemp(join(tmpdir(), "accessseal-posix-direct-install-"));
   const destination = resolve(directory, "manifest.json");
   try {
     rejectPathnameUnlink = true;
-    await atomicWriteJsonExclusive(destination, { installed: true });
-    assert.equal(await nativeFs.readFile(destination, "utf8"), '{"installed":true}\n');
-    assert.deepEqual(await nativeFs.readdir(directory), ["manifest.json"]);
+    expectedPublishedBytes = '{"installed":true}\n';
+    expectedPublishedDestination = destination;
+    const receipt = await atomicWriteJsonExclusive(destination, { installed: true });
+    assert.equal(observedCompleteStage, true, "final publication must hard-link complete staging bytes");
+    assert.equal(await nativeFs.readFile(destination, "utf8"), expectedPublishedBytes);
+    const entries = (await nativeFs.readdir(directory)).sort();
+    assert.equal(entries.length, 2);
+    assert.equal(entries.includes("manifest.json"), true);
+    const retained = entries.find((entry) => entry !== "manifest.json");
+    assert.match(retained ?? "", /^\.manifest\.json\.[0-9]+\.[0-9a-f-]+\.retained$/);
+    const finalMetadata = await nativeFs.lstat(destination, { bigint: true });
+    const retainedMetadata = await nativeFs.lstat(resolve(directory, retained!), { bigint: true });
+    assert.equal(finalMetadata.dev, retainedMetadata.dev);
+    assert.equal(finalMetadata.ino, retainedMetadata.ino);
+    assert.equal(finalMetadata.nlink, 2n);
+    assert.equal(retainedMetadata.nlink, 2n);
+    assert.equal(receipt.identity.dev, finalMetadata.dev);
+    assert.equal(receipt.identity.ino, finalMetadata.ino);
   } finally {
     rejectPathnameUnlink = false;
+    expectedPublishedBytes = undefined;
+    expectedPublishedDestination = undefined;
+    observedCompleteStage = false;
     await nativeFs.rm(directory, { recursive: true, force: true });
   }
 });

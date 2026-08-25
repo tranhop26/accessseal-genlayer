@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   atomicWriteJsonExclusive,
+  ensurePersistentPosixJsonCapability,
   canonicalJsonHash,
   removeExclusiveJsonInstall,
   sourceHash,
@@ -111,9 +112,18 @@ async function preflightV3ManifestDestination(
   deploymentArtifactSha256: string,
 ): Promise<void> {
   if (process.platform !== "win32") {
-    // The enclosing persistent advisory namespace lease is the POSIX write
-    // prerequisite. POSIX offers no identity-bound pathname deletion, so a
-    // disposable probe could not be cleaned up safely.
+    const directory = deploymentManifestDirectory(
+      repoRoot,
+      network,
+      deploymentArtifactSha256,
+    );
+    await ensurePersistentPosixJsonCapability(
+      join(directory, ".accessseal-v3.preflight.json"),
+      {
+        schemaVersion: "accessseal-v3-posix-preflight/1",
+        deploymentArtifactSha256,
+      },
+    );
     return;
   }
   const directory = deploymentManifestDirectory(

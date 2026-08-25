@@ -225,7 +225,7 @@ export async function verifyDeployment(
 export function verifyTrackedArtifact(repoRoot: string): void {
   try {
     execFileSync(
-      "python",
+      process.platform === "win32" ? "python" : "python3",
       [resolve(repoRoot, "scripts", "build_contract_artifact.py"), "--repo-root", repoRoot, "--check"],
       { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );

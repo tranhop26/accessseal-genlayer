@@ -35,6 +35,11 @@ try {
   let secondEntered = false;
   const first = withV3ManifestNamespaceLease(v3Root, async () => {
     firstEntered();
+    assert.equal(
+      (await readFile(`/proc/${process.pid}/task/${process.pid}/children`, "utf8")).trim(),
+      "",
+      "the acquisition helper must exit while the parent-held descriptor retains flock",
+    );
     await holdFirst;
   });
   await firstEnteredPromise;
@@ -53,14 +58,46 @@ try {
   assert.equal(await readFile(leasePath, "utf8"), originalLeaseBytes);
   assert.deepEqual(await readdir(v3Root), [".accessseal-v3.namespace.lock"]);
 
+  let releaseTimeoutOwner!: () => void;
+  let timeoutOwnerEntered!: () => void;
+  const timeoutOwnerEnteredPromise = new Promise<void>((resolveEntered) => {
+    timeoutOwnerEntered = resolveEntered;
+  });
+  const holdTimeoutOwner = new Promise<void>((resolveRelease) => {
+    releaseTimeoutOwner = resolveRelease;
+  });
+  const timeoutOwner = withV3ManifestNamespaceLease(v3Root, async () => {
+    timeoutOwnerEntered();
+    await holdTimeoutOwner;
+  });
+  await timeoutOwnerEnteredPromise;
+  try {
+    await assert.rejects(
+      withV3ManifestNamespaceLease(v3Root, async () => undefined),
+      /timed out|timeout|failed closed/i,
+    );
+    assert.equal(
+      (await readFile(`/proc/${process.pid}/task/${process.pid}/children`, "utf8")).trim(),
+      "",
+      "a timed-out acquisition helper must be confirmed exited",
+    );
+  } finally {
+    releaseTimeoutOwner();
+    await timeoutOwner;
+  }
+
   const displacedLease = join(v3Root, "owned-lease-marker");
   const foreignLeaseBytes = "foreign lease marker must survive\n";
   await assert.rejects(
     withV3ManifestNamespaceLease(v3Root, async () => {
       await rename(leasePath, displacedLease);
       await writeFile(leasePath, foreignLeaseBytes, { flag: "wx" });
+      throw new Error("callback sentinel must survive lease failure");
     }),
-    /lease changed|identity changed|failed closed/i,
+    (error: unknown) =>
+      error instanceof AggregateError &&
+      error.errors.some((cause) => /callback sentinel/i.test(String(cause))) &&
+      error.errors.some((cause) => /lease|identity|failed closed/i.test(String(cause))),
   );
   assert.equal(await readFile(leasePath, "utf8"), foreignLeaseBytes);
   assert.equal(await readFile(displacedLease, "utf8"), originalLeaseBytes);
