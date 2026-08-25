@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import * as realChildProcess from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
@@ -17,13 +17,19 @@ const hangingHelper = [
   "time.sleep(60)",
 ].join(";");
 
+let hangingHelperPid: number | undefined;
+
 const mockedChildProcess = {
   ...realChildProcess,
   spawn: (
     _command: string,
     _args: readonly string[],
     options: realChildProcess.SpawnOptions,
-  ) => realChildProcess.spawn("python3", ["-c", hangingHelper], options),
+  ) => {
+    const child = realChildProcess.spawn("python3", ["-c", hangingHelper], options);
+    hangingHelperPid = child.pid;
+    return child;
+  },
 };
 
 mock.module(
@@ -43,9 +49,10 @@ test("post-ready helper hang is terminated and confirmed closed", async () => {
       withV3ManifestNamespaceLease(join(root, "v3"), async () => undefined),
       /helper.*signal|advisory-lock.*failed closed|acquisition/i,
     );
-    assert.equal(
-      (await readFile(`/proc/${process.pid}/task/${process.pid}/children`, "utf8")).trim(),
-      "",
+    assert.ok(hangingHelperPid, "the controlled helper must expose its PID");
+    assert.throws(
+      () => process.kill(hangingHelperPid!, 0),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
       "the post-ready helper must be confirmed closed before rejection",
     );
   } finally {

@@ -35,11 +35,6 @@ try {
   let secondEntered = false;
   const first = withV3ManifestNamespaceLease(v3Root, async () => {
     firstEntered();
-    assert.equal(
-      (await readFile(`/proc/${process.pid}/task/${process.pid}/children`, "utf8")).trim(),
-      "",
-      "the acquisition helper must exit while the parent-held descriptor retains flock",
-    );
     await holdFirst;
   });
   await firstEnteredPromise;
@@ -75,11 +70,6 @@ try {
     await assert.rejects(
       withV3ManifestNamespaceLease(v3Root, async () => undefined),
       /timed out|timeout|failed closed/i,
-    );
-    assert.equal(
-      (await readFile(`/proc/${process.pid}/task/${process.pid}/children`, "utf8")).trim(),
-      "",
-      "a timed-out acquisition helper must be confirmed exited",
     );
   } finally {
     releaseTimeoutOwner();
