@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep, toNamespacedPath } from "node:path";
@@ -32,6 +32,7 @@ const execFileAsync = promisify(execFile);
 const V3_NAMESPACE_LEASE_FILENAME = ".accessseal-v3.namespace.lock";
 const V3_NAMESPACE_LEASE_WAIT_MS = 5_000;
 const V3_NAMESPACE_LEASE_POLL_MS = 25;
+const POSIX_NAMESPACE_LEASE_BYTES = Buffer.from("accessseal-v3-posix-lease/1\n", "utf8");
 
 const WINDOWS_FILE_HANDLE_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -139,6 +140,75 @@ $deleteFile = $env:ACCESSSEAL_DELETE_FILE -eq '1'
 ))
 `;
 
+const POSIX_FLOCK_SCRIPT = String.raw`
+import errno
+import fcntl
+import os
+import stat
+import sys
+import time
+
+path = sys.argv[1]
+expected_dev = int(sys.argv[2])
+expected_ino = int(sys.argv[3])
+timeout_seconds = int(sys.argv[4]) / 1000
+
+def fail(message):
+    sys.stderr.write(message + "\n")
+    sys.stderr.flush()
+    sys.exit(2)
+
+if not hasattr(os, "O_NOFOLLOW"):
+    fail("POSIX host does not expose O_NOFOLLOW")
+
+try:
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+except OSError as error:
+    fail("cannot open persistent namespace lease: " + str(error))
+
+def validate_opened_identity():
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_dev != expected_dev
+        or opened.st_ino != expected_ino
+    ):
+        fail("persistent namespace lease opened identity changed")
+    try:
+        current = os.lstat(path)
+    except OSError as error:
+        fail("persistent namespace lease pathname is unavailable: " + str(error))
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or current.st_nlink != 1
+        or current.st_dev != expected_dev
+        or current.st_ino != expected_ino
+    ):
+        fail("persistent namespace lease pathname identity changed")
+
+validate_opened_identity()
+deadline = time.monotonic() + timeout_seconds
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except OSError as error:
+        if error.errno not in (errno.EACCES, errno.EAGAIN):
+            fail("cannot acquire persistent namespace lease: " + str(error))
+        if time.monotonic() >= deadline:
+            fail("persistent namespace lease is held; timed out")
+        time.sleep(0.025)
+
+validate_opened_identity()
+sys.stdout.write("READY\n")
+sys.stdout.flush()
+sys.stdin.buffer.read(1)
+validate_opened_identity()
+fcntl.flock(fd, fcntl.LOCK_UN)
+os.close(fd)
+`;
+
 export function sourceHash(bytes: Uint8Array): string {
   if (!(bytes instanceof Uint8Array)) {
     throw new TypeError("source hash input must be bytes");
@@ -243,6 +313,9 @@ export async function atomicWriteJsonExclusive(
   path: string,
   value: unknown,
 ): Promise<ExclusiveJsonInstallReceipt> {
+  if (process.platform !== "win32") {
+    return writePosixJsonExclusive(path, value);
+  }
   const body = Buffer.from(`${canonicalJson(value)}\n`, "utf8");
   const directory = await inspectRealDirectory(dirname(path), true);
   const destination = join(directory.realPath, basename(resolve(path)));
@@ -298,6 +371,50 @@ export async function atomicWriteJsonExclusive(
   return receipt;
 }
 
+async function writePosixJsonExclusive(
+  path: string,
+  value: unknown,
+): Promise<ExclusiveJsonInstallReceipt> {
+  const body = Buffer.from(`${canonicalJson(value)}\n`, "utf8");
+  const directory = await inspectRealDirectory(dirname(path), true);
+  const destination = join(directory.realPath, basename(resolve(path)));
+  await assertUnchangedDirectory(directory);
+  await assertSafeExclusiveDestination(destination);
+  const handle = await open(destination, directExclusiveOpenFlags(), 0o600);
+  let receipt: ExclusiveJsonInstallReceipt;
+  try {
+    await handle.writeFile(body);
+    await handle.sync();
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n || opened.size !== BigInt(body.length)) {
+      throw new Error("POSIX exclusive manifest is not one complete unique regular file");
+    }
+    const identity = stableFileIdentity(opened, "POSIX exclusive manifest opened handle");
+    const actual = Buffer.alloc(body.length + 1);
+    const { bytesRead } = await handle.read(actual, 0, actual.length, 0);
+    assertExpectedBytes(actual.subarray(0, bytesRead), body, "POSIX exclusive manifest");
+    await assertUnchangedDirectory(directory);
+    const current = await inspectRegularFile(destination, "POSIX exclusive manifest");
+    if (!sameStrictFileIdentity(identity, current)) {
+      throw new Error("POSIX exclusive manifest pathname changed during installation");
+    }
+    receipt = {
+      directory: { ...directory },
+      destination,
+      identity,
+      platformIdentity: await inspectPlatformFileIdentity(destination, 1n),
+    };
+  } catch (error) {
+    throw new Error(
+      `POSIX exclusive manifest installation failed after destination creation; manual recovery required for ${destination}: ${errorMessage(error)}`,
+    );
+  } finally {
+    await handle.close();
+  }
+  await assertExclusiveReceiptUnchanged(receipt, body);
+  return receipt;
+}
+
 export async function removeExclusiveJsonInstall(receipt: ExclusiveJsonInstallReceipt): Promise<void> {
   const destination = await assertOwnedExclusiveJsonInstall(receipt);
   await assertOwnedExclusiveJsonInstall(receipt);
@@ -308,12 +425,231 @@ export async function withV3ManifestNamespaceLease<T>(
   v3Root: string,
   action: () => Promise<T>,
 ): Promise<T> {
+  if (process.platform !== "win32") {
+    return withPosixV3ManifestNamespaceLease(v3Root, action);
+  }
   const lease = await acquireV3ManifestNamespaceLease(v3Root);
   try {
     return await action();
   } finally {
     await removeExclusiveJsonInstall(lease);
   }
+}
+
+async function withPosixV3ManifestNamespaceLease<T>(
+  v3Root: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const marker = await inspectOrCreatePersistentPosixLease(v3Root);
+  const holder = await acquirePosixAdvisoryLease(marker);
+  try {
+    await assertPersistentPosixLeaseUnchanged(marker);
+    return await action();
+  } finally {
+    let validationError: unknown;
+    try {
+      await assertPersistentPosixLeaseUnchanged(marker);
+    } catch (error) {
+      validationError = error;
+    }
+    let releaseError: unknown;
+    try {
+      await holder.release();
+    } catch (error) {
+      releaseError = error;
+    }
+    if (validationError || releaseError) {
+      const detail = [validationError, releaseError]
+        .filter((error): error is unknown => error !== undefined)
+        .map(errorMessage)
+        .join("; ");
+      throw new Error(`POSIX V3 namespace lease changed while held; operation failed closed: ${detail}`);
+    }
+  }
+}
+
+async function inspectOrCreatePersistentPosixLease(
+  v3Root: string,
+): Promise<ExclusiveJsonInstallReceipt> {
+  const directory = await inspectRealDirectory(v3Root, true);
+  const destination = join(directory.realPath, V3_NAMESPACE_LEASE_FILENAME);
+  let handle;
+  let created = false;
+  try {
+    try {
+      handle = await open(destination, directExclusiveOpenFlags(), 0o600);
+      created = true;
+      await handle.writeFile(POSIX_NAMESPACE_LEASE_BYTES);
+      await handle.sync();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      handle = await open(destination, noFollowReadFlags());
+    }
+    const metadata = await handle.stat({ bigint: true });
+    if (
+      !metadata.isFile() ||
+      metadata.nlink !== 1n ||
+      metadata.size !== BigInt(POSIX_NAMESPACE_LEASE_BYTES.length)
+    ) {
+      throw new Error("persistent POSIX namespace lease is not the expected unique regular file");
+    }
+    const identity = stableFileIdentity(metadata, "persistent POSIX namespace lease");
+    const actual = Buffer.alloc(POSIX_NAMESPACE_LEASE_BYTES.length + 1);
+    const { bytesRead } = await handle.read(actual, 0, actual.length, 0);
+    assertExpectedBytes(
+      actual.subarray(0, bytesRead),
+      POSIX_NAMESPACE_LEASE_BYTES,
+      "persistent POSIX namespace lease",
+    );
+    await assertUnchangedDirectory(directory);
+    const current = await lstat(destination, { bigint: true });
+    if (
+      current.isSymbolicLink() ||
+      !current.isFile() ||
+      current.nlink !== 1n ||
+      !sameStrictFileIdentity(identity, current)
+    ) {
+      throw new Error("persistent POSIX namespace lease pathname changed during inspection");
+    }
+    return {
+      directory: { ...directory },
+      destination,
+      identity,
+      platformIdentity: { platform: "posix", ...identity },
+    };
+  } catch (error) {
+    const recovery = created
+      ? `; persistent marker may require manual inspection: ${destination}`
+      : "";
+    throw new Error(`cannot establish persistent POSIX namespace lease${recovery}: ${errorMessage(error)}`);
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function assertPersistentPosixLeaseUnchanged(
+  marker: ExclusiveJsonInstallReceipt,
+): Promise<void> {
+  await assertUnchangedDirectory(marker.directory);
+  const handle = await open(marker.destination, noFollowReadFlags());
+  try {
+    const metadata = await handle.stat({ bigint: true });
+    if (!metadata.isFile() || metadata.nlink !== 1n) {
+      throw new Error("persistent POSIX namespace lease is not a unique regular file");
+    }
+    const identity = stableFileIdentity(metadata, "persistent POSIX namespace lease");
+    if (!sameStrictFileIdentity(identity, marker.identity)) {
+      throw new Error("persistent POSIX namespace lease opened identity changed");
+    }
+    const actual = Buffer.alloc(POSIX_NAMESPACE_LEASE_BYTES.length + 1);
+    const { bytesRead } = await handle.read(actual, 0, actual.length, 0);
+    assertExpectedBytes(
+      actual.subarray(0, bytesRead),
+      POSIX_NAMESPACE_LEASE_BYTES,
+      "persistent POSIX namespace lease",
+    );
+    const current = await lstat(marker.destination, { bigint: true });
+    if (
+      current.isSymbolicLink() ||
+      !current.isFile() ||
+      current.nlink !== 1n ||
+      !sameStrictFileIdentity(identity, current)
+    ) {
+      throw new Error("persistent POSIX namespace lease pathname identity changed");
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+type PosixAdvisoryLease = {
+  release: () => Promise<void>;
+};
+
+async function acquirePosixAdvisoryLease(
+  marker: ExclusiveJsonInstallReceipt,
+): Promise<PosixAdvisoryLease> {
+  try {
+    return await acquirePosixAdvisoryLeaseWith("python3", marker);
+  } catch (error) {
+    throw new Error(
+      `POSIX python3/fcntl advisory-lock prerequisite is unavailable; operation failed closed: ${errorMessage(error)}`,
+    );
+  }
+}
+
+function acquirePosixAdvisoryLeaseWith(
+  command: string,
+  marker: ExclusiveJsonInstallReceipt,
+): Promise<PosixAdvisoryLease> {
+  return new Promise((resolveLease, rejectLease) => {
+    const child: ChildProcessWithoutNullStreams = spawn(
+      command,
+      [
+        "-c",
+        POSIX_FLOCK_SCRIPT,
+        marker.destination,
+        marker.identity.dev.toString(),
+        marker.identity.ino.toString(),
+        V3_NAMESPACE_LEASE_WAIT_MS.toString(),
+      ],
+      { windowsHide: true },
+    );
+    let stdout = "";
+    let stderr = "";
+    let ready = false;
+    let released = false;
+    let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+      if (ready) return;
+      child.kill();
+      rejectLease(new Error("POSIX advisory-lock helper did not become ready before timeout"));
+    }, V3_NAMESPACE_LEASE_WAIT_MS + 1_000);
+    const exit = new Promise<number | null>((resolveExit) => {
+      child.once("close", (code) => resolveExit(code));
+    });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdin.on("error", (error) => {
+      stderr += `stdin: ${errorMessage(error)}\n`;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (ready || !stdout.includes("READY\n")) return;
+      ready = true;
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      resolveLease({
+        release: async () => {
+          if (released) throw new Error("POSIX advisory namespace lease was already released");
+          released = true;
+          child.stdin.end();
+          const code = await exit;
+          if (code !== 0) {
+            throw new Error(
+              `POSIX advisory-lock helper rejected release (${code ?? "signal"}): ${stderr.trim() || "no diagnostic"}`,
+            );
+          }
+        },
+      });
+    });
+    child.once("error", (error) => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      if (!ready) rejectLease(error);
+    });
+    void exit.then((code) => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      if (!ready) {
+        rejectLease(new Error(
+          `POSIX advisory-lock helper exited before acquisition (${code ?? "signal"}): ${stderr.trim() || "no diagnostic"}`,
+        ));
+      }
+    });
+  });
 }
 
 async function acquireV3ManifestNamespaceLease(
@@ -490,17 +826,9 @@ async function deletePlatformOwnedFile(
     ) {
       throw new Error("exclusive manifest probe changed before cleanup; manual recovery required");
     }
-    await unlink(path);
-    const after = await handle.stat({ bigint: true });
-    if (!sameStrictFileIdentity(identity, after) || after.nlink !== 0n) {
-      throw new Error("exclusive manifest probe cleanup did not unlink the owned file");
-    }
-    try {
-      await lstat(path);
-      throw new Error("exclusive manifest probe path remains after cleanup; manual recovery required");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+    throw new Error(
+      `POSIX has no identity-bound file deletion primitive; manual cleanup required for ${path}`,
+    );
   } finally {
     await handle.close();
   }
@@ -695,6 +1023,14 @@ function samePlatformFileIdentity(
 
 function exclusiveLeaseOpenFlags(): number {
   const noFollow = (constants as Record<string, number | undefined>).O_NOFOLLOW ?? 0;
+  return constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | noFollow;
+}
+
+function directExclusiveOpenFlags(): number {
+  const noFollow = (constants as Record<string, number | undefined>).O_NOFOLLOW;
+  if (typeof noFollow !== "number" || noFollow === 0) {
+    throw new Error("POSIX host does not expose O_NOFOLLOW; exclusive creation fails closed");
+  }
   return constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | noFollow;
 }
 

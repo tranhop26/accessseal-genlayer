@@ -110,6 +110,12 @@ async function preflightV3ManifestDestination(
   network: NetworkName,
   deploymentArtifactSha256: string,
 ): Promise<void> {
+  if (process.platform !== "win32") {
+    // The enclosing persistent advisory namespace lease is the POSIX write
+    // prerequisite. POSIX offers no identity-bound pathname deletion, so a
+    // disposable probe could not be cleaned up safely.
+    return;
+  }
   const directory = deploymentManifestDirectory(
     repoRoot,
     network,
