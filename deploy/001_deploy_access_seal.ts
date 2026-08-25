@@ -2,7 +2,7 @@ import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { atomicWriteJson, canonicalJsonHash, sourceHash } from "../scripts/source-hash.ts";
+import { atomicWriteJsonExclusive, canonicalJsonHash, sourceHash } from "../scripts/source-hash.ts";
 import {
   NETWORK_CHAIN_IDS,
   NETWORK_CHAIN_NAMES,
@@ -189,7 +189,7 @@ export async function deployAccessSeal(
     contractAddress,
     deploymentArtifactSha256,
   });
-  await atomicWriteJson(path, manifest);
+  await atomicWriteJsonExclusive(path, manifest);
   return manifest;
 }
 

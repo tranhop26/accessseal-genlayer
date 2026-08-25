@@ -24,6 +24,7 @@ import {
   identifyClientNetwork,
   normalizeReceipt,
   parseVerificationArguments,
+  readDeploymentManifest,
   validateDeploymentManifest,
   verifyFrozenSchema,
   verifyDeployment,
@@ -95,6 +96,31 @@ function v3ManifestPath(value: DeploymentManifest): string {
   });
 }
 
+async function removeFixtureV3Manifest(): Promise<void> {
+  await rm(v3ManifestPath(manifest()), { force: true });
+}
+
+async function writeRetainedV3Manifest(
+  repoRoot: string,
+  directoryHash: string,
+  filenameAddress: string,
+  value: DeploymentManifest,
+): Promise<void> {
+  const directory = join(
+    repoRoot,
+    "work",
+    "deployments",
+    "studionet",
+    "v3",
+    directoryHash,
+  );
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, `${filenameAddress.toLowerCase()}.json`),
+    `${JSON.stringify({ ...value, contractVersion: "V3" })}\n`,
+  );
+}
+
 function client(overrides: Partial<DeploymentClient> = {}): DeploymentClient {
   return {
     chain: { id: 61999, name: "Genlayer Studio Network" },
@@ -118,6 +144,7 @@ function client(overrides: Partial<DeploymentClient> = {}): DeploymentClient {
 }
 
 test("deploys only the compact artifact and binds both tracked source hashes", async () => {
+  await removeFixtureV3Manifest();
   let submittedCode: Uint8Array | undefined;
   const result = await deployAccessSeal(
     client({
@@ -206,6 +233,7 @@ test("accepts only canonical network names and keeps manifest paths contained", 
 });
 
 test("writes V3 beside the historical V2 network manifest without changing V2 bytes", async () => {
+  await removeFixtureV3Manifest();
   const legacyPath = join(fixtureRepoRoot, "work", "deployments", "studionet.json");
   const legacyBytes = '{"contractVersion":"V2","historical":true}\n';
   await mkdir(join(fixtureRepoRoot, "work", "deployments"), { recursive: true });
@@ -226,6 +254,88 @@ test("writes V3 beside the historical V2 network manifest without changing V2 by
   assert.notEqual(v3Path, legacyPath);
   assert.deepEqual(JSON.parse(await readFile(v3Path, "utf8")), result);
   assert.equal((result as unknown as Record<string, unknown>).contractVersion, "V3");
+});
+
+test("does not overwrite a finalized V3 address manifest", async () => {
+  await removeFixtureV3Manifest();
+  const path = v3ManifestPath(manifest());
+  await deployAccessSeal(client(), {
+    network: "studionet",
+    repoRoot: fixtureRepoRoot,
+  });
+  const originalBytes = await readFile(path);
+
+  await assert.rejects(
+    deployAccessSeal(client(), {
+      network: "studionet",
+      repoRoot: fixtureRepoRoot,
+    }),
+    /EEXIST|already exists/i,
+  );
+  assert.deepEqual(await readFile(path), originalBytes);
+});
+
+test("explicit V3 lookup rejects swapped address filenames", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  const otherAddress = "0x8765432109abcdef8765432109abcdef87654321";
+  try {
+    const value = manifest({ contractAddress: otherAddress });
+    await writeRetainedV3Manifest(
+      repoRoot,
+      value.deploymentArtifactSha256,
+      address,
+      value,
+    );
+
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /requested contract address/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit V3 lookup rejects an artifact hash inconsistent with its directory", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  try {
+    const value = manifest();
+    const otherHash = sourceHash(new TextEncoder().encode("different retained artifact"));
+    await writeRetainedV3Manifest(repoRoot, otherHash, address, value);
+
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /artifact hash.*directory/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit V3 lookup rejects ambiguous retained matches", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  try {
+    const first = manifest();
+    const secondHash = sourceHash(new TextEncoder().encode("second retained artifact"));
+    const second = manifest({
+      deploymentArtifactSha256: secondHash,
+      sourceSha256: secondHash,
+    });
+    await writeRetainedV3Manifest(
+      repoRoot,
+      first.deploymentArtifactSha256,
+      address,
+      first,
+    );
+    await writeRetainedV3Manifest(repoRoot, secondHash, address, second);
+
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /ambiguous/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
 });
 
 test("preflights the V3 manifest destination before calling deployContract", async () => {
@@ -272,6 +382,7 @@ test("normalizes the pinned simplified receipt and both official address shapes"
   assert.equal((studio as Record<string, unknown>).status_name, "FINALIZED");
   assert.equal((studio as Record<string, unknown>).statusName, undefined);
   for (const addressShape of ["studio", "testnet"] as const) {
+    await removeFixtureV3Manifest();
     const result = await deployAccessSeal(
       client({
         waitForTransactionReceipt: async () => officialReceipt(

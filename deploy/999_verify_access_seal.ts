@@ -391,11 +391,14 @@ export async function readDeploymentManifest(
       throw new Error("verification contract address is invalid");
     }
     const target = `${contractAddress.toLowerCase()}.json`;
-    let directories: string[];
+    let directories: Array<{ path: string; deploymentArtifactSha256: string }>;
     try {
       directories = (await readdir(v3Root, { withFileTypes: true }))
         .filter((entry) => entry.isDirectory() && HASH.test(entry.name))
-        .map((entry) => resolve(v3Root, entry.name));
+        .map((entry) => ({
+          path: resolve(v3Root, entry.name),
+          deploymentArtifactSha256: entry.name,
+        }));
     } catch (error) {
       if (error instanceof Error && /ENOENT/.test(error.message)) {
         throw new Error("V3 deployment manifest is unavailable for the requested contract address");
@@ -404,9 +407,16 @@ export async function readDeploymentManifest(
     }
     const matches = await Promise.all(
       directories.map(async (directory) => {
-        const path = resolve(directory, target);
+        const path = resolve(directory.path, target);
         try {
-          return await parseV3(path);
+          const manifest = await parseV3(path);
+          if (manifest.contractAddress.toLowerCase() !== contractAddress.toLowerCase()) {
+            throw new Error("V3 deployment manifest requested contract address mismatch");
+          }
+          if (manifest.deploymentArtifactSha256 !== directory.deploymentArtifactSha256) {
+            throw new Error("V3 deployment manifest artifact hash does not match containing directory");
+          }
+          return manifest;
         } catch (error) {
           if (error instanceof Error && /ENOENT/.test(error.message)) return null;
           throw error;

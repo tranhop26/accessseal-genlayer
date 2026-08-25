@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export function sourceHash(bytes: Uint8Array): string {
@@ -64,5 +64,18 @@ export async function atomicWriteJson(path: string, value: unknown): Promise<voi
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;
+  }
+}
+
+export async function atomicWriteJsonExclusive(path: string, value: unknown): Promise<void> {
+  const body = `${canonicalJson(value)}\n`;
+  const directory = dirname(path);
+  await mkdir(directory, { recursive: true });
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, body, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await link(temporary, path);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
   }
 }
