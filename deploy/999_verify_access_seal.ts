@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -365,21 +365,110 @@ export function deploymentToSettlementProofEnvironment(
   };
 }
 
+export async function readDeploymentManifest(
+  repoRoot: string,
+  network: NetworkName,
+  contractAddress?: string,
+): Promise<DeploymentManifest> {
+  const v3Root = resolve(
+    repoRoot,
+    "work",
+    "deployments",
+    network,
+    "v3",
+  );
+  const parseV3 = async (path: string): Promise<DeploymentManifest> => {
+    const manifest = validateDeploymentManifest(
+      JSON.parse(await readFile(path, "utf8")) as DeploymentManifest,
+    );
+    if ((manifest as { contractVersion?: unknown }).contractVersion !== "V3") {
+      throw new Error("V3 deployment manifest contract version is invalid");
+    }
+    return manifest;
+  };
+  if (contractAddress) {
+    if (!ADDRESS.test(contractAddress)) {
+      throw new Error("verification contract address is invalid");
+    }
+    const target = `${contractAddress.toLowerCase()}.json`;
+    let directories: string[];
+    try {
+      directories = (await readdir(v3Root, { withFileTypes: true }))
+        .filter((entry) => entry.isDirectory() && HASH.test(entry.name))
+        .map((entry) => resolve(v3Root, entry.name));
+    } catch (error) {
+      if (error instanceof Error && /ENOENT/.test(error.message)) {
+        throw new Error("V3 deployment manifest is unavailable for the requested contract address");
+      }
+      throw error;
+    }
+    const matches = await Promise.all(
+      directories.map(async (directory) => {
+        const path = resolve(directory, target);
+        try {
+          return await parseV3(path);
+        } catch (error) {
+          if (error instanceof Error && /ENOENT/.test(error.message)) return null;
+          throw error;
+        }
+      }),
+    );
+    const found = matches.filter((manifest): manifest is DeploymentManifest => manifest !== null);
+    if (found.length !== 1) {
+      throw new Error(
+        found.length
+          ? "V3 deployment manifest address is ambiguous"
+          : "V3 deployment manifest is unavailable for the requested contract address",
+      );
+    }
+    return found[0];
+  }
+  const artifact = new Uint8Array(
+    await readFile(resolve(repoRoot, "contracts", "access_seal_deploy.py")),
+  );
+  const artifactHash = sourceHash(artifact);
+  const directory = resolve(v3Root, artifactHash);
+  try {
+    const names = await readdir(directory);
+    const candidates = names.filter((name) => /^0x[0-9a-f]{40}\.json$/.test(name));
+    const selected = contractAddress
+      ? `${contractAddress.toLowerCase()}.json`
+      : candidates.length === 1
+        ? candidates[0]
+        : undefined;
+    if (!selected || !candidates.includes(selected)) {
+      throw new Error(
+        "V3 deployment manifest is ambiguous; provide --contract-address for the exact deployment",
+      );
+    }
+    return await parseV3(resolve(directory, selected));
+  } catch (error) {
+    if (!(error instanceof Error) || !/ENOENT/.test(error.message)) throw error;
+  }
+  return validateDeploymentManifest(
+    JSON.parse(
+      await readFile(resolve(repoRoot, "work", "deployments", `${network}.json`), "utf8"),
+    ) as DeploymentManifest,
+  );
+}
+
 export default async function main(
   client: VerificationClient,
   requestedNetwork = process.env.GENLAYER_NETWORK,
+  contractAddress?: string,
 ): Promise<void> {
   const network = identifyClientNetwork(client.chain, requestedNetwork);
-  const manifestPath = resolve(process.cwd(), "work", "deployments", `${network}.json`);
-  const manifest = validateDeploymentManifest(
-    JSON.parse(await readFile(manifestPath, "utf8")) as DeploymentManifest,
-  );
+  const manifest = await readDeploymentManifest(process.cwd(), network, contractAddress);
   await verifyDeployment(client, manifest);
 }
 
 export function parseVerificationArguments(args: string[]): NetworkName {
-  if (args.length !== 2 || args[0] !== "--network") {
-    throw new Error("usage: npm run verify:deployment -- --network <network>");
+  if (
+    (args.length !== 2 && args.length !== 4) ||
+    args[0] !== "--network" ||
+    (args.length === 4 && args[2] !== "--contract-address")
+  ) {
+    throw new Error("usage: npm run verify:deployment -- --network <network> [--contract-address <address>]");
   }
   const network = args[1];
   if (!network || !(network in NETWORK_CHAIN_IDS)) {
@@ -388,8 +477,16 @@ export function parseVerificationArguments(args: string[]): NetworkName {
   return network as NetworkName;
 }
 
+export function parseVerificationContractAddress(args: string[]): string | undefined {
+  if (args.length !== 4) return;
+  const address = args[3];
+  if (!ADDRESS.test(address)) throw new Error("verification contract address is invalid");
+  return address.toLowerCase();
+}
+
 export async function runVerificationCli(args = process.argv.slice(2)): Promise<void> {
   const network = parseVerificationArguments(args);
+  const contractAddress = parseVerificationContractAddress(args);
   const [{ createClient }, chainDefinitions] = await Promise.all([
     import("genlayer-js"),
     import("genlayer-js/chains"),
@@ -400,7 +497,11 @@ export async function runVerificationCli(args = process.argv.slice(2)): Promise<
     testnet_asimov: chainDefinitions.testnetAsimov,
     testnet_bradbury: chainDefinitions.testnetBradbury,
   }[network];
-  await main(createClient({ chain }) as unknown as VerificationClient, network);
+  await main(
+    createClient({ chain }) as unknown as VerificationClient,
+    network,
+    contractAddress,
+  );
 }
 
 if (

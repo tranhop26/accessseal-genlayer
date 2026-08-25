@@ -71,8 +71,8 @@ export function RecoveryPanel({
       </div>
       {!canTimeout && (
         <p className="inline-warning">
-          Timeout eligibility unavailable: the frozen get_case view does not
-          expose createdAt, so the frontend fails closed.
+          Timeout recovery is disabled until the finalized contract
+          createdAt/readAt clock confirms that the hard deadline has passed.
         </p>
       )}
     </section>

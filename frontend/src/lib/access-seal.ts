@@ -8,8 +8,10 @@ export type CaseRecord = {
   caseId: string;
   chainId: number;
   contractAddress: string;
+  createdAt: number | null;
   escrowAmount: bigint;
   evidenceDeadline: number;
+  evidenceCutoff: number | null;
   evidenceSealed: boolean;
   evidenceSealedAt: number;
   evidenceSealedBy: Address;
@@ -19,6 +21,7 @@ export type CaseRecord = {
   epoch: number;
   maxUnresolvedRetries: number;
   profileHash: string;
+  readAt: number | null;
   reserved: bigint;
   salt: string;
   subjectOrigin: string;
@@ -102,7 +105,7 @@ const ADDRESS = /^0x[0-9a-f]{40}$/;
 const HASH = /^0x[0-9a-f]{64}$/;
 const SHA = /^sha256:[0-9a-f]{64}$/;
 const ZERO_ADDRESS = `0x${"0".repeat(40)}`;
-const CASE_KEYS = [
+const LEGACY_V2_CASE_KEYS = [
   "buyer",
   "caseId",
   "chainId",
@@ -110,9 +113,6 @@ const CASE_KEYS = [
   "epoch",
   "escrowAmount",
   "evidenceDeadline",
-  "evidenceSealed",
-  "evidenceSealedAt",
-  "evidenceSealedBy",
   "flowsHash",
   "hardDeadline",
   "lifecycle",
@@ -124,6 +124,15 @@ const CASE_KEYS = [
   "termsHash",
   "vendor",
   "vendorAccepted",
+].sort();
+const V3_CASE_KEYS = [
+  ...LEGACY_V2_CASE_KEYS,
+  "createdAt",
+  "evidenceCutoff",
+  "evidenceSealed",
+  "evidenceSealedAt",
+  "evidenceSealedBy",
+  "readAt",
 ].sort();
 const REVIEW_KEYS = [
   "evidenceRefs",
@@ -164,6 +173,9 @@ function object(value: unknown, label: string): Record<string, unknown> {
 function exact(value: Record<string, unknown>, keys: string[], label: string) {
   if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(keys))
     throw new Error(`${label} readback schema is invalid.`);
+}
+function hasExactKeys(value: Record<string, unknown>, keys: string[]) {
+  return JSON.stringify(Object.keys(value).sort()) === JSON.stringify(keys);
 }
 function text(value: unknown, label: string, pattern?: RegExp): string {
   if (typeof value !== "string" || (pattern && !pattern.test(value)))
@@ -330,27 +342,34 @@ export class AccessSealClient {
   }
   async readCase(caseId: string): Promise<CaseRecord> {
     const r = object(await this.raw("get_case", [caseId], "Case"), "Case");
-    exact(r, CASE_KEYS, "Case");
+    const hasV3Clock = hasExactKeys(r, V3_CASE_KEYS);
+    const isLegacyV2 = hasExactKeys(r, LEGACY_V2_CASE_KEYS);
+    if (!hasV3Clock && !isLegacyV2) exact(r, V3_CASE_KEYS, "Case");
     const result: CaseRecord = {
       buyer: text(r.buyer, "Buyer", ADDRESS),
       caseId: text(r.caseId, "Case ID", HASH),
       chainId: count(r.chainId, "Chain ID"),
       contractAddress: text(r.contractAddress, "Contract", ADDRESS),
+      createdAt: hasV3Clock ? count(r.createdAt, "Case created time") : null,
       escrowAmount: amount(r.escrowAmount, "Escrow amount"),
       evidenceDeadline: count(r.evidenceDeadline, "Evidence deadline"),
-      evidenceSealed: r.evidenceSealed as boolean,
-      evidenceSealedAt: count(r.evidenceSealedAt, "Evidence sealed time"),
-      evidenceSealedBy: text(
-        r.evidenceSealedBy,
-        "Evidence sealed by",
-        ADDRESS,
-      ) as Address,
+      evidenceCutoff: hasV3Clock
+        ? count(r.evidenceCutoff, "Evidence cutoff")
+        : null,
+      evidenceSealed: hasV3Clock ? (r.evidenceSealed as boolean) : false,
+      evidenceSealedAt: hasV3Clock
+        ? count(r.evidenceSealedAt, "Evidence sealed time")
+        : 0,
+      evidenceSealedBy: hasV3Clock
+        ? (text(r.evidenceSealedBy, "Evidence sealed by", ADDRESS) as Address)
+        : (ZERO_ADDRESS as Address),
       flowsHash: text(r.flowsHash, "Flows hash", HASH),
       hardDeadline: count(r.hardDeadline, "Hard deadline"),
       lifecycle: text(r.lifecycle, "Lifecycle"),
       epoch: count(r.epoch, "Epoch"),
       maxUnresolvedRetries: count(r.maxUnresolvedRetries, "Retry budget"),
       profileHash: text(r.profileHash, "Profile hash", HASH),
+      readAt: hasV3Clock ? count(r.readAt, "Contract read clock") : null,
       reserved: amount(r.reserved, "Reserved"),
       salt: text(r.salt, "Salt"),
       subjectOrigin: text(r.subjectOrigin, "Origin"),
@@ -372,7 +391,13 @@ export class AccessSealClient {
       : !hasSealMetadata && result.lifecycle !== "EVIDENCE_SEALED";
     if (
       typeof r.vendorAccepted !== "boolean" ||
-      typeof r.evidenceSealed !== "boolean" ||
+      (hasV3Clock && typeof r.evidenceSealed !== "boolean") ||
+      (hasV3Clock &&
+        (result.createdAt === null ||
+          result.evidenceCutoff === null ||
+          result.readAt === null ||
+          result.evidenceCutoff !== result.createdAt + result.evidenceDeadline ||
+          result.readAt < result.createdAt)) ||
       !sealTupleIsConsistent ||
       ![
         "DRAFT",
@@ -798,11 +823,27 @@ export function hasAuthoritativeEvidenceSeal(
   >,
 ) {
   return (
-    record.lifecycle === "EVIDENCE_SEALED" &&
+    !["DRAFT", "FUNDED", "EVIDENCE_OPEN"].includes(record.lifecycle) &&
     record.evidenceSealed &&
     record.evidenceSealedAt > 0 &&
     record.evidenceSealedBy.toLowerCase() !== ZERO_ADDRESS &&
     record.evidenceSealedBy.toLowerCase() === record.buyer.toLowerCase()
+  );
+}
+
+export function isImmediatelyReviewableEvidenceSeal(
+  record: Pick<
+    CaseRecord,
+    | "buyer"
+    | "evidenceSealed"
+    | "evidenceSealedAt"
+    | "evidenceSealedBy"
+    | "lifecycle"
+  >,
+) {
+  return (
+    record.lifecycle === "EVIDENCE_SEALED" &&
+    hasAuthoritativeEvidenceSeal(record)
   );
 }
 export function parseReviewTxBinding(

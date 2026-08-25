@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AccessSealClient,
   deriveCaseBindings,
+  hasAuthoritativeEvidenceSeal,
   matchesExactUserError,
   parsePendingCloseEvidenceBinding,
   parseReviewTxBinding,
@@ -19,8 +20,10 @@ const caseJson = (overrides: Record<string, unknown> = {}) =>
     caseId: `0x${"d".repeat(64)}`,
     chainId: 61999,
     contractAddress: address,
+    createdAt: 1_701_230_000,
     escrowAmount: "1000000000000000000",
     evidenceDeadline: 86400,
+    evidenceCutoff: 1_701_316_400,
     evidenceSealed: false,
     evidenceSealedAt: 0,
     evidenceSealedBy: `0x${"0".repeat(40)}`,
@@ -31,6 +34,7 @@ const caseJson = (overrides: Record<string, unknown> = {}) =>
     maxUnresolvedRetries: 2,
     profileHash: digest,
     reserved: "0",
+    readAt: 1_701_234_568,
     salt: "salt-1",
     subjectOrigin: "https://product.example",
     termsHash: digest,
@@ -38,6 +42,20 @@ const caseJson = (overrides: Record<string, unknown> = {}) =>
     vendorAccepted: false,
     ...overrides,
   });
+
+const legacyV2CaseJson = (overrides: Record<string, unknown> = {}) => {
+  const value = JSON.parse(caseJson(overrides)) as Record<string, unknown>;
+  for (const key of [
+    "createdAt",
+    "evidenceCutoff",
+    "evidenceSealed",
+    "evidenceSealedAt",
+    "evidenceSealedBy",
+    "readAt",
+  ])
+    delete value[key];
+  return JSON.stringify(value);
+};
 
 describe("AccessSeal contract adapter", () => {
   it("requires an exact epoch-bound pending seal record and rejects legacy unbound records", () => {
@@ -138,6 +156,48 @@ describe("AccessSeal contract adapter", () => {
     );
   });
 
+  it("keeps an authoritative buyer seal historical after the lifecycle advances", () => {
+    const base = JSON.parse(
+      caseJson({
+        lifecycle: "DECIDED",
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: buyer,
+      }),
+    );
+
+    expect(hasAuthoritativeEvidenceSeal(base)).toBe(true);
+  });
+
+  it("strictly binds V3 createdAt, absolute cutoff, and authoritative read time", async () => {
+    const client = new AccessSealClient(
+      { readContract: vi.fn().mockResolvedValue(caseJson()) } as never,
+      address,
+    );
+    await expect(client.readCase(`0x${"d".repeat(64)}`)).resolves.toMatchObject({
+      createdAt: 1_701_230_000,
+      evidenceCutoff: 1_701_316_400,
+      readAt: 1_701_234_568,
+    });
+
+    for (const mutation of [
+      { evidenceCutoff: 1_701_316_399 },
+      { createdAt: 1_701_316_401 },
+      { readAt: 1_701_229_999 },
+      { readAt: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+      const invalid = new AccessSealClient(
+        {
+          readContract: vi.fn().mockResolvedValue(caseJson(mutation)),
+        } as never,
+        address,
+      );
+      await expect(invalid.readCase(`0x${"d".repeat(64)}`)).rejects.toThrow(
+        /cutoff|clock|counter|binding/i,
+      );
+    }
+  });
+
   it.each([
     [
       "requires the sealed flag for EVIDENCE_SEALED",
@@ -214,11 +274,13 @@ describe("AccessSeal contract adapter", () => {
   });
 
   it.each(["REVIEW_PENDING", "CANCELLED"])(
-    "parses legacy V2 %s rows with an unsealed tuple",
+    "parses the exact legacy V2 %s case schema with unavailable cutoff metadata",
     async (lifecycle) => {
       const client = new AccessSealClient(
         {
-          readContract: vi.fn().mockResolvedValue(caseJson({ lifecycle })),
+          readContract: vi
+            .fn()
+            .mockResolvedValue(legacyV2CaseJson({ lifecycle })),
         } as never,
         address,
       );
@@ -228,6 +290,9 @@ describe("AccessSeal contract adapter", () => {
       ).resolves.toMatchObject({
         lifecycle,
         evidenceSealed: false,
+        createdAt: null,
+        evidenceCutoff: null,
+        readAt: null,
       });
     },
   );

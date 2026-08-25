@@ -164,8 +164,11 @@ def open_complete_early_seal_profile(
 
 
 def case_evidence_and_accounting(contract, case_id):
+    case = contract.get_case_json(case_id)
+    # `readAt` is an authoritative view-time clock, not mutable case state.
+    case.pop("readAt")
     return (
-        contract.get_case_json(case_id),
+        case,
         json.loads(contract.get_evidence(case_id, 0)),
         json.loads(contract.get_accounting()),
     )

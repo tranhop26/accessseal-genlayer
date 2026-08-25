@@ -57,8 +57,10 @@ function caseRecord(
     caseId,
     chainId: 61999,
     contractAddress: `0x${"4".repeat(40)}`,
+    createdAt: 1_701_230_000,
     escrowAmount,
     evidenceDeadline: 2_000,
+    evidenceCutoff: 1_701_232_000,
     evidenceSealed: false,
     evidenceSealedAt: 0,
     evidenceSealedBy: `0x${"0".repeat(40)}`,
@@ -68,6 +70,7 @@ function caseRecord(
     epoch: 2,
     maxUnresolvedRetries: 1,
     profileHash,
+    readAt: 1_701_232_001,
     reserved: escrowAmount,
     salt: "case-salt",
     subjectOrigin: "https://merchant.example",
@@ -86,12 +89,24 @@ function sealedCaseRecord(caseId: string): CaseRecord {
   };
 }
 
-function serializedCaseRecord(record: CaseRecord): string {
-  return JSON.stringify({
+function serializedCaseRecord(record: CaseRecord, legacyV2 = false): string {
+  const value: Record<string, unknown> = {
     ...record,
     escrowAmount: record.escrowAmount.toString(),
     reserved: record.reserved.toString(),
-  });
+  };
+  if (legacyV2) {
+    for (const key of [
+      "createdAt",
+      "evidenceCutoff",
+      "evidenceSealed",
+      "evidenceSealedAt",
+      "evidenceSealedBy",
+      "readAt",
+    ])
+      delete value[key];
+  }
+  return JSON.stringify(value);
 }
 
 const approvedReview: ReviewRecord = {
@@ -327,9 +342,10 @@ describe("authoritative cases dashboard model", () => {
     const contract = `0x${"4".repeat(40)}` as `0x${string}`;
     const v3CaseId = `0x${"a".repeat(64)}`;
     const legacyCaseId = `0x${"b".repeat(64)}`;
-    const makeClient = (record: CaseRecord) => {
+    const makeClient = (record: CaseRecord, legacyV2 = false) => {
       const raw = vi.fn(async ({ functionName }: { functionName: string }) => {
-        if (functionName === "get_case") return serializedCaseRecord(record);
+        if (functionName === "get_case")
+          return serializedCaseRecord(record, legacyV2);
         if (functionName === "get_evidence") {
           const evidence = evidenceRecord(record.caseId);
           return JSON.stringify({
@@ -378,7 +394,7 @@ describe("authoritative cases dashboard model", () => {
       }),
     );
 
-    const legacy = makeClient(caseRecord(legacyCaseId, "REVIEW_PENDING"));
+    const legacy = makeClient(caseRecord(legacyCaseId, "REVIEW_PENDING"), true);
     const loadedLegacy = await loadKnownCase(legacy.client, legacyCaseId);
     expect(loadedLegacy).toMatchObject({
       caseId: legacyCaseId,

@@ -65,8 +65,10 @@ function finalizedReadback(): ReconciledCase {
       caseId: CASE_ID,
       chainId: 61999,
       contractAddress: `0x${"4".repeat(40)}`,
+      createdAt: 1_701_230_000,
       escrowAmount: 100n,
       evidenceDeadline: 2_000,
+      evidenceCutoff: 1_701_232_000,
       evidenceSealed: false,
       evidenceSealedAt: 0,
       evidenceSealedBy: `0x${"0".repeat(40)}`,
@@ -77,6 +79,7 @@ function finalizedReadback(): ReconciledCase {
       maxUnresolvedRetries: 1,
       profileHash: `0x${"6".repeat(64)}`,
       reserved: 100n,
+      readAt: 1_701_232_001,
       salt: "case-salt",
       subjectOrigin: "https://audit.example",
       termsHash: `0x${"7".repeat(64)}`,
@@ -173,7 +176,7 @@ function evidenceOpenReadback(sealed = false, epoch = 0): ReconciledCase {
   readback.case.lifecycle = sealed ? "EVIDENCE_SEALED" : "EVIDENCE_OPEN";
   readback.case.epoch = epoch;
   readback.case.evidenceSealed = sealed;
-  readback.case.evidenceSealedAt = sealed ? 1_701_234_567 : 0;
+  readback.case.evidenceSealedAt = sealed ? 1_701_231_000 : 0;
   readback.case.evidenceSealedBy = sealed ? BUYER : `0x${"0".repeat(40)}`;
   readback.review = null;
   readback.reviewFinality = null;
@@ -492,6 +495,109 @@ describe("case detail document layout", () => {
     expect(screen.getByText(/expired evidence types/i)).toHaveTextContent(
       "SCREENSHOT",
     );
+    expect(screen.getByText(/expired evidence types/i)).toHaveTextContent(
+      /cannot be replaced in this epoch.*wait for cutoff review.*bounded cure\/new epoch.*timeout recovery/i,
+    );
+    expect(screen.getByText(/expired evidence types/i)).not.toHaveTextContent(
+      /replace them with fresh current-epoch evidence/i,
+    );
+  });
+
+  it.each([
+    ["before", 2_999, false, /1 second until the evidence cutoff/i],
+    ["at", 3_000, false, /cutoff reached.*confirming.*finalized contract time/i],
+    ["after", 3_001, true, /finalized contract time confirms.*cutoff has passed/i],
+  ] as const)(
+    "uses the authoritative contract clock %s the unsealed cutoff",
+    async (_position, readAt, enabled, statusCopy) => {
+      const readback = evidenceOpenReadback();
+      readback.case.createdAt = 1_000;
+      readback.case.evidenceCutoff = 3_000;
+      readback.case.readAt = readAt;
+      readback.case.hardDeadline = 4_000;
+      mockWallet(readback, {
+        contract: { requestReview: vi.fn() },
+        evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      });
+
+      render(<CaseDetail caseId={CASE_ID} />);
+
+      const buttons = await screen.findAllByRole("button", {
+        name: "Request intelligent review",
+      });
+      for (const button of buttons) {
+        if (enabled) expect(button).toBeEnabled();
+        else expect(button).toBeDisabled();
+      }
+      expect(screen.getByText(statusCopy)).toBeVisible();
+    },
+  );
+
+  it("keeps review disabled at the exact cutoff and enables only after a refreshed contract clock passes it", async () => {
+    const before = evidenceOpenReadback();
+    before.case.createdAt = 1_000;
+    before.case.evidenceCutoff = 3_000;
+    before.case.readAt = 2_999;
+    before.case.hardDeadline = 4_000;
+    const exact = structuredClone(before);
+    exact.case.readAt = 3_000;
+    const after = structuredClone(before);
+    after.case.readAt = 3_001;
+    const reader = mockWallet(before, {
+      contract: { requestReview: vi.fn() },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+    });
+    reader.readCase
+      .mockResolvedValueOnce(before.case)
+      .mockResolvedValueOnce(exact.case)
+      .mockResolvedValue(after.case);
+    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      (await screen.findAllByRole("button", {
+        name: "Request intelligent review",
+      }))[0],
+    ).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Refresh readback" }));
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", {
+          name: "Request intelligent review",
+        })[0],
+      ).toBeDisabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "Refresh readback" }));
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("button", {
+          name: "Request intelligent review",
+        })[0],
+      ).toBeEnabled(),
+    );
+  });
+
+  it("keeps both sealed and fallback review disabled at the exact hard deadline", async () => {
+    const sealed = evidenceOpenReadback(true);
+    sealed.case.createdAt = 1_000;
+    sealed.case.evidenceCutoff = 3_000;
+    sealed.case.hardDeadline = 4_000;
+    sealed.case.readAt = 5_000;
+    mockWallet(sealed, {
+      contract: { requestReview: vi.fn() },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    for (const button of await screen.findAllByRole("button", {
+      name: "Request intelligent review",
+    }))
+      expect(button).toBeDisabled();
+    expect(
+      screen.getByText(/hard deadline has expired.*timeout recovery may apply/i),
+    ).toBeVisible();
   });
 
   it("separates wallet confirmation, submission, and consensus pending seal states", async () => {
@@ -995,6 +1101,61 @@ describe("case detail document layout", () => {
       name: "Request intelligent review",
     }))
       expect(button).toBeEnabled();
+  });
+
+  it("reconstructs historical seal metadata after reload in DECIDED without offering a duplicate review", async () => {
+    const decided = finalizedReadback();
+    decided.case.evidenceSealed = true;
+    decided.case.evidenceSealedAt = 1_701_231_000;
+    decided.case.evidenceSealedBy = BUYER;
+    mockWallet(decided, {
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(await screen.findByText("Evidence sealed")).toBeVisible();
+    expect(
+      screen.queryAllByRole("button", { name: "Request intelligent review" }),
+    ).toHaveLength(0);
+  });
+
+  it("reconciles a finalized seal receipt when another caller advances the case to DECIDED", async () => {
+    const hash = `0x${"f".repeat(64)}` as Hash;
+    const opened = evidenceOpenReadback();
+    const decided = finalizedReadback();
+    decided.case.evidenceSealed = true;
+    decided.case.evidenceSealedAt = 1_701_231_000;
+    decided.case.evidenceSealedBy = BUYER;
+    persistPendingSeal(hash);
+    const reader = mockWallet(opened, {
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
+    reader.readCase.mockResolvedValueOnce(opened.case).mockResolvedValue(decided.case);
+    reader.readReview.mockResolvedValue(decided.review);
+    reader.readReviewFinality.mockResolvedValue(decided.reviewFinality);
+    reader.readReviewAttempt.mockResolvedValue(decided.reviewAttempt);
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback confirmed",
+      }),
+    ).toBeVisible();
+    expect(screen.getByText("Evidence sealed")).toBeVisible();
+    expect(
+      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+    ).toBeNull();
+    expect(
+      screen.queryAllByRole("button", { name: "Request intelligent review" }),
+    ).toHaveLength(0);
   });
 
   it("shows wallet rejection and execution errors without disabling a retry", async () => {

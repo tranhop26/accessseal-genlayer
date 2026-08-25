@@ -13,6 +13,7 @@ from conftest import (
     BASE_TIME,
     build_release,
     candidate,
+    create_funded_case,
     EVIDENCE_TYPES,
     FLOWS_HASH,
     io_context,
@@ -127,6 +128,29 @@ def test_submitted_envelopes_share_served_case_and_observation_time(
         item["observedAt"] <= item["submittedAt"] < item["expiresAt"]
         for item in evidence["envelopes"]
     )
+
+
+def test_deployed_get_case_reports_authoritative_before_exact_and_after_cutoff(
+    deployed_contract, actors
+):
+    case_id = create_funded_case(
+        deployed_contract,
+        actors,
+        "integration-cutoff-readback",
+    )
+    created_at = int(datetime.fromisoformat(BASE_TIME).timestamp())
+    cutoff = created_at + 1_800
+
+    for when, expected_read_at in (
+        ("2026-08-13T00:29:59+00:00", cutoff - 1),
+        ("2026-08-13T00:30:00+00:00", cutoff),
+        ("2026-08-13T00:30:01+00:00", cutoff + 1),
+    ):
+        rpc("sim_setTime", [when])
+        readback = read_json(deployed_contract, "get_case", [case_id])
+        assert readback["createdAt"] == created_at
+        assert readback["evidenceCutoff"] == cutoff
+        assert readback["readAt"] == expected_read_at
 
 
 def test_five_validators_finalize_semantic_approval_and_contract_finality(

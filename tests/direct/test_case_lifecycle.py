@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 import pytest
 
@@ -104,8 +105,10 @@ def test_new_case_exposes_initial_evidence_seal_state(
         "caseId",
         "chainId",
         "contractAddress",
+        "createdAt",
         "escrowAmount",
         "evidenceDeadline",
+        "evidenceCutoff",
         "evidenceSealed",
         "evidenceSealedAt",
         "evidenceSealedBy",
@@ -116,6 +119,7 @@ def test_new_case_exposes_initial_evidence_seal_state(
         "maxUnresolvedRetries",
         "profileHash",
         "reserved",
+        "readAt",
         "salt",
         "subjectOrigin",
         "termsHash",
@@ -125,6 +129,33 @@ def test_new_case_exposes_initial_evidence_seal_state(
     assert case["evidenceSealed"] is False
     assert case["evidenceSealedAt"] == 0
     assert case["evidenceSealedBy"] == "0x0000000000000000000000000000000000000000"
+
+
+def test_case_readback_exposes_exact_authoritative_cutoff_clock_without_changing_terms(
+    contract, direct_vm, buyer, vendor
+):
+    base = "2026-08-13T00:00:00+00:00"
+    direct_vm.warp(base)
+    case_id = create_case(contract, buyer, vendor, salt="cutoff-readback")
+    original = json.loads(contract.get_case(case_id))
+    created_at = int(datetime.fromisoformat(base).timestamp())
+    cutoff = created_at + 1_800
+
+    assert original["createdAt"] == created_at
+    assert original["evidenceCutoff"] == cutoff
+    assert original["readAt"] == created_at
+
+    for when, expected_read_at in (
+        ("2026-08-13T00:29:59+00:00", cutoff - 1),
+        ("2026-08-13T00:30:00+00:00", cutoff),
+        ("2026-08-13T00:30:01+00:00", cutoff + 1),
+    ):
+        direct_vm.warp(when)
+        readback = json.loads(contract.get_case(case_id))
+        assert readback["createdAt"] == created_at
+        assert readback["evidenceCutoff"] == cutoff
+        assert readback["readAt"] == expected_read_at
+        assert readback["termsHash"] == original["termsHash"]
 
 
 def test_buyer_vendor_funding_handshake(contract, buyer, vendor, outsider):

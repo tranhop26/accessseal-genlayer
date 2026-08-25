@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { atomicWriteJson, canonicalJsonHash, sourceHash } from "../scripts/source-hash.ts";
 import {
@@ -26,6 +27,15 @@ export type DeploymentClient = VerificationClient & {
 };
 
 export type GitState = { commit: string; clean: boolean };
+export type V3DeploymentManifest = DeploymentManifest & {
+  contractVersion: "V3";
+};
+export type V3ManifestPath = {
+  network: string;
+  contractVersion: "V3";
+  contractAddress: string;
+  deploymentArtifactSha256: string;
+};
 
 type DeployOptions = {
   network: string;
@@ -35,6 +45,7 @@ type DeployOptions = {
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const GIT_COMMIT = /^[0-9a-f]{40,64}$/;
+const SOURCE_HASH = /^[0-9a-f]{64}$/;
 
 export function validateNetworkName(value: string): NetworkName {
   if (!Object.prototype.hasOwnProperty.call(NETWORK_CHAIN_IDS, value)) {
@@ -43,14 +54,75 @@ export function validateNetworkName(value: string): NetworkName {
   return value as NetworkName;
 }
 
-export function deploymentManifestPath(repoRoot: string, network: string): string {
-  return join(repoRoot, "work", "deployments", `${validateNetworkName(network)}.json`);
+function deploymentManifestDirectory(
+  repoRoot: string,
+  network: string,
+  deploymentArtifactSha256: string,
+): string {
+  if (!SOURCE_HASH.test(deploymentArtifactSha256)) {
+    throw new Error("deployment artifact source hash is invalid");
+  }
+  return join(
+    repoRoot,
+    "work",
+    "deployments",
+    validateNetworkName(network),
+    "v3",
+    deploymentArtifactSha256,
+  );
+}
+
+export function deploymentManifestPath(
+  repoRoot: string,
+  value: V3ManifestPath,
+): string {
+  if (value.contractVersion !== "V3") {
+    throw new Error("deployment manifest contract version is invalid");
+  }
+  if (!ADDRESS.test(value.contractAddress)) {
+    throw new Error("deployment manifest contract address is invalid");
+  }
+  return join(
+    deploymentManifestDirectory(
+      repoRoot,
+      value.network,
+      value.deploymentArtifactSha256,
+    ),
+    `${value.contractAddress.toLowerCase()}.json`,
+  );
+}
+
+async function preflightV3ManifestDestination(
+  repoRoot: string,
+  network: NetworkName,
+  deploymentArtifactSha256: string,
+): Promise<void> {
+  const directory = deploymentManifestDirectory(
+    repoRoot,
+    network,
+    deploymentArtifactSha256,
+  );
+  try {
+    await mkdir(directory, { recursive: true });
+    const metadata = await lstat(directory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error("not a directory");
+    }
+    const probe = join(directory, `.accessseal-preflight-${randomUUID()}.tmp`);
+    try {
+      await writeFile(probe, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    } finally {
+      await rm(probe, { force: true });
+    }
+  } catch {
+    throw new Error("deployment manifest destination preflight failed");
+  }
 }
 
 export async function deployAccessSeal(
   client: DeploymentClient,
   options: DeployOptions,
-): Promise<DeploymentManifest> {
+): Promise<V3DeploymentManifest> {
   const repoRoot = options.repoRoot ?? process.cwd();
   const network = validateNetworkName(options.network);
   if (client.chain.id !== NETWORK_CHAIN_IDS[network] || client.chain.name !== NETWORK_CHAIN_NAMES[network]) {
@@ -69,6 +141,8 @@ export async function deployAccessSeal(
   if (readableSource.byteLength === 0 || deploymentArtifact.byteLength === 0) {
     throw new Error("contract source or deployment artifact bytes are missing");
   }
+  const deploymentArtifactSha256 = sourceHash(deploymentArtifact);
+  await preflightV3ManifestDestination(repoRoot, network, deploymentArtifactSha256);
 
   const expectedSchema = await client.getContractSchemaForCode(deploymentArtifact);
   if (!(expectedSchema && typeof expectedSchema === "object")) {
@@ -93,22 +167,28 @@ export async function deployAccessSeal(
   assertReceipt(finalized, true);
   const contractAddress = extractContractAddress(finalized);
 
-  const manifest: DeploymentManifest = {
+  const manifest: V3DeploymentManifest = {
     schemaVersion: "accessseal-deployment-manifest/2",
+    contractVersion: "V3",
     network,
     chainId: NETWORK_CHAIN_IDS[network],
     contractAddress,
     deploymentTransaction,
     readableSourceSha256: sourceHash(readableSource),
-    deploymentArtifactSha256: sourceHash(deploymentArtifact),
-    sourceSha256: sourceHash(deploymentArtifact),
+    deploymentArtifactSha256,
+    sourceSha256: deploymentArtifactSha256,
     schemaSha256: canonicalJsonHash(expectedSchema),
     gitCommit: gitState.commit,
     deployedAt: new Date().toISOString(),
     contractClassification: "INTENTIONALLY_FROZEN",
   };
   await verifyDeployment(client, manifest, { repoRoot });
-  const path = deploymentManifestPath(repoRoot, network);
+  const path = deploymentManifestPath(repoRoot, {
+    network,
+    contractVersion: "V3",
+    contractAddress,
+    deploymentArtifactSha256,
+  });
   await atomicWriteJson(path, manifest);
   return manifest;
 }

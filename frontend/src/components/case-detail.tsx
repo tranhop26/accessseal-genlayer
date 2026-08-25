@@ -40,6 +40,7 @@ import { Button } from "./ui/button";
 import styles from "./cases/case-detail.module.css";
 import {
   hasAuthoritativeEvidenceSeal,
+  isImmediatelyReviewableEvidenceSeal,
   matchesPendingCloseEvidenceContext,
   parseReviewTxBinding,
   parsePendingCloseEvidenceBinding,
@@ -310,6 +311,25 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     );
     return () => window.clearInterval(timer);
   }, []);
+  useEffect(() => {
+    if (
+      !data ||
+      data.case.lifecycle !== "EVIDENCE_OPEN" ||
+      data.case.evidenceSealed ||
+      data.case.evidenceCutoff === null ||
+      data.case.readAt === null
+    )
+      return;
+    const secondsUntilRefresh = Math.max(
+      1,
+      Math.min(60, data.case.evidenceCutoff - data.case.readAt + 1),
+    );
+    const timer = window.setTimeout(
+      () => void refresh(),
+      secondsUntilRefresh * 1_000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [data, refresh]);
   const actor = wallet.address?.toLowerCase();
   const isBuyer = actor === data?.case.buyer.toLowerCase();
   const isConnectedBuyer = wallet.status === "connected" && isBuyer;
@@ -603,10 +623,40 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     hasCompleteSealEvidence &&
     !!wallet.contract &&
     !hasMatchingPendingSeal;
-  const immediateReviewEligible =
+  const historicalEvidenceSeal =
     !!data && hasAuthoritativeEvidenceSeal(data.case);
-  const canRequestReview =
-    data?.case.lifecycle === "EVIDENCE_OPEN" || immediateReviewEligible;
+  const hardDeadlineReached =
+    !!data &&
+    data.case.createdAt !== null &&
+    data.case.readAt !== null &&
+    data.case.readAt >= data.case.createdAt + data.case.hardDeadline;
+  const immediateReviewEligible =
+    !!data && isImmediatelyReviewableEvidenceSeal(data.case) && !hardDeadlineReached;
+  const fallbackReviewEligible =
+    data?.case.lifecycle === "EVIDENCE_OPEN" &&
+    !data.case.evidenceSealed &&
+    data.case.evidenceCutoff !== null &&
+    data.case.readAt !== null &&
+    data.case.readAt > data.case.evidenceCutoff &&
+    !hardDeadlineReached;
+  const canRequestReview = immediateReviewEligible || fallbackReviewEligible;
+  const reviewActionAvailable =
+    (data?.case.lifecycle === "EVIDENCE_OPEN" && !data.case.evidenceSealed) ||
+    (data?.case.lifecycle === "EVIDENCE_SEALED" && historicalEvidenceSeal);
+  const fallbackReviewStatus = (() => {
+    if (hardDeadlineReached)
+      return "Finalized contract time confirms the case hard deadline has expired; review is unavailable and timeout recovery may apply.";
+    if (!data || data.case.lifecycle !== "EVIDENCE_OPEN" || data.case.evidenceSealed)
+      return null;
+    if (data.case.evidenceCutoff === null || data.case.readAt === null)
+      return "The contract did not provide an authoritative cutoff clock. Refresh finalized readback before requesting the fallback review path.";
+    const remaining = data.case.evidenceCutoff - data.case.readAt;
+    if (remaining > 0)
+      return `${remaining} second${remaining === 1 ? "" : "s"} until the evidence cutoff. Refresh readback when it elapses; the fallback review path remains disabled until a finalized contract time confirms time after the cutoff.`;
+    if (remaining === 0)
+      return "Evidence cutoff reached; confirming with a finalized contract time after the cutoff before enabling the fallback review path.";
+    return "Finalized contract time confirms the evidence cutoff has passed; the fallback review path is available.";
+  })();
   const canCure =
     !!isVendor &&
     finalized &&
@@ -625,7 +675,14 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       !!data.reviewAttempt &&
       data.reviewAttempt.attempt >= data.case.maxUnresolvedRetries) ||
       (data.review?.verdict === "REQUEST_MORE_INFO" && data.case.epoch > 0));
-  const canTimeout = false;
+  const canTimeout =
+    !!data &&
+    data.case.createdAt !== null &&
+    data.case.readAt !== null &&
+    data.case.readAt > data.case.createdAt + data.case.hardDeadline &&
+    ["FUNDED", "EVIDENCE_OPEN", "EVIDENCE_SEALED"].includes(
+      data.case.lifecycle,
+    );
   const canPrepareSettlement =
     !data?.settlement &&
     !!finalized &&
@@ -671,7 +728,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       );
   }
   function requestReview() {
-    if (wallet.contract)
+    if (wallet.contract && canRequestReview)
       void run(() => wallet.contract!.requestReview(caseId), true);
   }
   function closeEvidence() {
@@ -1147,7 +1204,10 @@ export function CaseDetail({ caseId }: { caseId: string }) {
             {expiredSealEvidenceTypes.length > 0 && (
               <p className={styles.inlineState}>
                 Expired evidence types: {expiredSealEvidenceTypes.join(", ")}.
-                Replace them with fresh current-epoch evidence before closing.
+                They cannot be replaced in this epoch because duplicate evidence
+                types are rejected. Wait for cutoff review; if review requests
+                more information, use the bounded cure/new epoch. Use timeout
+                recovery only when the hard-deadline path applies.
               </p>
             )}
             {hasCompleteSealEvidence && !wallet.contract && (
@@ -1182,7 +1242,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
             )}
           </section>
         )}
-        {immediateReviewEligible && (
+        {historicalEvidenceSeal && (
           <section
             className={styles.actionCard}
             aria-labelledby="sealed-evidence-title"
@@ -1192,7 +1252,9 @@ export function CaseDetail({ caseId }: { caseId: string }) {
             <p>
               The buyer sealed this epoch at{" "}
               {new Date(data.case.evidenceSealedAt * 1000).toISOString()}. A
-              review may now be requested without waiting for the cutoff.
+              {immediateReviewEligible
+                ? " A review may now be requested without waiting for the cutoff."
+                : " The sealed evidence remains part of this case's authoritative history."}
             </p>
             <dl className={styles.compactDl}>
               <div>
@@ -1224,16 +1286,16 @@ export function CaseDetail({ caseId }: { caseId: string }) {
             <p>Review finality, appeal provenance, and guarded recovery.</p>
           </div>
         </header>
-        {canRequestReview && (
+        {reviewActionAvailable && (
           <section className={styles.actionCard}>
             <span className={styles.eyebrow}>Semantic review</span>
             <h3>Request validator consensus</h3>
             <p>
               {immediateReviewEligible
                 ? "The authoritative seal makes review eligible now."
-                : "If the buyer does not seal, the contract evidence cutoff remains the fallback review path."}
+                : fallbackReviewStatus}
             </p>
-            <Button disabled={writeBusy} onClick={requestReview}>
+            <Button disabled={writeBusy || !canRequestReview} onClick={requestReview}>
               Request intelligent review
             </Button>
           </section>
@@ -1242,6 +1304,18 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           <p className={styles.inlineState}>
             No review decision is available for the authoritative case epoch.
           </p>
+        )}
+        {!data.review && canTimeout && (
+          <RecoveryPanel
+            canCure={false}
+            canExpire={false}
+            canRetry={false}
+            canTimeout={canTimeout}
+            onCure={startCure}
+            onExpire={expireUnresolved}
+            onRetry={retryReview}
+            onTimeout={timeoutRefund}
+          />
         )}
         {data.review && data.reviewFinality && (
           <>

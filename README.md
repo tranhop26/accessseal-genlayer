@@ -126,14 +126,14 @@ npm run contract:check
 
 The artifact is generated with pinned `python-minifier==3.2.0`, preserves the exact dependency header, annotations, public/global names, storage and ABI, and must remain at most 48,000 UTF-8 bytes. It must never be hand-edited. Root lint, tests, integration, and build reject a missing or stale artifact; GenVM lint/schema parity and the full direct suite run against the deployed artifact.
 
-The production deployment entrypoint is `deploy/001_deploy_access_seal.ts`. Its GenLayer client must have an environment-provided signer and the requested exact chain identity. It refuses a dirty repository or stale artifact, deploys only the compact artifact, waits for `FINALIZED` plus `FINISHED_WITH_RETURN`, and writes a v2 manifest-format ignored record only after verifying the readable-source hash, deployed-artifact hash, schema, frozen interface, address, transaction, and finalized accounting.
+The production deployment entrypoint is `deploy/001_deploy_access_seal.ts`. Its GenLayer client must have an environment-provided signer and the requested exact chain identity. It refuses a dirty repository or stale artifact, preflights the V3 manifest destination before submitting a deployment, deploys only the compact artifact, waits for `FINALIZED` plus `FINISHED_WITH_RETURN`, and writes an ignored V3 record only after verifying the readable-source hash, deployed-artifact hash, schema, frozen interface, address, transaction, and finalized accounting.
 
 AccessSeal V3 is a new frozen contract deployment: deploy it at a new address, record that address and its V3 source/schema readback in a new manifest, and configure clients only after that readback. V2 cases, evidence, review/settlement IDs, storage, and balances do not migrate into V3; each user must use the recovery path encoded by V2 or explicitly create a new V3 case.
 
-After a deployment manifest exists at `work/deployments/<network>.json`, perform independent readback:
+V3 manifests are kept beside, never in place of, historical V2 records at `work/deployments/<network>/v3/<deployment-artifact-sha256>/<contract-address>.json`. Perform independent readback against the exact V3 address:
 
 ```powershell
-npm run verify:deployment -- --network testnet_bradbury
+npm run verify:deployment -- --network testnet_bradbury --contract-address <V3_CONTRACT_ADDRESS>
 ```
 
 The verifier re-fetches the deployment transaction and requires exact clean `HEAD`, deterministic artifact regeneration, both tracked source hashes, deployed artifact bytes, schema hash, contract address, finality, execution, frozen schema, and `latest-final` accounting conservation. `sourceSha256` remains an exact alias of `deploymentArtifactSha256`; contradictory values are rejected.

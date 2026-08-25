@@ -1225,8 +1225,11 @@ class AccessSeal(gl.Contract):
                 "caseId": case_id,
                 "chainId": int(self.chain_ids[case_id]),
                 "contractAddress": self.contract_addresses[case_id],
+                "createdAt": int(self.created_at_by_case[case_id]),
                 "escrowAmount": int(self.escrow_amounts[case_id]),
                 "evidenceDeadline": int(self.evidence_deadlines[case_id]),
+                "evidenceCutoff": int(self.created_at_by_case[case_id])
+                + int(self.evidence_deadlines[case_id]),
                 "evidenceSealed": self.evidence_sealed[epoch_key],
                 "evidenceSealedAt": int(self.evidence_sealed_at[epoch_key]),
                 "evidenceSealedBy": self._address_text(
@@ -1240,6 +1243,7 @@ class AccessSeal(gl.Contract):
                     self.max_unresolved_retries_by_case[case_id]
                 ),
                 "profileHash": self.profile_hashes[case_id],
+                "readAt": int(self._now()),
                 "reserved": int(self.reserved_by_case[case_id]),
                 "salt": self.salts[case_id],
                 "subjectOrigin": self.subject_origins[case_id],

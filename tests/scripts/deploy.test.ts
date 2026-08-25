@@ -86,6 +86,15 @@ function manifest(overrides: Partial<DeploymentManifest> = {}): DeploymentManife
   };
 }
 
+function v3ManifestPath(value: DeploymentManifest): string {
+  return deploymentManifestPath(fixtureRepoRoot, {
+    network: value.network,
+    contractVersion: "V3",
+    contractAddress: value.contractAddress,
+    deploymentArtifactSha256: value.deploymentArtifactSha256,
+  });
+}
+
 function client(overrides: Partial<DeploymentClient> = {}): DeploymentClient {
   return {
     chain: { id: 61999, name: "Genlayer Studio Network" },
@@ -178,9 +187,77 @@ test("accepts only canonical network names and keeps manifest paths contained", 
     assert.throws(() => validateNetworkName(value), /network/i);
   }
   assert.equal(
-    deploymentManifestPath("C:\\repo", "studionet"),
-    join("C:\\repo", "work", "deployments", "studionet.json"),
+    deploymentManifestPath("C:\\repo", {
+      network: "studionet",
+      contractVersion: "V3",
+      contractAddress: address,
+      deploymentArtifactSha256: sourceHash(artifactSource),
+    }),
+    join(
+      "C:\\repo",
+      "work",
+      "deployments",
+      "studionet",
+      "v3",
+      sourceHash(artifactSource),
+      `${address}.json`,
+    ),
   );
+});
+
+test("writes V3 beside the historical V2 network manifest without changing V2 bytes", async () => {
+  const legacyPath = join(fixtureRepoRoot, "work", "deployments", "studionet.json");
+  const legacyBytes = '{"contractVersion":"V2","historical":true}\n';
+  await mkdir(join(fixtureRepoRoot, "work", "deployments"), { recursive: true });
+  await writeFile(legacyPath, legacyBytes);
+
+  const result = await deployAccessSeal(client(), {
+    network: "studionet",
+    repoRoot: fixtureRepoRoot,
+  });
+  const v3Path = deploymentManifestPath(fixtureRepoRoot, {
+    network: result.network,
+    contractVersion: "V3",
+    contractAddress: result.contractAddress,
+    deploymentArtifactSha256: result.deploymentArtifactSha256,
+  });
+
+  assert.equal(await readFile(legacyPath, "utf8"), legacyBytes);
+  assert.notEqual(v3Path, legacyPath);
+  assert.deepEqual(JSON.parse(await readFile(v3Path, "utf8")), result);
+  assert.equal((result as unknown as Record<string, unknown>).contractVersion, "V3");
+});
+
+test("preflights the V3 manifest destination before calling deployContract", async () => {
+  const artifactHash = sourceHash(artifactSource);
+  const versionDirectory = join(
+    fixtureRepoRoot,
+    "work",
+    "deployments",
+    "studionet",
+    "v3",
+    artifactHash,
+  );
+  await rm(versionDirectory, { recursive: true, force: true });
+  await mkdir(join(versionDirectory, ".."), { recursive: true });
+  await writeFile(versionDirectory, "blocks destination directory\n");
+  let deployCalls = 0;
+  const deployContract = async () => {
+    deployCalls += 1;
+    return txHash;
+  };
+  try {
+    await assert.rejects(
+      deployAccessSeal(client({ deployContract }), {
+        network: "studionet",
+        repoRoot: fixtureRepoRoot,
+      }),
+      /manifest destination preflight/i,
+    );
+    assert.equal(deployCalls, 0);
+  } finally {
+    await rm(versionDirectory, { force: true });
+  }
 });
 
 test("requires one explicit canonical network for the standalone verifier", () => {
@@ -210,7 +287,7 @@ test("normalizes the pinned simplified receipt and both official address shapes"
     );
     assert.equal(result.contractAddress, address);
     assert.deepEqual(
-      JSON.parse(await readFile(deploymentManifestPath(fixtureRepoRoot, "studionet"), "utf8")),
+      JSON.parse(await readFile(v3ManifestPath(result), "utf8")),
       result,
     );
   }
@@ -381,7 +458,7 @@ test("public deployment independently rejects non-repository and dirty worktrees
 });
 
 test("does not write a manifest when authoritative readback fails", async () => {
-  const path = deploymentManifestPath(fixtureRepoRoot, "studionet");
+  const path = v3ManifestPath(manifest());
   await rm(path, { force: true });
   await assert.rejects(
     deployAccessSeal(

@@ -1568,7 +1568,11 @@ def test_sealed_review_rejects_exact_hard_deadline_without_state_changes(
 
     assert before_case["lifecycle"] == "EVIDENCE_SEALED"
     assert before_case["evidenceSealed"] is True
-    assert contract.get_case_json(case_id) == before_case
+    after_case = contract.get_case_json(case_id)
+    assert after_case["readAt"] > before_case["readAt"]
+    assert {key: value for key, value in after_case.items() if key != "readAt"} == {
+        key: value for key, value in before_case.items() if key != "readAt"
+    }
     assert json.loads(contract.get_evidence(case_id, 0)) == before_evidence
     assert json.loads(contract.get_accounting()) == before_accounting
 
