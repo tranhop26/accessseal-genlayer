@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFile, link, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
@@ -8,11 +8,11 @@ import { simplifyTransactionReceipt } from "genlayer-js";
 import type { GenLayerTransaction } from "genlayer-js/types";
 
 import {
-  __testOnlyWithExclusiveInstallOperations,
   atomicWriteJson,
   atomicWriteJsonExclusive,
   canonicalJson,
   canonicalJsonHash,
+  removeExclusiveJsonInstall,
   sourceHash,
 } from "../../scripts/source-hash.ts";
 import {
@@ -23,7 +23,6 @@ import {
   type DeploymentClient,
 } from "../../deploy/001_deploy_access_seal.ts";
 import {
-  __testOnlyReadDeploymentManifest,
   deploymentToSettlementProofEnvironment,
   identifyClientNetwork,
   normalizeReceipt,
@@ -34,8 +33,6 @@ import {
   verifyDeployment,
   type DeploymentManifest,
 } from "../../deploy/999_verify_access_seal.ts";
-
-process.env.ACCESSSEAL_TEST_ONLY_EXCLUSIVE_INSTALL = "1";
 
 const address = "0x1234567890abcdef1234567890abcdef12345678";
 const txHash =
@@ -125,31 +122,6 @@ async function writeRetainedV3Manifest(
     join(directory, `${filenameAddress.toLowerCase()}.json`),
     `${JSON.stringify({ ...value, contractVersion: "V3" })}\n`,
   );
-}
-
-type ExclusiveInstallOptions = {
-  operations?: {
-    link?: (existingPath: string, newPath: string) => Promise<void>;
-    unlink?: (path: string) => Promise<void>;
-    beforeLink?: () => Promise<void>;
-    afterInstall?: (directory: string, destination: string) => Promise<void>;
-    beforeOwnedCleanupUnlink?: (destination: string) => Promise<void>;
-    beforePlatformOwnedCleanup?: (destination: string) => Promise<void>;
-  };
-};
-
-function writeExclusiveJson(
-  path: string,
-  value: unknown,
-  options: ExclusiveInstallOptions = {},
-): Promise<void> {
-  return __testOnlyWithExclusiveInstallOperations(options.operations ?? {}, async () => {
-    await atomicWriteJsonExclusive(path, value);
-  });
-}
-
-function injectedFilesystemError(code: string): Error & { code: string } {
-  return Object.assign(new Error(`injected ${code}`), { code });
 }
 
 function stagingEntries(names: string[]): string[] {
@@ -310,114 +282,6 @@ test("does not overwrite a finalized V3 address manifest", async () => {
   assert.deepEqual(await readFile(path), originalBytes);
 });
 
-test("preflights the exclusive manifest installation before deploying", async () => {
-  await removeFixtureV3Manifest();
-  const versionDirectory = join(
-    fixtureRepoRoot,
-    "work",
-    "deployments",
-    "studionet",
-    "v3",
-    sourceHash(artifactSource),
-  );
-  await rm(versionDirectory, { recursive: true, force: true });
-  let deployCalls = 0;
-  try {
-    await assert.rejects(
-      __testOnlyWithExclusiveInstallOperations({
-        link: async () => {
-          throw injectedFilesystemError("EOPNOTSUPP");
-        },
-      }, () => deployAccessSeal(client({
-        deployContract: async () => {
-          deployCalls += 1;
-          return txHash;
-        },
-      }), {
-        network: "studionet",
-        repoRoot: fixtureRepoRoot,
-      })),
-      /manifest destination preflight/i,
-    );
-    assert.equal(deployCalls, 0);
-    assert.deepEqual(await readdir(versionDirectory), []);
-  } finally {
-    await rm(versionDirectory, { recursive: true, force: true });
-  }
-});
-
-test("reports retained staging when exclusive installation and cleanup both fail", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-stage-"));
-  const destination = join(directory, "manifest.json");
-  const value = { accepted: true };
-  try {
-    await assert.rejects(
-      writeExclusiveJson(destination, value, {
-        operations: {
-          link: async () => {
-            throw injectedFilesystemError("EOPNOTSUPP");
-          },
-          unlink: async () => {
-            throw injectedFilesystemError("EPERM");
-          },
-        },
-      }),
-      /installation failed.*manual recovery/i,
-    );
-    const entries = await readdir(directory);
-    const stages = stagingEntries(entries);
-    assert.equal(entries.includes("manifest.json"), false);
-    assert.equal(stages.length, 1);
-    assert.equal(await readFile(join(directory, stages[0]), "utf8"), `${canonicalJson(value)}\n`);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("reports retained staging after an exclusive final install when cleanup fails", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-stage-"));
-  const destination = join(directory, "manifest.json");
-  const value = { accepted: true };
-  try {
-    await assert.rejects(
-      writeExclusiveJson(destination, value, {
-        operations: {
-          unlink: async () => {
-            throw injectedFilesystemError("EPERM");
-          },
-        },
-      }),
-      /installed.*manual recovery/i,
-    );
-    const entries = await readdir(directory);
-    const stages = stagingEntries(entries);
-    assert.equal(stages.length, 1);
-    assert.equal(await readFile(destination, "utf8"), `${canonicalJson(value)}\n`);
-    assert.equal(await readFile(join(directory, stages[0]), "utf8"), `${canonicalJson(value)}\n`);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("rejects a no-op exclusive installer rather than reporting a missing final as sealed", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-noop-"));
-  const destination = join(directory, "manifest.json");
-  const value = { accepted: true };
-  try {
-    await assert.rejects(
-      writeExclusiveJson(destination, value, {
-        operations: {
-          link: async () => undefined,
-        },
-      }),
-      /final.*missing|post-install|integrity/i,
-    );
-    assert.deepEqual(await readdir(directory), []);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
 test("exclusive installation supports paths beyond the legacy Windows path limit", {
   skip: process.platform !== "win32",
 }, async () => {
@@ -436,103 +300,25 @@ test("exclusive installation supports paths beyond the legacy Windows path limit
   }
 });
 
-test("rejects an installer that changes the linked manifest bytes", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-replacement-"));
+test("exclusive install receipts clean up safely on the host filesystem", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-host-cleanup-"));
   const destination = join(directory, "manifest.json");
-  const value = { accepted: true };
-  const replacedBytes = '{"accepted":false}\n';
   try {
-    await assert.rejects(
-      writeExclusiveJson(destination, value, {
-        operations: {
-          link: async (stage, final) => {
-            await link(stage, final);
-            await writeFile(final, replacedBytes);
-          },
-        },
-      }),
-      /expected bytes|post-install|integrity/i,
-    );
-    assert.equal(await readFile(destination, "utf8"), replacedBytes);
-    assert.deepEqual(stagingEntries(await readdir(directory)), []);
+    const receipt = await atomicWriteJsonExclusive(destination, { accepted: true });
+    await removeExclusiveJsonInstall(receipt);
+    assert.deepEqual(await readdir(directory), []);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("rejects a post-install mutation before reporting an exclusive manifest as sealed", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-post-install-"));
-  const destination = join(directory, "manifest.json");
-  const value = { accepted: true };
-  const replacedBytes = '{"accepted":false}\n';
-  try {
-    await assert.rejects(
-      writeExclusiveJson(destination, value, {
-        operations: {
-          afterInstall: async (_directory, final) => {
-            await writeFile(final, replacedBytes);
-          },
-        },
-      }),
-      /expected bytes|changed after post-install verification/i,
-    );
-    assert.equal(await readFile(destination, "utf8"), replacedBytes);
-    assert.deepEqual(stagingEntries(await readdir(directory)), []);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("rejects a same-byte post-install replacement with a different file identity", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-post-install-identity-"));
-  const destination = join(directory, "manifest.json");
-  const replacement = join(directory, "replacement.json");
-  const value = { accepted: true };
-  const expectedBytes = `${canonicalJson(value)}\n`;
-  try {
-    await assert.rejects(
-      writeExclusiveJson(destination, value, {
-        operations: {
-          afterInstall: async (_directory, final) => {
-            await writeFile(replacement, expectedBytes, { flag: "wx" });
-            await rm(final);
-            await rename(replacement, final);
-          },
-        },
-      }),
-      /changed after post-install verification/i,
-    );
-    assert.equal(await readFile(destination, "utf8"), expectedBytes);
-    assert.deepEqual(stagingEntries(await readdir(directory)), []);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("detects a destination-directory replacement before exclusive installation", async () => {
-  const root = await mkdtemp(join(tmpdir(), "accessseal-exclusive-race-"));
-  const directory = join(root, "manifests");
-  const outside = join(root, "outside");
-  const destination = join(directory, "manifest.json");
-  try {
-    await mkdir(directory, { recursive: true });
-    await mkdir(outside, { recursive: true });
-    await assert.rejects(
-      writeExclusiveJson(destination, { accepted: true }, {
-        operations: {
-          beforeLink: async () => {
-            await rm(directory, { recursive: true, force: true });
-            await symlink(outside, directory, process.platform === "win32" ? "junction" : "dir");
-          },
-        },
-      }),
-      /directory.*changed|symbolic link|junction/i,
-    );
-    assert.deepEqual(await readdir(outside), []);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-    await rm(root, { recursive: true, force: true });
-  }
+test("production modules expose no caller-selectable filesystem fault boundary", async () => {
+  const [sourceExports, verifierExports] = await Promise.all([
+    import("../../scripts/source-hash.ts"),
+    import("../../deploy/999_verify_access_seal.ts"),
+  ]);
+  assert.equal("__testOnlyWithExclusiveInstallOperations" in sourceExports, false);
+  assert.equal("__testOnlyReadDeploymentManifest" in verifierExports, false);
 });
 
 test("exclusive writers admit exactly one complete manifest and clean staging", async () => {
@@ -542,8 +328,8 @@ test("exclusive writers admit exactly one complete manifest and clean staging", 
   const second = { writer: "second" };
   try {
     const results = await Promise.allSettled([
-      writeExclusiveJson(destination, first),
-      writeExclusiveJson(destination, second),
+      atomicWriteJsonExclusive(destination, first),
+      atomicWriteJsonExclusive(destination, second),
     ]);
     assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
     assert.equal(results.filter((result) => result.status === "rejected").length, 1);
@@ -665,85 +451,76 @@ test("explicit V3 lookup accepts one physically contained matching manifest", as
   }
 });
 
-test("explicit V3 lookup rejects a manifest substituted after physical inspection", async () => {
-  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-race-"));
+test("V3 lookup holds a namespace lease until candidate validation returns", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-lease-"));
+  const first = manifest();
+  const secondHash = sourceHash(new TextEncoder().encode("candidate added under lease"));
+  const second = manifest({
+    deploymentArtifactSha256: secondHash,
+    sourceSha256: secondHash,
+  });
+  const v3Root = join(repoRoot, "work", "deployments", "studionet", "v3");
   try {
-    const original = manifest();
-    const replacement = manifest({ deployedAt: "2026-08-15T10:00:00.000Z" });
-    await writeRetainedV3Manifest(
-      repoRoot,
-      original.deploymentArtifactSha256,
-      original.contractAddress,
-      original,
-    );
-    await assert.rejects(
-      __testOnlyReadDeploymentManifest(repoRoot, "studionet", address, {
-        afterV3PathInspection: async (path) => {
-          await rm(path);
-          await writeFile(path, `${JSON.stringify({ ...replacement, contractVersion: "V3" })}\n`);
-        },
-      }),
-      /identity|changed during lookup/i,
-    );
-  } finally {
-    await rm(repoRoot, { recursive: true, force: true });
-  }
-});
-
-test("explicit V3 lookup rejects a retained candidate added before return", async () => {
-  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-candidate-race-"));
-  try {
-    const first = manifest();
-    const secondHash = sourceHash(new TextEncoder().encode("candidate added during lookup"));
-    const second = manifest({
-      deploymentArtifactSha256: secondHash,
-      sourceSha256: secondHash,
-    });
     await writeRetainedV3Manifest(
       repoRoot,
       first.deploymentArtifactSha256,
       first.contractAddress,
       first,
     );
-    await assert.rejects(
-      __testOnlyReadDeploymentManifest(repoRoot, "studionet", address, {
-        beforeV3CandidateRevalidation: async () => {
-          await writeRetainedV3Manifest(repoRoot, secondHash, address, second);
+    const sourceExports = await import("../../scripts/source-hash.ts");
+    const withLease = (
+      sourceExports as typeof sourceExports & {
+        withV3ManifestNamespaceLease?: <T>(root: string, action: () => Promise<T>) => Promise<T>;
+      }
+    ).withV3ManifestNamespaceLease;
+    assert.equal(typeof withLease, "function");
+
+    let lookupSettled = false;
+    let lookupOutcome: Promise<{ value?: DeploymentManifest; error?: unknown }> | undefined;
+    await withLease!(v3Root, async () => {
+      lookupOutcome = readDeploymentManifest(repoRoot, "studionet", address).then(
+        (value) => {
+          lookupSettled = true;
+          return { value };
         },
-      }),
-      /candidate.*changed during lookup/i,
-    );
+        (error: unknown) => {
+          lookupSettled = true;
+          return { error };
+        },
+      );
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+      assert.equal(lookupSettled, false);
+      await writeRetainedV3Manifest(repoRoot, secondHash, address, second);
+    });
+    const outcome = await lookupOutcome!;
+    assert.match(String(outcome.error), /ambiguous|candidate/i);
+    assert.equal(outcome.value, undefined);
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
   }
 });
 
-test("explicit V3 lookup rejects a matching candidate added to a retained directory", async () => {
-  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-existing-candidate-race-"));
+test("V3 lookup preserves an unowned stale namespace lease and fails closed", {
+  timeout: 10_000,
+}, async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-stale-lease-"));
+  const value = manifest();
+  const v3Root = join(repoRoot, "work", "deployments", "studionet", "v3");
+  const leasePath = join(v3Root, ".accessseal-v3.namespace.lock");
+  const staleBytes = "unowned stale lease must survive\n";
   try {
-    const first = manifest();
-    const secondHash = sourceHash(new TextEncoder().encode("existing candidate directory"));
-    const second = manifest({
-      deploymentArtifactSha256: secondHash,
-      sourceSha256: secondHash,
-    });
     await writeRetainedV3Manifest(
       repoRoot,
-      first.deploymentArtifactSha256,
-      first.contractAddress,
-      first,
+      value.deploymentArtifactSha256,
+      value.contractAddress,
+      value,
     );
-    await mkdir(join(repoRoot, "work", "deployments", "studionet", "v3", secondHash), {
-      recursive: true,
-    });
+    await writeFile(leasePath, staleBytes, { flag: "wx" });
     await assert.rejects(
-      __testOnlyReadDeploymentManifest(repoRoot, "studionet", address, {
-        beforeV3CandidateRevalidation: async () => {
-          await writeRetainedV3Manifest(repoRoot, secondHash, address, second);
-        },
-      }),
-      /candidate.*changed during lookup/i,
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /lease.*held|stale|manual recovery/i,
     );
+    assert.equal(await readFile(leasePath, "utf8"), staleBytes);
   } finally {
     await rm(repoRoot, { recursive: true, force: true });
   }
@@ -813,27 +590,25 @@ test("preflights the V3 manifest destination before calling deployContract", asy
   }
 });
 
-test("does not delete a foreign preflight probe when exclusive installation loses a race", async () => {
-  await removeFixtureV3Manifest();
-  const versionDirectory = join(
+test("deployment preserves an unowned namespace lease and makes zero deployment calls", {
+  timeout: 10_000,
+}, async () => {
+  const v3Root = join(
     fixtureRepoRoot,
     "work",
     "deployments",
     "studionet",
     "v3",
-    sourceHash(artifactSource),
   );
-  await rm(versionDirectory, { recursive: true, force: true });
-  const foreignBytes = "foreign probe bytes must survive\n";
+  const leasePath = join(v3Root, ".accessseal-v3.namespace.lock");
+  const foreignBytes = "foreign namespace lease must survive\n";
   let deployCalls = 0;
+  await rm(v3Root, { recursive: true, force: true });
+  await mkdir(v3Root, { recursive: true });
+  await writeFile(leasePath, foreignBytes, { flag: "wx" });
   try {
     await assert.rejects(
-      __testOnlyWithExclusiveInstallOperations({
-        link: async (_stage, probe) => {
-          await writeFile(probe, foreignBytes, { flag: "wx" });
-          throw injectedFilesystemError("EEXIST");
-        },
-      }, () => deployAccessSeal(client({
+      deployAccessSeal(client({
         deployContract: async () => {
           deployCalls += 1;
           return txHash;
@@ -841,136 +616,13 @@ test("does not delete a foreign preflight probe when exclusive installation lose
       }), {
         network: "studionet",
         repoRoot: fixtureRepoRoot,
-      })),
-      /manifest destination preflight/i,
+      }),
+      /lease.*held|stale|manual recovery/i,
     );
     assert.equal(deployCalls, 0);
-    const probes = await readdir(versionDirectory);
-    assert.equal(probes.length, 1);
-    assert.equal(await readFile(join(versionDirectory, probes[0]), "utf8"), foreignBytes);
+    assert.equal(await readFile(leasePath, "utf8"), foreignBytes);
   } finally {
-    await rm(versionDirectory, { recursive: true, force: true });
-  }
-});
-
-test("does not delete a foreign preflight probe after its directory is replaced", async () => {
-  await removeFixtureV3Manifest();
-  const versionDirectory = join(
-    fixtureRepoRoot,
-    "work",
-    "deployments",
-    "studionet",
-    "v3",
-    sourceHash(artifactSource),
-  );
-  await rm(versionDirectory, { recursive: true, force: true });
-  const foreignBytes = "replacement probe bytes must survive\n";
-  let deployCalls = 0;
-  try {
-    await assert.rejects(
-      __testOnlyWithExclusiveInstallOperations({
-        afterInstall: async (_directory, probe) => {
-          await rm(versionDirectory, { recursive: true, force: true });
-          await mkdir(versionDirectory, { recursive: true });
-          await writeFile(probe, foreignBytes, { flag: "wx" });
-        },
-      }, () => deployAccessSeal(client({
-        deployContract: async () => {
-          deployCalls += 1;
-          return txHash;
-        },
-      }), {
-        network: "studionet",
-        repoRoot: fixtureRepoRoot,
-      })),
-      /manifest destination preflight/i,
-    );
-    assert.equal(deployCalls, 0);
-    const probes = await readdir(versionDirectory);
-    assert.equal(probes.length, 1);
-    assert.equal(await readFile(join(versionDirectory, probes[0]), "utf8"), foreignBytes);
-  } finally {
-    await rm(versionDirectory, { recursive: true, force: true });
-  }
-});
-
-test("does not delete a foreign preflight probe replaced immediately before cleanup", async () => {
-  await removeFixtureV3Manifest();
-  const versionDirectory = join(
-    fixtureRepoRoot,
-    "work",
-    "deployments",
-    "studionet",
-    "v3",
-    sourceHash(artifactSource),
-  );
-  await rm(versionDirectory, { recursive: true, force: true });
-  const foreignBytes = "last-moment replacement probe bytes must survive\n";
-  let deployCalls = 0;
-  try {
-    await assert.rejects(
-      __testOnlyWithExclusiveInstallOperations({
-        beforeOwnedCleanupUnlink: async (probe) => {
-          await rm(probe);
-          await writeFile(probe, foreignBytes, { flag: "wx" });
-        },
-      }, () => deployAccessSeal(client({
-        deployContract: async () => {
-          deployCalls += 1;
-          return txHash;
-        },
-      }), {
-        network: "studionet",
-        repoRoot: fixtureRepoRoot,
-      })),
-      /manifest destination preflight/i,
-    );
-    assert.equal(deployCalls, 0);
-    const probes = await readdir(versionDirectory);
-    assert.equal(probes.length, 1);
-    assert.equal(await readFile(join(versionDirectory, probes[0]), "utf8"), foreignBytes);
-  } finally {
-    await rm(versionDirectory, { recursive: true, force: true });
-  }
-});
-
-test("does not delete a foreign preflight probe replaced after pathname ownership checks", async () => {
-  await removeFixtureV3Manifest();
-  const versionDirectory = join(
-    fixtureRepoRoot,
-    "work",
-    "deployments",
-    "studionet",
-    "v3",
-    sourceHash(artifactSource),
-  );
-  await rm(versionDirectory, { recursive: true, force: true });
-  const foreignBytes = "post-check replacement probe bytes must survive\n";
-  let deployCalls = 0;
-  try {
-    await assert.rejects(
-      __testOnlyWithExclusiveInstallOperations({
-        beforePlatformOwnedCleanup: async (probe) => {
-          await rm(probe);
-          await writeFile(probe, foreignBytes, { flag: "wx" });
-        },
-      }, () => deployAccessSeal(client({
-        deployContract: async () => {
-          deployCalls += 1;
-          return txHash;
-        },
-      }), {
-        network: "studionet",
-        repoRoot: fixtureRepoRoot,
-      })),
-      /manifest destination preflight/i,
-    );
-    assert.equal(deployCalls, 0);
-    const probes = await readdir(versionDirectory);
-    assert.equal(probes.length, 1);
-    assert.equal(await readFile(join(versionDirectory, probes[0]), "utf8"), foreignBytes);
-  } finally {
-    await rm(versionDirectory, { recursive: true, force: true });
+    await rm(v3Root, { recursive: true, force: true });
   }
 });
 

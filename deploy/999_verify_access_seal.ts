@@ -9,6 +9,7 @@ import {
   assertSafeRegularFile,
   canonicalJsonHash,
   sourceHash,
+  withV3ManifestNamespaceLease,
 } from "../scripts/source-hash.ts";
 import { canonicalU256, parseLosslessJsonObject } from "../scripts/u256.ts";
 
@@ -401,34 +402,10 @@ type V3RequestedManifest = {
   identity: FileIdentity;
 };
 
-export type TestOnlyV3LookupHooks = {
-  afterV3PathInspection?: (path: string) => Promise<void>;
-  beforeV3CandidateRevalidation?: () => Promise<void>;
-};
-
 export async function readDeploymentManifest(
   repoRoot: string,
   network: NetworkName,
   contractAddress?: string,
-): Promise<DeploymentManifest> {
-  return readDeploymentManifestInternal(repoRoot, network, contractAddress);
-}
-
-/** Test-only race boundary. Public lookup always uses an empty hook set. */
-export async function __testOnlyReadDeploymentManifest(
-  repoRoot: string,
-  network: NetworkName,
-  contractAddress: string | undefined,
-  hooks: TestOnlyV3LookupHooks,
-): Promise<DeploymentManifest> {
-  return readDeploymentManifestInternal(repoRoot, network, contractAddress, hooks);
-}
-
-async function readDeploymentManifestInternal(
-  repoRoot: string,
-  network: NetworkName,
-  contractAddress?: string,
-  hooks: TestOnlyV3LookupHooks = {},
 ): Promise<DeploymentManifest> {
   const v3Root = resolve(
     repoRoot,
@@ -437,11 +414,23 @@ async function readDeploymentManifestInternal(
     network,
     "v3",
   );
+  return withV3ManifestNamespaceLease(
+    v3Root,
+    () => readDeploymentManifestUnderLease(repoRoot, network, v3Root, contractAddress),
+  );
+}
+
+async function readDeploymentManifestUnderLease(
+  repoRoot: string,
+  network: NetworkName,
+  v3Root: string,
+  contractAddress?: string,
+): Promise<DeploymentManifest> {
   const parseV3 = async (
     root: string,
     path: string,
   ): Promise<{ manifest: DeploymentManifest; identity: FileIdentity }> => {
-    const pinned = await readPinnedManifest(root, path, hooks.afterV3PathInspection);
+    const pinned = await readPinnedManifest(root, path);
     const manifest = validateDeploymentManifest(
       JSON.parse(pinned.body) as DeploymentManifest,
     );
@@ -497,7 +486,6 @@ async function readDeploymentManifestInternal(
         : "V3 deployment manifest is unavailable for the requested contract address",
       );
     }
-    await hooks.beforeV3CandidateRevalidation?.();
     const revalidated = await scanV3CandidateDirectories(v3Root);
     const revalidatedRequested = await scanV3RequestedManifests(revalidated, target);
     if (
@@ -559,10 +547,8 @@ async function readDeploymentManifestInternal(
 async function readPinnedManifest(
   root: string,
   path: string,
-  afterPathInspection?: (path: string) => Promise<void>,
 ): Promise<PinnedManifest> {
   const beforeOpen = await inspectPinnedManifestPath(root, path);
-  await afterPathInspection?.(path);
   const handle = await open(path, manifestReadFlags());
   try {
     const openedMetadata = await handle.stat({ bigint: true });

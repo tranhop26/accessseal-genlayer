@@ -7,6 +7,7 @@ import {
   canonicalJsonHash,
   removeExclusiveJsonInstall,
   sourceHash,
+  withV3ManifestNamespaceLease,
   type ExclusiveJsonInstallReceipt,
 } from "../scripts/source-hash.ts";
 import {
@@ -69,12 +70,18 @@ function deploymentManifestDirectory(
     throw new Error("deployment artifact source hash is invalid");
   }
   return join(
+    deploymentManifestV3Root(repoRoot, network),
+    deploymentArtifactSha256,
+  );
+}
+
+function deploymentManifestV3Root(repoRoot: string, network: string): string {
+  return join(
     repoRoot,
     "work",
     "deployments",
     validateNetworkName(network),
     "v3",
-    deploymentArtifactSha256,
   );
 }
 
@@ -156,10 +163,14 @@ export async function deployAccessSeal(
     throw new Error("contract source or deployment artifact bytes are missing");
   }
   const deploymentArtifactSha256 = sourceHash(deploymentArtifact);
-  await preflightV3ManifestDestination(
-    repoRoot,
-    network,
-    deploymentArtifactSha256,
+  const v3Root = deploymentManifestV3Root(repoRoot, network);
+  await withV3ManifestNamespaceLease(
+    v3Root,
+    () => preflightV3ManifestDestination(
+      repoRoot,
+      network,
+      deploymentArtifactSha256,
+    ),
   );
 
   const expectedSchema = await client.getContractSchemaForCode(deploymentArtifact);
@@ -207,7 +218,10 @@ export async function deployAccessSeal(
     contractAddress,
     deploymentArtifactSha256,
   });
-  await atomicWriteJsonExclusive(path, manifest);
+  await withV3ManifestNamespaceLease(
+    v3Root,
+    () => atomicWriteJsonExclusive(path, manifest),
+  );
   return manifest;
 }
 

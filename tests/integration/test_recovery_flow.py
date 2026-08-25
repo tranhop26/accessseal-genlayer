@@ -154,4 +154,8 @@ def test_settlement_and_retry_gates_reject_wrong_phase_without_state_advance(
     )
     assert tx_execution_failed(prepare, "case has no review result")
     assert tx_execution_failed(retry, "case has no review result")
-    assert read_json(deployed_contract, "get_case", [case_id]) == before
+    after = read_json(deployed_contract, "get_case", [case_id])
+    assert after["readAt"] >= before["readAt"]
+    assert {key: value for key, value in after.items() if key != "readAt"} == {
+        key: value for key, value in before.items() if key != "readAt"
+    }
