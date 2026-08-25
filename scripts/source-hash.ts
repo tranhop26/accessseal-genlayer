@@ -660,7 +660,7 @@ function acquirePosixAdvisoryLeaseWith(
     let settled = false;
     let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
-      if (ready || settled) return;
+      if (settled) return;
       child.kill("SIGTERM");
       forceKillTimer = setTimeout(() => {
         if (!settled) child.kill("SIGKILL");

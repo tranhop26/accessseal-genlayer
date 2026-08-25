@@ -100,3 +100,31 @@ test("POSIX deploy preflights the exact artifact directory before external deplo
   }
   assert.equal(result.status, 0, `POSIX exact-directory preflight regression failed:\n${diagnostic}`);
 });
+
+test("POSIX acquisition kills a helper that hangs after readiness", (context) => {
+  const relativeScript = "tests/scripts/support/posix-helper-hang.mts";
+  const script = resolve(relativeScript);
+  const args = [
+    "--experimental-test-module-mocks",
+    "--experimental-strip-types",
+    "--test",
+    process.platform === "win32" ? relativeScript : script,
+  ];
+  const result = process.platform === "win32"
+    ? spawnSync(
+        "wsl.exe",
+        ["-d", "Ubuntu", "--cd", process.cwd(), "--", "node", ...args],
+        { encoding: "utf8", windowsHide: true, timeout: 15_000 },
+      )
+    : spawnSync(process.execPath, args, { encoding: "utf8", timeout: 15_000 });
+  const diagnostic = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  if (
+    process.platform === "win32" &&
+    ((result.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" ||
+      /not installed|no distribution|WSL_E_DISTRO_NOT_FOUND/i.test(diagnostic))
+  ) {
+    context.skip("WSL Ubuntu is unavailable on this Windows host");
+    return;
+  }
+  assert.equal(result.status, 0, `POSIX post-ready helper timeout regression failed:\n${diagnostic}`);
+});

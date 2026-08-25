@@ -305,8 +305,17 @@ test("exclusive install receipts clean up safely on the host filesystem", async 
   const destination = join(directory, "manifest.json");
   try {
     const receipt = await atomicWriteJsonExclusive(destination, { accepted: true });
-    await removeExclusiveJsonInstall(receipt);
-    assert.deepEqual(await readdir(directory), []);
+    if (process.platform === "win32") {
+      await removeExclusiveJsonInstall(receipt);
+      assert.deepEqual(await readdir(directory), []);
+    } else {
+      await assert.rejects(
+        removeExclusiveJsonInstall(receipt),
+        /POSIX.*manual cleanup|manual recovery/i,
+      );
+      assert.equal(await readFile(destination, "utf8"), '{"accepted":true}\n');
+      assert.equal((await readdir(directory)).length, 2);
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
