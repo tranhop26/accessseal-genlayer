@@ -3,7 +3,12 @@ import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { canonicalJsonHash, sourceHash } from "../scripts/source-hash.ts";
+import {
+  assertRealDirectory,
+  assertSafeRegularFile,
+  canonicalJsonHash,
+  sourceHash,
+} from "../scripts/source-hash.ts";
 import { canonicalU256, parseLosslessJsonObject } from "../scripts/u256.ts";
 
 export const NETWORK_CHAIN_IDS = {
@@ -377,9 +382,12 @@ export async function readDeploymentManifest(
     network,
     "v3",
   );
-  const parseV3 = async (path: string): Promise<DeploymentManifest> => {
+  const parseV3 = async (root: string, path: string): Promise<DeploymentManifest> => {
+    await assertSafeRegularFile(root, path);
+    const body = await readFile(path, "utf8");
+    await assertSafeRegularFile(root, path);
     const manifest = validateDeploymentManifest(
-      JSON.parse(await readFile(path, "utf8")) as DeploymentManifest,
+      JSON.parse(body) as DeploymentManifest,
     );
     if ((manifest as { contractVersion?: unknown }).contractVersion !== "V3") {
       throw new Error("V3 deployment manifest contract version is invalid");
@@ -392,11 +400,13 @@ export async function readDeploymentManifest(
     }
     const target = `${contractAddress.toLowerCase()}.json`;
     let directories: Array<{ path: string; deploymentArtifactSha256: string }>;
+    let realV3Root: string;
     try {
-      directories = (await readdir(v3Root, { withFileTypes: true }))
-        .filter((entry) => entry.isDirectory() && HASH.test(entry.name))
+      realV3Root = await assertRealDirectory(v3Root);
+      directories = (await readdir(realV3Root, { withFileTypes: true }))
+        .filter((entry) => HASH.test(entry.name))
         .map((entry) => ({
-          path: resolve(v3Root, entry.name),
+          path: resolve(realV3Root, entry.name),
           deploymentArtifactSha256: entry.name,
         }));
     } catch (error) {
@@ -407,9 +417,10 @@ export async function readDeploymentManifest(
     }
     const matches = await Promise.all(
       directories.map(async (directory) => {
-        const path = resolve(directory.path, target);
+        const realDirectory = await assertRealDirectory(directory.path);
+        const path = resolve(realDirectory, target);
         try {
-          const manifest = await parseV3(path);
+          const manifest = await parseV3(realV3Root, path);
           if (manifest.contractAddress.toLowerCase() !== contractAddress.toLowerCase()) {
             throw new Error("V3 deployment manifest requested contract address mismatch");
           }
@@ -437,8 +448,10 @@ export async function readDeploymentManifest(
     await readFile(resolve(repoRoot, "contracts", "access_seal_deploy.py")),
   );
   const artifactHash = sourceHash(artifact);
-  const directory = resolve(v3Root, artifactHash);
+  let realV3Root: string;
   try {
+    realV3Root = await assertRealDirectory(v3Root);
+    const directory = await assertRealDirectory(resolve(realV3Root, artifactHash));
     const names = await readdir(directory);
     const candidates = names.filter((name) => /^0x[0-9a-f]{40}\.json$/.test(name));
     const selected = contractAddress
@@ -451,15 +464,16 @@ export async function readDeploymentManifest(
         "V3 deployment manifest is ambiguous; provide --contract-address for the exact deployment",
       );
     }
-    return await parseV3(resolve(directory, selected));
+    return await parseV3(realV3Root, resolve(directory, selected));
   } catch (error) {
     if (!(error instanceof Error) || !/ENOENT/.test(error.message)) throw error;
   }
-  return validateDeploymentManifest(
-    JSON.parse(
-      await readFile(resolve(repoRoot, "work", "deployments", `${network}.json`), "utf8"),
-    ) as DeploymentManifest,
-  );
+  const legacyDirectory = await assertRealDirectory(resolve(repoRoot, "work", "deployments"));
+  const legacyPath = resolve(legacyDirectory, `${network}.json`);
+  await assertSafeRegularFile(legacyDirectory, legacyPath);
+  const legacyBody = await readFile(legacyPath, "utf8");
+  await assertSafeRegularFile(legacyDirectory, legacyPath);
+  return validateDeploymentManifest(JSON.parse(legacyBody) as DeploymentManifest);
 }
 
 export default async function main(

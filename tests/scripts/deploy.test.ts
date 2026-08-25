@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
@@ -9,6 +9,8 @@ import type { GenLayerTransaction } from "genlayer-js/types";
 
 import {
   atomicWriteJson,
+  atomicWriteJsonExclusive,
+  canonicalJson,
   canonicalJsonHash,
   sourceHash,
 } from "../../scripts/source-hash.ts";
@@ -119,6 +121,34 @@ async function writeRetainedV3Manifest(
     join(directory, `${filenameAddress.toLowerCase()}.json`),
     `${JSON.stringify({ ...value, contractVersion: "V3" })}\n`,
   );
+}
+
+type ExclusiveInstallOptions = {
+  operations?: {
+    link?: (existingPath: string, newPath: string) => Promise<void>;
+    unlink?: (path: string) => Promise<void>;
+    beforeLink?: () => Promise<void>;
+  };
+};
+
+function writeExclusiveJson(
+  path: string,
+  value: unknown,
+  options: ExclusiveInstallOptions = {},
+): Promise<void> {
+  return (atomicWriteJsonExclusive as unknown as (
+    destination: string,
+    body: unknown,
+    controlled: ExclusiveInstallOptions,
+  ) => Promise<void>)(path, value, options);
+}
+
+function injectedFilesystemError(code: string): Error & { code: string } {
+  return Object.assign(new Error(`injected ${code}`), { code });
+}
+
+function stagingEntries(names: string[]): string[] {
+  return names.filter((name) => name.endsWith(".tmp"));
 }
 
 function client(overrides: Partial<DeploymentClient> = {}): DeploymentClient {
@@ -275,6 +305,175 @@ test("does not overwrite a finalized V3 address manifest", async () => {
   assert.deepEqual(await readFile(path), originalBytes);
 });
 
+test("preflights the exclusive manifest installation before deploying", async () => {
+  await removeFixtureV3Manifest();
+  const versionDirectory = join(
+    fixtureRepoRoot,
+    "work",
+    "deployments",
+    "studionet",
+    "v3",
+    sourceHash(artifactSource),
+  );
+  await rm(versionDirectory, { recursive: true, force: true });
+  let deployCalls = 0;
+  try {
+    await assert.rejects(
+      deployAccessSeal(client({
+        deployContract: async () => {
+          deployCalls += 1;
+          return txHash;
+        },
+      }), {
+        network: "studionet",
+        repoRoot: fixtureRepoRoot,
+        exclusiveInstallOptions: {
+          operations: {
+            link: async () => {
+              throw injectedFilesystemError("EOPNOTSUPP");
+            },
+          },
+        },
+      } as Parameters<typeof deployAccessSeal>[1] & {
+        exclusiveInstallOptions: ExclusiveInstallOptions;
+      }),
+      /manifest destination preflight/i,
+    );
+    assert.equal(deployCalls, 0);
+    assert.deepEqual(await readdir(versionDirectory), []);
+  } finally {
+    await rm(versionDirectory, { recursive: true, force: true });
+  }
+});
+
+test("reports retained staging when exclusive installation and cleanup both fail", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-stage-"));
+  const destination = join(directory, "manifest.json");
+  const value = { accepted: true };
+  try {
+    await assert.rejects(
+      writeExclusiveJson(destination, value, {
+        operations: {
+          link: async () => {
+            throw injectedFilesystemError("EOPNOTSUPP");
+          },
+          unlink: async () => {
+            throw injectedFilesystemError("EPERM");
+          },
+        },
+      }),
+      /installation failed.*manual recovery/i,
+    );
+    const entries = await readdir(directory);
+    const stages = stagingEntries(entries);
+    assert.equal(entries.includes("manifest.json"), false);
+    assert.equal(stages.length, 1);
+    assert.equal(await readFile(join(directory, stages[0]), "utf8"), `${canonicalJson(value)}\n`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("reports retained staging after an exclusive final install when cleanup fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-stage-"));
+  const destination = join(directory, "manifest.json");
+  const value = { accepted: true };
+  try {
+    await assert.rejects(
+      writeExclusiveJson(destination, value, {
+        operations: {
+          unlink: async () => {
+            throw injectedFilesystemError("EPERM");
+          },
+        },
+      }),
+      /installed.*manual recovery/i,
+    );
+    const entries = await readdir(directory);
+    const stages = stagingEntries(entries);
+    assert.equal(stages.length, 1);
+    assert.equal(await readFile(destination, "utf8"), `${canonicalJson(value)}\n`);
+    assert.equal(await readFile(join(directory, stages[0]), "utf8"), `${canonicalJson(value)}\n`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("detects a destination-directory replacement before exclusive installation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "accessseal-exclusive-race-"));
+  const directory = join(root, "manifests");
+  const outside = join(root, "outside");
+  const destination = join(directory, "manifest.json");
+  try {
+    await mkdir(directory, { recursive: true });
+    await mkdir(outside, { recursive: true });
+    await assert.rejects(
+      writeExclusiveJson(destination, { accepted: true }, {
+        operations: {
+          beforeLink: async () => {
+            await rm(directory, { recursive: true, force: true });
+            await symlink(outside, directory, process.platform === "win32" ? "junction" : "dir");
+          },
+        },
+      }),
+      /directory.*changed|symbolic link|junction/i,
+    );
+    assert.deepEqual(await readdir(outside), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("exclusive writers admit exactly one complete manifest and clean staging", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-contention-"));
+  const destination = join(directory, "manifest.json");
+  const first = { writer: "first" };
+  const second = { writer: "second" };
+  try {
+    const results = await Promise.allSettled([
+      writeExclusiveJson(destination, first),
+      writeExclusiveJson(destination, second),
+    ]);
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+    const bytes = await readFile(destination, "utf8");
+    assert.ok([`${canonicalJson(first)}\n`, `${canonicalJson(second)}\n`].includes(bytes));
+    assert.deepEqual(stagingEntries(await readdir(directory)), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects a symbolic-link or junction ancestor before deployment", async () => {
+  await rm(join(fixtureRepoRoot, "work"), { recursive: true, force: true });
+  const outside = await mkdtemp(join(tmpdir(), "accessseal-manifest-outside-"));
+  const work = join(fixtureRepoRoot, "work");
+  const redirectedDeployments = join(work, "deployments");
+  let deployCalls = 0;
+  try {
+    await mkdir(work, { recursive: true });
+    await symlink(outside, redirectedDeployments, process.platform === "win32" ? "junction" : "dir");
+    await assert.rejects(
+      deployAccessSeal(client({
+        deployContract: async () => {
+          deployCalls += 1;
+          return txHash;
+        },
+      }), {
+        network: "studionet",
+        repoRoot: fixtureRepoRoot,
+      }),
+      /symbolic link|junction|ancestor/i,
+    );
+    assert.equal(deployCalls, 0);
+    assert.deepEqual(await readdir(outside), []);
+  } finally {
+    await rm(join(fixtureRepoRoot, "work"), { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
 test("explicit V3 lookup rejects swapped address filenames", async () => {
   const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
   const otherAddress = "0x8765432109abcdef8765432109abcdef87654321";
@@ -332,6 +531,56 @@ test("explicit V3 lookup rejects ambiguous retained matches", async () => {
     await assert.rejects(
       readDeploymentManifest(repoRoot, "studionet", address),
       /ambiguous/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit V3 lookup accepts one physically contained matching manifest", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  try {
+    const value = manifest();
+    await writeRetainedV3Manifest(
+      repoRoot,
+      value.deploymentArtifactSha256,
+      value.contractAddress,
+      value,
+    );
+    const result = await readDeploymentManifest(repoRoot, "studionet", address);
+    assert.equal(result.contractAddress, value.contractAddress);
+    assert.equal(result.deploymentArtifactSha256, value.deploymentArtifactSha256);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit V3 lookup rejects a requested manifest symbolic link", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  const outside = join(repoRoot, "outside-manifest.json");
+  const directory = join(
+    repoRoot,
+    "work",
+    "deployments",
+    "studionet",
+    "v3",
+    sourceHash(artifactSource),
+  );
+  try {
+    await mkdir(directory, { recursive: true });
+    await writeFile(outside, `${JSON.stringify({ ...manifest(), contractVersion: "V3" })}\n`);
+    const requestedPath = join(directory, `${address}.json`);
+    try {
+      await symlink(outside, requestedPath, "file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      await rm(outside, { force: true });
+      await mkdir(outside, { recursive: true });
+      await symlink(outside, requestedPath, "junction");
+    }
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /symbolic link|symlink/i,
     );
   } finally {
     await rm(repoRoot, { recursive: true, force: true });

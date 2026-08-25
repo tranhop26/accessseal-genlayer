@@ -1,8 +1,16 @@
-import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { basename } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { atomicWriteJsonExclusive, canonicalJsonHash, sourceHash } from "../scripts/source-hash.ts";
+import {
+  atomicWriteJsonExclusive,
+  assertRealDirectory,
+  assertSafeRegularFile,
+  canonicalJsonHash,
+  sourceHash,
+  type AtomicWriteJsonExclusiveOptions,
+} from "../scripts/source-hash.ts";
 import {
   NETWORK_CHAIN_IDS,
   NETWORK_CHAIN_NAMES,
@@ -40,6 +48,7 @@ export type V3ManifestPath = {
 type DeployOptions = {
   network: string;
   repoRoot?: string;
+  exclusiveInstallOptions?: AtomicWriteJsonExclusiveOptions;
 };
 
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -96,26 +105,35 @@ async function preflightV3ManifestDestination(
   repoRoot: string,
   network: NetworkName,
   deploymentArtifactSha256: string,
+  exclusiveInstallOptions: AtomicWriteJsonExclusiveOptions | undefined,
 ): Promise<void> {
   const directory = deploymentManifestDirectory(
     repoRoot,
     network,
     deploymentArtifactSha256,
   );
+  const probe = join(directory, `.accessseal-preflight-${randomUUID()}.probe`);
+  let probeError: unknown;
   try {
-    await mkdir(directory, { recursive: true });
-    const metadata = await lstat(directory);
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-      throw new Error("not a directory");
-    }
-    const probe = join(directory, `.accessseal-preflight-${randomUUID()}.tmp`);
-    try {
-      await writeFile(probe, "", { encoding: "utf8", flag: "wx", mode: 0o600 });
-    } finally {
-      await rm(probe, { force: true });
-    }
-  } catch {
-    throw new Error("deployment manifest destination preflight failed");
+    await atomicWriteJsonExclusive(probe, { preflight: "accessseal-v3" }, exclusiveInstallOptions);
+  } catch (error) {
+    probeError = error;
+  }
+  let cleanupError: unknown;
+  try {
+    const realDirectory = await assertRealDirectory(directory);
+    const physicalProbe = join(realDirectory, basename(probe));
+    await assertSafeRegularFile(realDirectory, physicalProbe);
+    await unlink(physicalProbe);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupError = error;
+  }
+  if (probeError || cleanupError) {
+    const detail = [probeError, cleanupError]
+      .filter((error): error is unknown => error !== undefined)
+      .map((error) => error instanceof Error ? error.message : String(error))
+      .join("; ");
+    throw new Error(`deployment manifest destination preflight failed: ${detail}`);
   }
 }
 
@@ -142,7 +160,12 @@ export async function deployAccessSeal(
     throw new Error("contract source or deployment artifact bytes are missing");
   }
   const deploymentArtifactSha256 = sourceHash(deploymentArtifact);
-  await preflightV3ManifestDestination(repoRoot, network, deploymentArtifactSha256);
+  await preflightV3ManifestDestination(
+    repoRoot,
+    network,
+    deploymentArtifactSha256,
+    options.exclusiveInstallOptions,
+  );
 
   const expectedSchema = await client.getContractSchemaForCode(deploymentArtifact);
   if (!(expectedSchema && typeof expectedSchema === "object")) {
@@ -189,7 +212,7 @@ export async function deployAccessSeal(
     contractAddress,
     deploymentArtifactSha256,
   });
-  await atomicWriteJsonExclusive(path, manifest);
+  await atomicWriteJsonExclusive(path, manifest, options.exclusiveInstallOptions);
   return manifest;
 }
 
