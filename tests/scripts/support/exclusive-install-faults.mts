@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import * as realFs from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test, { mock } from "node:test";
 
 type FaultOperations = {
@@ -187,6 +187,7 @@ test("production lookup rejects a requested manifest swapped before its pinned o
   const artifactHash = sourceHash(new TextEncoder().encode("fault harness artifact"));
   const directory = join(repoRoot, "work", "deployments", "studionet", "v3", artifactHash);
   const path = join(directory, `${address}.json`);
+  const faultTarget = process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
   const original = {
     schemaVersion: "accessseal-deployment-manifest/2",
     contractVersion: "V3",
@@ -212,7 +213,10 @@ test("production lookup rejects a requested manifest swapped before its pinned o
       withFaultOperations(
         {
           open: async (requested, flags, mode) => {
-            if (!swapped && String(requested) === path) {
+            const requestedPath = process.platform === "win32"
+              ? resolve(String(requested)).toLowerCase()
+              : resolve(String(requested));
+            if (!swapped && requestedPath === faultTarget) {
               swapped = true;
               await realFs.rm(path);
               await realFs.writeFile(path, `${JSON.stringify(replacement)}\n`, { flag: "wx" });
