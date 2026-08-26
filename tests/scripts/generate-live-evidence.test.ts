@@ -10,13 +10,19 @@ import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS } from "../../scripts/live-evidenc
 
 const roots: string[] = [];
 const observedAt = LIVE_EVIDENCE_BINDING.caseCreatedAt + 1;
-const V1_PUBLIC_PATHS = [
+const HISTORICAL_PUBLIC_PATHS = [
   ".well-known/accessseal/release-manifest.json",
   "evidence/releases/2026-08-22-live-v1/critical-flow-trace.json",
   "evidence/releases/2026-08-22-live-v1/dom-facts.json",
   "evidence/releases/2026-08-22-live-v1/release.html",
   "evidence/releases/2026-08-22-live-v1/scanner-report.json",
   "evidence/releases/2026-08-22-live-v1/screenshot.png",
+  "evidence/releases/2026-08-23-live-v2/critical-flow-trace.json",
+  "evidence/releases/2026-08-23-live-v2/dom-facts.json",
+  "evidence/releases/2026-08-23-live-v2/release-manifest.json",
+  "evidence/releases/2026-08-23-live-v2/release.html",
+  "evidence/releases/2026-08-23-live-v2/scanner-report.json",
+  "evidence/releases/2026-08-23-live-v2/screenshot.png",
 ] as const;
 const urls = [
   `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`,
@@ -149,10 +155,10 @@ test("publishes only the five immutable payload routes and canonical manifest", 
   assert.equal(summary.sourceCommit, "9401a53adb1a9eb361eed5359c7a04428452dcde");
 });
 
-test("adds V3 without changing any committed V1 evidence byte", async () => {
+test("adds V3 without changing any committed V1 or V2 evidence byte", async () => {
   const { input, output } = await fixture();
   const before = new Map<string, Buffer>();
-  for (const relativePath of V1_PUBLIC_PATHS) {
+  for (const relativePath of HISTORICAL_PUBLIC_PATHS) {
     const bytes = await readFile(resolve("frontend/public", relativePath));
     before.set(relativePath, bytes);
     const destination = join(output, relativePath);
