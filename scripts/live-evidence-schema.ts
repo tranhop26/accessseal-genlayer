@@ -1,30 +1,30 @@
 import { createHash } from "node:crypto";
 
 export const LIVE_EVIDENCE_BINDING = Object.freeze({
-  caseId: "0x2e82b92517f29f02e86ea5f761ce8a62dc470fad4c92625133ab407f25091959",
-  contract: "0x42b2eda04e762f50915f17143adbe73038e36b27",
+  caseId: "0xd3f684621674542957dbacb152e08616a3d315722091cc27dc3b5a9938cb6dd0",
+  contract: "0x08a1969dd75265a58022fb50bbbdd87f9a726265",
   chainId: "1",
   epoch: 0,
   subjectOrigin: "https://accessseal-genlayer.vercel.app",
   vendor: "0x35c9979d30992b13ef6df7036bc745e2e1cd76a2",
   profileVersion: "accessseal-static/1",
   profileHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  flowsHash: "0xd8b711d3ceb59343cd7822e5fcf3aba42c11de287bd6dcf53bfe838d753f6001",
-  releaseId: "2026-08-23-live-v2",
-  releaseManifestPath: "/evidence/releases/2026-08-23-live-v2/release-manifest.json",
-  sourceCommit: "23ab41fb5a6c982d259d7d441da8ab5c85b8aa44",
-  createCaseTransactionHash: "0x7ef90047f5e94cfb838eb176bcb243bce4c3153f293cc660f3919cdb2c60dd74",
-  caseCreatedAt: 1_787_492_373,
+  flowsHash: "0x5db2cd16b7b3fe77d49f1361d1f8dac4a50ca421000008427eddff440d03fc87",
+  releaseId: "2026-08-26-live-v3",
+  releaseManifestPath: "/evidence/releases/2026-08-26-live-v3/release-manifest.json",
+  sourceCommit: "9401a53adb1a9eb361eed5359c7a04428452dcde",
+  createCaseTransactionHash: "0x3ff5cc28cbde1e89fed7abd5c46c8bd600ac5f339209f32ce06f12045af70c26",
+  caseCreatedAt: 1_787_738_360,
   evidenceDeadlineSeconds: 86_400,
   hardDeadlineSeconds: 604_800,
 });
 
 export const PAYLOAD_SPECS = Object.freeze({
-  HTML_BUNDLE: Object.freeze({ path: "/evidence/releases/2026-08-23-live-v2/release.html", mediaType: "text/html", maxBytes: 32768 }),
-  SCREENSHOT: Object.freeze({ path: "/evidence/releases/2026-08-23-live-v2/screenshot.png", mediaType: "image/png", maxBytes: 65536 }),
-  DOM_FACTS: Object.freeze({ path: "/evidence/releases/2026-08-23-live-v2/dom-facts.json", mediaType: "application/json", maxBytes: 16384 }),
-  SCANNER_REPORT: Object.freeze({ path: "/evidence/releases/2026-08-23-live-v2/scanner-report.json", mediaType: "application/json", maxBytes: 16384 }),
-  CRITICAL_FLOW_TRACE: Object.freeze({ path: "/evidence/releases/2026-08-23-live-v2/critical-flow-trace.json", mediaType: "application/json", maxBytes: 16384 }),
+  HTML_BUNDLE: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/release.html", mediaType: "text/html", maxBytes: 32768 }),
+  SCREENSHOT: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/screenshot.png", mediaType: "image/png", maxBytes: 65536 }),
+  DOM_FACTS: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/dom-facts.json", mediaType: "application/json", maxBytes: 16384 }),
+  SCANNER_REPORT: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/scanner-report.json", mediaType: "application/json", maxBytes: 16384 }),
+  CRITICAL_FLOW_TRACE: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/critical-flow-trace.json", mediaType: "application/json", maxBytes: 16384 }),
 });
 
 export const RELEASE_MANIFEST_PATH = LIVE_EVIDENCE_BINDING.releaseManifestPath;

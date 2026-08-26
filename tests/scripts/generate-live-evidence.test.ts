@@ -127,15 +127,15 @@ test("publishes only the five immutable payload routes and canonical manifest", 
   const result = run(input, output);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(await listedFiles(output), [
-    "evidence/releases/2026-08-23-live-v2/critical-flow-trace.json",
-    "evidence/releases/2026-08-23-live-v2/dom-facts.json",
-    "evidence/releases/2026-08-23-live-v2/release-manifest.json",
-    "evidence/releases/2026-08-23-live-v2/release.html",
-    "evidence/releases/2026-08-23-live-v2/scanner-report.json",
-    "evidence/releases/2026-08-23-live-v2/screenshot.png",
+    "evidence/releases/2026-08-26-live-v3/critical-flow-trace.json",
+    "evidence/releases/2026-08-26-live-v3/dom-facts.json",
+    "evidence/releases/2026-08-26-live-v3/release-manifest.json",
+    "evidence/releases/2026-08-26-live-v3/release.html",
+    "evidence/releases/2026-08-26-live-v3/scanner-report.json",
+    "evidence/releases/2026-08-26-live-v3/screenshot.png",
   ]);
 
-  const manifestBytes = await readFile(join(output, "evidence/releases/2026-08-23-live-v2/release-manifest.json"));
+  const manifestBytes = await readFile(join(output, "evidence/releases/2026-08-26-live-v3/release-manifest.json"));
   const manifest = JSON.parse(manifestBytes.toString("utf8")) as { files: Array<{ evidenceType: keyof typeof PAYLOAD_SPECS; path: string; sha256: string }> };
   assert.equal(manifestBytes.toString("utf8"), canonical(manifest));
   for (const file of manifest.files) {
@@ -146,10 +146,10 @@ test("publishes only the five immutable payload routes and canonical manifest", 
   }
   const summary = JSON.parse(result.stdout) as { releaseDigest: string; sourceCommit: string };
   assert.equal(summary.releaseDigest, `sha256:${createHash("sha256").update(manifestBytes).digest("hex")}`);
-  assert.equal(summary.sourceCommit, "23ab41fb5a6c982d259d7d441da8ab5c85b8aa44");
+  assert.equal(summary.sourceCommit, "9401a53adb1a9eb361eed5359c7a04428452dcde");
 });
 
-test("adds V2 without changing any committed V1 evidence byte", async () => {
+test("adds V3 without changing any committed V1 evidence byte", async () => {
   const { input, output } = await fixture();
   const before = new Map<string, Buffer>();
   for (const relativePath of V1_PUBLIC_PATHS) {
@@ -165,23 +165,23 @@ test("adds V2 without changing any committed V1 evidence byte", async () => {
   for (const [relativePath, bytes] of before) {
     assert.deepEqual(await readFile(join(output, relativePath)), bytes, relativePath);
   }
-  assert.deepEqual((await listedFiles(output)).filter((path) => path.includes("2026-08-23-live-v2")), [
-    "evidence/releases/2026-08-23-live-v2/critical-flow-trace.json",
-    "evidence/releases/2026-08-23-live-v2/dom-facts.json",
-    "evidence/releases/2026-08-23-live-v2/release-manifest.json",
-    "evidence/releases/2026-08-23-live-v2/release.html",
-    "evidence/releases/2026-08-23-live-v2/scanner-report.json",
-    "evidence/releases/2026-08-23-live-v2/screenshot.png",
+  assert.deepEqual((await listedFiles(output)).filter((path) => path.includes("2026-08-26-live-v3")), [
+    "evidence/releases/2026-08-26-live-v3/critical-flow-trace.json",
+    "evidence/releases/2026-08-26-live-v3/dom-facts.json",
+    "evidence/releases/2026-08-26-live-v3/release-manifest.json",
+    "evidence/releases/2026-08-26-live-v3/release.html",
+    "evidence/releases/2026-08-26-live-v3/scanner-report.json",
+    "evidence/releases/2026-08-26-live-v3/screenshot.png",
   ]);
 });
 
 test("is idempotent for identical bytes", async () => {
   const { input, output } = await fixture();
   assert.equal(run(input, output).status, 0);
-  const first = await readFile(join(output, "evidence/releases/2026-08-23-live-v2/release-manifest.json"));
+  const first = await readFile(join(output, "evidence/releases/2026-08-26-live-v3/release-manifest.json"));
   const result = run(input, output);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(await readFile(join(output, "evidence/releases/2026-08-23-live-v2/release-manifest.json")), first);
+  assert.deepEqual(await readFile(join(output, "evidence/releases/2026-08-26-live-v3/release-manifest.json")), first);
 });
 
 test("verification CLI reports only a compact release summary", async () => {
@@ -217,7 +217,7 @@ test("rejects a conflicting release before writing any other output", async () =
   const result = run(input, output);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /refus|overwrite|different|immutable/i);
-  assert.deepEqual(await listedFiles(output), ["evidence/releases/2026-08-23-live-v2/release.html"]);
+  assert.deepEqual(await listedFiles(output), ["evidence/releases/2026-08-26-live-v3/release.html"]);
   assert.equal(await readFile(conflict, "utf8"), "different immutable release");
 });
 
@@ -289,12 +289,12 @@ test("recovers an abandoned atomic staging file without publishing partial bytes
   const result = run(input, output);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(await listedFiles(output), [
-    "evidence/releases/2026-08-23-live-v2/critical-flow-trace.json",
-    "evidence/releases/2026-08-23-live-v2/dom-facts.json",
-    "evidence/releases/2026-08-23-live-v2/release-manifest.json",
-    "evidence/releases/2026-08-23-live-v2/release.html",
-    "evidence/releases/2026-08-23-live-v2/scanner-report.json",
-    "evidence/releases/2026-08-23-live-v2/screenshot.png",
+    "evidence/releases/2026-08-26-live-v3/critical-flow-trace.json",
+    "evidence/releases/2026-08-26-live-v3/dom-facts.json",
+    "evidence/releases/2026-08-26-live-v3/release-manifest.json",
+    "evidence/releases/2026-08-26-live-v3/release.html",
+    "evidence/releases/2026-08-26-live-v3/scanner-report.json",
+    "evidence/releases/2026-08-26-live-v3/screenshot.png",
   ]);
   assert.deepEqual(await readFile(join(output, PAYLOAD_SPECS.HTML_BUNDLE.path.slice(1))), await readFile(join(input, "release.html")));
 });
@@ -310,12 +310,12 @@ test("recovers a crash after the final hard link was installed but before stagin
   const result = run(input, output);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(await listedFiles(output), [
-    "evidence/releases/2026-08-23-live-v2/critical-flow-trace.json",
-    "evidence/releases/2026-08-23-live-v2/dom-facts.json",
-    "evidence/releases/2026-08-23-live-v2/release-manifest.json",
-    "evidence/releases/2026-08-23-live-v2/release.html",
-    "evidence/releases/2026-08-23-live-v2/scanner-report.json",
-    "evidence/releases/2026-08-23-live-v2/screenshot.png",
+    "evidence/releases/2026-08-26-live-v3/critical-flow-trace.json",
+    "evidence/releases/2026-08-26-live-v3/dom-facts.json",
+    "evidence/releases/2026-08-26-live-v3/release-manifest.json",
+    "evidence/releases/2026-08-26-live-v3/release.html",
+    "evidence/releases/2026-08-26-live-v3/scanner-report.json",
+    "evidence/releases/2026-08-26-live-v3/screenshot.png",
   ]);
   assert.deepEqual(await readFile(destination), await readFile(join(input, "release.html")));
 });
