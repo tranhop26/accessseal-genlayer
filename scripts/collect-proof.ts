@@ -25,6 +25,7 @@ import {
   ACCESSSEAL_FROZEN_SCHEMA_SHA256,
   normalizeReceipt,
   readRepositoryGitState,
+  readDeploymentManifest,
   validateDeploymentManifest,
   verifyDeployment,
   type DeploymentManifest,
@@ -1060,9 +1061,8 @@ async function runCommands(repoRoot: string, manifest: DeploymentManifest): Prom
 export async function collectProof(options: { repoRoot?: string; network: NetworkName }): Promise<FinalProofV2> {
   const repoRoot = resolve(options.repoRoot ?? process.cwd());
   if (options.network === "localnet") throw new Error("final proof cannot use localnet");
-  const manifestPath = join(repoRoot, "work", "deployments", `${options.network}.json`);
   const locatorPath = join(repoRoot, "work", "evidence", "final", "locators.json");
-  const manifest = validateDeploymentManifest(JSON.parse(await readFile(manifestPath, "utf8")) as DeploymentManifest);
+  const manifest = await readDeploymentManifest(repoRoot, options.network);
   const locators = JSON.parse(await readFile(locatorPath, "utf8")) as ProofLocators;
   validateLocators(locators, options.network, manifest);
   const client = createClient({ chain: PROOF_CHAINS[options.network], endpoint: locators.rpcUrl });

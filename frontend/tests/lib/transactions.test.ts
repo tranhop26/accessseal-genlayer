@@ -182,6 +182,29 @@ describe("transaction truth", () => {
     expect(updates).toEqual(["PENDING", "ACCEPTED", "RECONCILING"]);
   });
 
+  it("keeps a close-evidence transaction reconciling until the sealed readback is authoritative", async () => {
+    const updates: string[] = [];
+    const reconcile = vi.fn().mockResolvedValue(false as never);
+    const result = await (trackTransaction as (...args: unknown[]) => Promise<{
+      phase: string;
+    }>)(
+      {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+      `0x${"e".repeat(64)}`,
+      (value: { phase: string }) => updates.push(value.phase),
+      reconcile,
+      "close_evidence",
+    );
+
+    expect(reconcile).toHaveBeenCalledWith("close_evidence");
+    expect(updates).toEqual(["PENDING", "ACCEPTED", "RECONCILING"]);
+    expect(result.phase).toBe("RECONCILING");
+  });
+
   it("never maps undetermined or failed execution to success", async () => {
     const undetermined = await trackTransaction(
       {

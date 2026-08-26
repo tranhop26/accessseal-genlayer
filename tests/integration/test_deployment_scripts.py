@@ -7,9 +7,7 @@ from pathlib import Path
 def test_real_genlayerjs_local_deploy_source_schema_and_accounting_readback(
     glsim_server,
 ):
-    manifest_path = Path("work/deployments/localnet.json")
     proof_path = Path("work/evidence/task7-local-deployment.json")
-    manifest_path.unlink(missing_ok=True)
     proof_path.unlink(missing_ok=True)
     completed = subprocess.run(
         ["node", "--import", "tsx", "tests/scripts/local-deployment-proof.ts"],
@@ -19,8 +17,22 @@ def test_real_genlayerjs_local_deploy_source_schema_and_accounting_readback(
         timeout=45,
     )
     assert completed.returncode == 0, completed.stderr
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    manifests = [
+        (path, json.loads(path.read_text(encoding="utf-8")))
+        for path in Path("work/deployments/localnet/v3").glob("*/*.json")
+    ]
+    matching_manifests = [
+        (path, manifest)
+        for path, manifest in manifests
+        if manifest.get("contractAddress") == proof["contractAddress"]
+    ]
+    assert len(matching_manifests) == 1
+    manifest_path, manifest = matching_manifests[0]
+    assert manifest_path.parent.name == manifest["deploymentArtifactSha256"]
+    assert manifest_path.parent.parent.name == "v3"
+    assert manifest_path.name == f'{manifest["contractAddress"]}.json'
+    assert manifest["contractVersion"] == "V3"
     assert proof["schemaVersion"] == "accessseal-local-deployment-proof/1"
     assert proof["network"] == "localnet"
     assert proof["chainId"] == 61127

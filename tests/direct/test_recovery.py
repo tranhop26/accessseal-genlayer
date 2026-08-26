@@ -12,6 +12,7 @@ from test_adjudication import (
     envelope_for,
     mock_adjudication,
     open_reviewable_case,
+    semantic_only_candidate,
 )
 
 
@@ -63,18 +64,28 @@ def _review_rmi(contract, direct_vm, buyer, vendor, *, salt="rmi-0"):
     return case_id, release
 
 
-def _open_cure_epoch(contract, case_id, vendor):
+def _open_cure_epoch(
+    contract,
+    case_id,
+    vendor,
+    *,
+    supporting_evidence=("HTML_BUNDLE",),
+):
     release = build_release(case_id)
     manifest = copy.deepcopy(release["manifest"])
     manifest["epoch"] = 1
     manifest_body = canonical_json_bytes(manifest)
     release_digest = "sha256:" + sha256(manifest_body).hexdigest()
+    release["manifest"] = manifest
+    release["manifestBody"] = manifest_body
+    release["releaseDigest"] = release_digest
 
     manifest_envelope = envelope_for(
         contract,
         case_id,
         vendor,
         release_digest=release_digest,
+        payload_uri=release["manifestUri"],
         payload_sha256=release_digest,
     )
     manifest_envelope["epoch"] = 1
@@ -83,22 +94,26 @@ def _open_cure_epoch(contract, case_id, vendor):
     manifest_envelope["expiresAt"] = 1_786_586_000
     contract.as_(vendor).open_evidence(case_id, compact_json(manifest_envelope))
 
-    html_envelope = envelope_for(
-        contract,
-        case_id,
-        vendor,
-        action="APPEND_EVIDENCE",
-        evidence_type="HTML_BUNDLE",
-        nonce="cure-html",
-        release_digest=release_digest,
-        payload_sha256=release["payloads"]["HTML_BUNDLE"]["sha256"],
-    )
-    html_envelope["epoch"] = 1
-    html_envelope["observedAt"] = 1_786_580_900
-    html_envelope["submittedAt"] = 1_786_580_990
-    html_envelope["expiresAt"] = 1_786_586_000
-    contract.as_(vendor).append_evidence(case_id, compact_json(html_envelope))
-    return release_digest
+    for index, evidence_type in enumerate(supporting_evidence, start=1):
+        payload = release["payloads"][evidence_type]
+        evidence = envelope_for(
+            contract,
+            case_id,
+            vendor,
+            action="APPEND_EVIDENCE",
+            evidence_type=evidence_type,
+            nonce=f"cure-{index}",
+            release_digest=release_digest,
+            payload_uri=payload["uri"],
+            payload_sha256=payload["sha256"],
+            media_type=payload["mediaType"],
+        )
+        evidence["epoch"] = 1
+        evidence["observedAt"] = 1_786_580_900
+        evidence["submittedAt"] = 1_786_580_990
+        evidence["expiresAt"] = 1_786_586_000
+        contract.as_(vendor).append_evidence(case_id, compact_json(evidence))
+    return release
 
 
 def test_review_finality_uses_authenticated_idempotent_finalized_self_message(
@@ -238,12 +253,15 @@ def test_one_rmi_cure_preserves_history_and_rejects_old_epoch_domain(
     case = contract.get_case_json(case_id)
     assert case["epoch"] == 1
     assert case["lifecycle"] == "EVIDENCE_OPEN"
+    assert case["evidenceSealed"] is False
+    assert case["evidenceSealedAt"] == 0
+    assert case["evidenceSealedBy"] == "0x" + "00" * 20
     assert json.loads(contract.get_review(case_id, 0)) == old_review
     assert json.loads(contract.get_review_attempt(case_id, 0, 0))["review"] == (
         old_review
     )
-    new_digest = _open_cure_epoch(contract, case_id, vendor)
-    assert new_digest != old_release["releaseDigest"]
+    new_release = _open_cure_epoch(contract, case_id, vendor)
+    assert new_release["releaseDigest"] != old_release["releaseDigest"]
 
     old_envelope = envelope_for(
         contract,
@@ -265,6 +283,80 @@ def test_one_rmi_cure_preserves_history_and_rejects_old_epoch_domain(
     contract.as_(vendor).start_cure.reverts(
         case_id, message="cure budget is exhausted"
     )
+
+
+def test_cure_epoch_resets_seal_and_requires_a_new_seal_before_cutoff(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        salt="sealed-rmi-before-cutoff",
+        advance_to_cutoff=False,
+    )
+    mock_adjudication(
+        direct_vm,
+        release,
+        llm_handler=lambda _data: {
+            "ok": semantic_only_candidate(
+                "REQUEST_MORE_INFO",
+                missing=["CRITICAL_FLOW_TRACE"],
+                rationale="The critical flow evidence needs clarification.",
+            )
+        },
+    )
+    contract.as_(buyer).close_evidence(case_id)
+    contract.request_review(case_id)
+    _confirm_finality(contract, case_id)
+
+    contract.as_(vendor).start_cure(case_id)
+
+    cured = contract.get_case_json(case_id)
+    assert cured["epoch"] == 1
+    assert cured["lifecycle"] == "EVIDENCE_OPEN"
+    assert cured["evidenceSealed"] is False
+    assert cured["evidenceSealedAt"] == 0
+    assert cured["evidenceSealedBy"] == "0x" + "00" * 20
+
+    direct_vm.warp("2026-08-13T00:29:51+00:00")
+    cure_release = _open_cure_epoch(
+        contract,
+        case_id,
+        vendor,
+        supporting_evidence=ALL_SUPPORTING_EVIDENCE,
+    )
+    cure_evidence = json.loads(contract.get_evidence(case_id, 1))
+    assert [
+        envelope["evidenceType"] for envelope in cure_evidence["envelopes"]
+    ] == [
+        "RELEASE_MANIFEST",
+        "HTML_BUNDLE",
+        "SCREENSHOT",
+        "DOM_FACTS",
+        "SCANNER_REPORT",
+        "CRITICAL_FLOW_TRACE",
+    ]
+    contract.request_review.reverts(
+        case_id,
+        message="review is not eligible before the evidence cutoff",
+    )
+
+    contract.as_(buyer).close_evidence(case_id)
+    resealed = contract.get_case_json(case_id)
+    assert resealed["lifecycle"] == "EVIDENCE_SEALED"
+    assert resealed["evidenceSealed"] is True
+    assert resealed["evidenceSealedAt"] == 1_786_580_991
+    assert resealed["evidenceSealedBy"] == buyer.as_hex.lower()
+
+    mock_adjudication(direct_vm, cure_release)
+    contract.request_review(case_id)
+
+    assert _finality(contract, case_id)["status"] == (
+        "PENDING_PROTOCOL_FINALITY"
+    )
+    assert json.loads(contract.get_review(case_id, 1))["verdict"] == "APPROVED"
 
 
 def test_cure_requires_vendor_rmi_finality_and_never_changes_funded_terms(
@@ -360,6 +452,35 @@ def test_unresolved_retry_enforces_active_gate_cooldown_unique_ids_and_budget(
     ] == (
         "UNRESOLVED"
     )
+
+
+def test_unresolved_retry_before_cutoff_reuses_current_epoch_seal(
+    contract, direct_vm, buyer, vendor, outsider
+):
+    case_id, release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        salt="sealed-retry-before-cutoff",
+        advance_to_cutoff=False,
+    )
+    mock_adjudication(
+        direct_vm, release, status_overrides={"RELEASE_MANIFEST": 503}
+    )
+    contract.as_(buyer).close_evidence(case_id)
+    sealed = contract.get_case_json(case_id)
+    contract.request_review(case_id)
+    _confirm_finality(contract, case_id)
+
+    direct_vm.warp("2026-08-13T00:05:01+00:00")
+    contract.as_(outsider).retry_review(case_id, "sealed-retry-1")
+
+    assert _finality(contract, case_id)["attempt"] == 1
+    retried = contract.get_case_json(case_id)
+    assert retried["evidenceSealed"] is True
+    assert retried["evidenceSealedAt"] == sealed["evidenceSealedAt"]
+    assert retried["evidenceSealedBy"] == sealed["evidenceSealedBy"]
 
 
 def test_expire_unresolved_creates_deterministic_buyer_refund_only_after_budget(

@@ -602,6 +602,35 @@ def submit_release_epoch(contract, vendor, fixture_site, case_id, *, epoch, keyb
     return release
 
 
+def submit_complete_evidence(contract, case_id, buyer, vendor) -> None:
+    evidence = read_json(contract, "get_evidence", [case_id, 0])
+    case = read_json(contract, "get_case", [case_id])
+
+    assert case["buyer"] == buyer.address.lower()
+    assert case["vendor"] == vendor.address.lower()
+    assert {item["evidenceType"] for item in evidence["envelopes"]} == {
+        "RELEASE_MANIFEST",
+        *EVIDENCE_TYPES,
+    }
+    assert {item["issuer"] for item in evidence["envelopes"]} == {
+        vendor.address.lower()
+    }
+
+    assert_success(
+        contract.connect(buyer)
+        .close_evidence([case_id])
+        .transact(
+            wait_transaction_status=TransactionStatus.FINALIZED,
+            transaction_context={"genvm_datetime": EVIDENCE_TIME},
+        )
+    )
+    sealed = read_json(contract, "get_case", [case_id])
+    assert sealed["lifecycle"] == "EVIDENCE_SEALED"
+    assert sealed["evidenceSealed"] is True
+    assert sealed["evidenceSealedAt"] == EVIDENCE_OBSERVED_AT
+    assert sealed["evidenceSealedBy"] == buyer.address.lower()
+
+
 def open_release(contract, actors, fixture_site, salt, *, keyboard_trap=False, supporting=EVIDENCE_TYPES):
     _, vendor, _, _ = actors
     case_id = create_funded_case(contract, actors, salt)

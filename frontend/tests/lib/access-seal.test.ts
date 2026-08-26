@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AccessSealClient,
   deriveCaseBindings,
+  hasAuthoritativeEvidenceSeal,
   matchesExactUserError,
+  parsePendingCloseEvidenceBinding,
   parseReviewTxBinding,
+  validatePendingCloseEvidenceBinding,
   validateReviewTxBinding,
 } from "@/lib/access-seal";
 
@@ -17,8 +20,13 @@ const caseJson = (overrides: Record<string, unknown> = {}) =>
     caseId: `0x${"d".repeat(64)}`,
     chainId: 61999,
     contractAddress: address,
+    createdAt: 1_701_230_000,
     escrowAmount: "1000000000000000000",
     evidenceDeadline: 86400,
+    evidenceCutoff: 1_701_316_400,
+    evidenceSealed: false,
+    evidenceSealedAt: 0,
+    evidenceSealedBy: `0x${"0".repeat(40)}`,
     flowsHash: digest,
     hardDeadline: 604800,
     lifecycle: "DRAFT",
@@ -26,6 +34,7 @@ const caseJson = (overrides: Record<string, unknown> = {}) =>
     maxUnresolvedRetries: 2,
     profileHash: digest,
     reserved: "0",
+    readAt: 1_701_234_568,
     salt: "salt-1",
     subjectOrigin: "https://product.example",
     termsHash: digest,
@@ -34,7 +43,73 @@ const caseJson = (overrides: Record<string, unknown> = {}) =>
     ...overrides,
   });
 
+const legacyV2CaseJson = (overrides: Record<string, unknown> = {}) => {
+  const value = JSON.parse(caseJson(overrides)) as Record<string, unknown>;
+  for (const key of [
+    "createdAt",
+    "evidenceCutoff",
+    "evidenceSealed",
+    "evidenceSealedAt",
+    "evidenceSealedBy",
+    "readAt",
+  ])
+    delete value[key];
+  return JSON.stringify(value);
+};
+
 describe("AccessSeal contract adapter", () => {
+  it("requires an exact epoch-bound pending seal record and rejects legacy unbound records", () => {
+    const binding = {
+      action: "close_evidence" as const,
+      account: buyer as `0x${string}`,
+      caseId: `0x${"d".repeat(64)}`,
+      chainId: 61999,
+      contract: address,
+      epoch: 2,
+      hash: `0x${"e".repeat(64)}` as `0x${string}`,
+    };
+
+    const parsed = parsePendingCloseEvidenceBinding(JSON.stringify(binding));
+    expect(parsed).toEqual(binding);
+    expect(
+      parsePendingCloseEvidenceBinding(
+        JSON.stringify(
+          Object.fromEntries(
+            Object.entries(binding).filter(([key]) => key !== "epoch"),
+          ),
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      parsePendingCloseEvidenceBinding(
+        JSON.stringify({ ...binding, epoch: -1 }),
+      ),
+    ).toBeNull();
+    expect(
+      parsePendingCloseEvidenceBinding(
+        JSON.stringify({ ...binding, epoch: 1.5 }),
+      ),
+    ).toBeNull();
+    expect(
+      validatePendingCloseEvidenceBinding(parsed, {
+        account: binding.account,
+        caseId: binding.caseId,
+        chainId: binding.chainId,
+        contract: binding.contract,
+        epoch: 2,
+      }),
+    ).toBe(true);
+    expect(
+      validatePendingCloseEvidenceBinding(parsed, {
+        account: binding.account,
+        caseId: binding.caseId,
+        chainId: binding.chainId,
+        contract: binding.contract,
+        epoch: 3,
+      }),
+    ).toBe(false);
+  });
+
   it("uses exact finalized read method names and argument order", async () => {
     const readContract = vi.fn().mockResolvedValue(caseJson());
     const client = new AccessSealClient({ readContract } as never, address);
@@ -46,6 +121,181 @@ describe("AccessSeal contract adapter", () => {
       transactionHashVariant: "latest-final",
     });
   });
+
+  it("parses the V3 evidence seal readback and submits the exact close method", async () => {
+    const readContract = vi.fn().mockResolvedValue(
+      caseJson({
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: buyer,
+        lifecycle: "EVIDENCE_SEALED",
+      }),
+    );
+    const writeContract = vi.fn().mockResolvedValue(`0x${"e".repeat(64)}`);
+    const client = new AccessSealClient(
+      { connect: vi.fn(), readContract, writeContract } as never,
+      address,
+      "studionet",
+    );
+
+    await expect(client.readCase(`0x${"d".repeat(64)}`)).resolves.toMatchObject(
+      {
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: buyer,
+        lifecycle: "EVIDENCE_SEALED",
+      },
+    );
+    await client.closeEvidence("case-1");
+
+    expect(writeContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        functionName: "close_evidence",
+        args: ["case-1"],
+      }),
+    );
+  });
+
+  it("keeps an authoritative buyer seal historical after the lifecycle advances", () => {
+    const base = JSON.parse(
+      caseJson({
+        lifecycle: "DECIDED",
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: buyer,
+      }),
+    );
+
+    expect(hasAuthoritativeEvidenceSeal(base)).toBe(true);
+  });
+
+  it("strictly binds V3 createdAt, absolute cutoff, and authoritative read time", async () => {
+    const client = new AccessSealClient(
+      { readContract: vi.fn().mockResolvedValue(caseJson()) } as never,
+      address,
+    );
+    await expect(client.readCase(`0x${"d".repeat(64)}`)).resolves.toMatchObject({
+      createdAt: 1_701_230_000,
+      evidenceCutoff: 1_701_316_400,
+      readAt: 1_701_234_568,
+    });
+
+    for (const mutation of [
+      { evidenceCutoff: 1_701_316_399 },
+      { createdAt: 1_701_316_401 },
+      { readAt: 1_701_229_999 },
+      { readAt: Number.MAX_SAFE_INTEGER + 1 },
+    ]) {
+      const invalid = new AccessSealClient(
+        {
+          readContract: vi.fn().mockResolvedValue(caseJson(mutation)),
+        } as never,
+        address,
+      );
+      await expect(invalid.readCase(`0x${"d".repeat(64)}`)).rejects.toThrow(
+        /cutoff|clock|counter|binding/i,
+      );
+    }
+  });
+
+  it.each([
+    [
+      "requires the sealed flag for EVIDENCE_SEALED",
+      {
+        lifecycle: "EVIDENCE_SEALED",
+        evidenceSealed: false,
+        evidenceSealedAt: 0,
+        evidenceSealedBy: `0x${"0".repeat(40)}`,
+      },
+    ],
+    [
+      "rejects a sealed flag without a timestamp",
+      {
+        lifecycle: "EVIDENCE_SEALED",
+        evidenceSealed: true,
+        evidenceSealedAt: 0,
+        evidenceSealedBy: buyer,
+      },
+    ],
+    [
+      "rejects a sealed flag without a sealing account",
+      {
+        lifecycle: "EVIDENCE_SEALED",
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: `0x${"0".repeat(40)}`,
+      },
+    ],
+    [
+      "rejects a seal attributed to someone other than the buyer",
+      {
+        lifecycle: "EVIDENCE_SEALED",
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: vendor,
+      },
+    ],
+    [
+      "rejects unsealed state with a sealing timestamp",
+      {
+        lifecycle: "EVIDENCE_OPEN",
+        evidenceSealed: false,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: `0x${"0".repeat(40)}`,
+      },
+    ],
+    [
+      "rejects unsealed state with a sealing account",
+      {
+        lifecycle: "EVIDENCE_OPEN",
+        evidenceSealed: false,
+        evidenceSealedAt: 0,
+        evidenceSealedBy: buyer,
+      },
+    ],
+    [
+      "rejects a sealed tuple while evidence remains open",
+      {
+        lifecycle: "EVIDENCE_OPEN",
+        evidenceSealed: true,
+        evidenceSealedAt: 1_701_234_567,
+        evidenceSealedBy: buyer,
+      },
+    ],
+  ])("%s", async (_name, overrides) => {
+    const client = new AccessSealClient(
+      { readContract: vi.fn().mockResolvedValue(caseJson(overrides)) } as never,
+      address,
+    );
+
+    await expect(client.readCase(`0x${"d".repeat(64)}`)).rejects.toThrow(
+      /seal/i,
+    );
+  });
+
+  it.each(["REVIEW_PENDING", "CANCELLED"])(
+    "parses the exact legacy V2 %s case schema with unavailable cutoff metadata",
+    async (lifecycle) => {
+      const client = new AccessSealClient(
+        {
+          readContract: vi
+            .fn()
+            .mockResolvedValue(legacyV2CaseJson({ lifecycle })),
+        } as never,
+        address,
+      );
+
+      await expect(
+        client.readCase(`0x${"d".repeat(64)}`),
+      ).resolves.toMatchObject({
+        lifecycle,
+        evidenceSealed: false,
+        createdAt: null,
+        evidenceCutoff: null,
+        readAt: null,
+      });
+    },
+  );
 
   it("parses u256 tokens above 2^53 without losing a wei and rejects already-parsed readbacks", async () => {
     const valid = new AccessSealClient(
@@ -232,7 +482,9 @@ describe("AccessSeal contract adapter", () => {
       rationaleHash: `sha256:${"c".repeat(64)}`,
     };
     const client = new AccessSealClient(
-      { readContract: vi.fn().mockResolvedValue(JSON.stringify(review)) } as never,
+      {
+        readContract: vi.fn().mockResolvedValue(JSON.stringify(review)),
+      } as never,
       address,
     );
     await expect(client.readReview("case-1", 0)).resolves.toEqual(review);
@@ -250,7 +502,9 @@ describe("AccessSeal contract adapter", () => {
       rationaleHash: `sha256:${"d".repeat(64)}`,
     };
     const client = new AccessSealClient(
-      { readContract: vi.fn().mockResolvedValue(JSON.stringify(v2Review)) } as never,
+      {
+        readContract: vi.fn().mockResolvedValue(JSON.stringify(v2Review)),
+      } as never,
       address,
     );
 
@@ -261,20 +515,34 @@ describe("AccessSeal contract adapter", () => {
     const wrapped = new Error(
       "An internal error was received.\n\nDetails: UserError(message='evidence epoch does not exist')\nVersion: viem@2.55.16",
     );
-    expect(matchesExactUserError(wrapped, "evidence epoch does not exist")).toBe(true);
+    expect(
+      matchesExactUserError(wrapped, "evidence epoch does not exist"),
+    ).toBe(true);
     expect(matchesExactUserError(wrapped, "review does not exist")).toBe(false);
-    expect(matchesExactUserError(new Error("RPC offline"), "evidence epoch does not exist")).toBe(false);
+    expect(
+      matchesExactUserError(
+        new Error("RPC offline"),
+        "evidence epoch does not exist",
+      ),
+    ).toBe(false);
   });
 
   it("decodes the exact Bradbury GenVM UserError payload without accepting another error", () => {
-    const rpcError = Object.assign(new Error("Missing or invalid parameters."), {
-      cause: {
-        code: -32000,
-        data: "1604646174618402736574746c656d656e7420696e74656e7420646f6573206e6f74206578697374046b696e644c557365724572726f72",
+    const rpcError = Object.assign(
+      new Error("Missing or invalid parameters."),
+      {
+        cause: {
+          code: -32000,
+          data: "1604646174618402736574746c656d656e7420696e74656e7420646f6573206e6f74206578697374046b696e644c557365724572726f72",
+        },
       },
-    });
-    expect(matchesExactUserError(rpcError, "settlement intent does not exist")).toBe(true);
-    expect(matchesExactUserError(rpcError, "review does not exist")).toBe(false);
+    );
+    expect(
+      matchesExactUserError(rpcError, "settlement intent does not exist"),
+    ).toBe(true);
+    expect(matchesExactUserError(rpcError, "review does not exist")).toBe(
+      false,
+    );
     expect(
       matchesExactUserError(
         Object.assign(new Error("Missing or invalid parameters."), {

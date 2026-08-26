@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
@@ -9,7 +9,10 @@ import type { GenLayerTransaction } from "genlayer-js/types";
 
 import {
   atomicWriteJson,
+  atomicWriteJsonExclusive,
+  canonicalJson,
   canonicalJsonHash,
+  removeExclusiveJsonInstall,
   sourceHash,
 } from "../../scripts/source-hash.ts";
 import {
@@ -24,6 +27,7 @@ import {
   identifyClientNetwork,
   normalizeReceipt,
   parseVerificationArguments,
+  readDeploymentManifest,
   validateDeploymentManifest,
   verifyFrozenSchema,
   verifyDeployment,
@@ -86,6 +90,44 @@ function manifest(overrides: Partial<DeploymentManifest> = {}): DeploymentManife
   };
 }
 
+function v3ManifestPath(value: DeploymentManifest): string {
+  return deploymentManifestPath(fixtureRepoRoot, {
+    network: value.network,
+    contractVersion: "V3",
+    contractAddress: value.contractAddress,
+    deploymentArtifactSha256: value.deploymentArtifactSha256,
+  });
+}
+
+async function removeFixtureV3Manifest(): Promise<void> {
+  await rm(v3ManifestPath(manifest()), { force: true });
+}
+
+async function writeRetainedV3Manifest(
+  repoRoot: string,
+  directoryHash: string,
+  filenameAddress: string,
+  value: DeploymentManifest,
+): Promise<void> {
+  const directory = join(
+    repoRoot,
+    "work",
+    "deployments",
+    "studionet",
+    "v3",
+    directoryHash,
+  );
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, `${filenameAddress.toLowerCase()}.json`),
+    `${JSON.stringify({ ...value, contractVersion: "V3" })}\n`,
+  );
+}
+
+function stagingEntries(names: string[]): string[] {
+  return names.filter((name) => name.endsWith(".tmp"));
+}
+
 function client(overrides: Partial<DeploymentClient> = {}): DeploymentClient {
   return {
     chain: { id: 61999, name: "Genlayer Studio Network" },
@@ -109,6 +151,7 @@ function client(overrides: Partial<DeploymentClient> = {}): DeploymentClient {
 }
 
 test("deploys only the compact artifact and binds both tracked source hashes", async () => {
+  await removeFixtureV3Manifest();
   let submittedCode: Uint8Array | undefined;
   const result = await deployAccessSeal(
     client({
@@ -178,9 +221,418 @@ test("accepts only canonical network names and keeps manifest paths contained", 
     assert.throws(() => validateNetworkName(value), /network/i);
   }
   assert.equal(
-    deploymentManifestPath("C:\\repo", "studionet"),
-    join("C:\\repo", "work", "deployments", "studionet.json"),
+    deploymentManifestPath("C:\\repo", {
+      network: "studionet",
+      contractVersion: "V3",
+      contractAddress: address,
+      deploymentArtifactSha256: sourceHash(artifactSource),
+    }),
+    join(
+      "C:\\repo",
+      "work",
+      "deployments",
+      "studionet",
+      "v3",
+      sourceHash(artifactSource),
+      `${address}.json`,
+    ),
   );
+});
+
+test("writes V3 beside the historical V2 network manifest without changing V2 bytes", async () => {
+  await removeFixtureV3Manifest();
+  const legacyPath = join(fixtureRepoRoot, "work", "deployments", "studionet.json");
+  const legacyBytes = '{"contractVersion":"V2","historical":true}\n';
+  await mkdir(join(fixtureRepoRoot, "work", "deployments"), { recursive: true });
+  await writeFile(legacyPath, legacyBytes);
+
+  const result = await deployAccessSeal(client(), {
+    network: "studionet",
+    repoRoot: fixtureRepoRoot,
+  });
+  const v3Path = deploymentManifestPath(fixtureRepoRoot, {
+    network: result.network,
+    contractVersion: "V3",
+    contractAddress: result.contractAddress,
+    deploymentArtifactSha256: result.deploymentArtifactSha256,
+  });
+
+  assert.equal(await readFile(legacyPath, "utf8"), legacyBytes);
+  assert.notEqual(v3Path, legacyPath);
+  assert.deepEqual(JSON.parse(await readFile(v3Path, "utf8")), result);
+  assert.equal((result as unknown as Record<string, unknown>).contractVersion, "V3");
+});
+
+test("does not overwrite a finalized V3 address manifest", async () => {
+  await removeFixtureV3Manifest();
+  const path = v3ManifestPath(manifest());
+  await deployAccessSeal(client(), {
+    network: "studionet",
+    repoRoot: fixtureRepoRoot,
+  });
+  const originalBytes = await readFile(path);
+
+  await assert.rejects(
+    deployAccessSeal(client(), {
+      network: "studionet",
+      repoRoot: fixtureRepoRoot,
+    }),
+    /EEXIST|already exists/i,
+  );
+  assert.deepEqual(await readFile(path), originalBytes);
+});
+
+test("exclusive installation supports paths beyond the legacy Windows path limit", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "accessseal-exclusive-long-path-"));
+  let directory = root;
+  while (join(directory, "manifest.json").length <= 260) {
+    directory = join(directory, "long-manifest-directory-segment");
+  }
+  const destination = join(directory, "manifest.json");
+  const value = { accepted: true };
+  try {
+    await atomicWriteJsonExclusive(destination, value);
+    assert.equal(await readFile(destination, "utf8"), `${canonicalJson(value)}\n`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("exclusive install receipts clean up safely on the host filesystem", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-host-cleanup-"));
+  const destination = join(directory, "manifest.json");
+  try {
+    const receipt = await atomicWriteJsonExclusive(destination, { accepted: true });
+    if (process.platform === "win32") {
+      await removeExclusiveJsonInstall(receipt);
+      assert.deepEqual(await readdir(directory), []);
+    } else {
+      await assert.rejects(
+        removeExclusiveJsonInstall(receipt),
+        /POSIX.*manual cleanup|manual recovery/i,
+      );
+      assert.equal(await readFile(destination, "utf8"), '{"accepted":true}\n');
+      assert.equal((await readdir(directory)).length, 2);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("production modules expose no caller-selectable filesystem fault boundary", async () => {
+  const [sourceExports, verifierExports] = await Promise.all([
+    import("../../scripts/source-hash.ts"),
+    import("../../deploy/999_verify_access_seal.ts"),
+  ]);
+  assert.equal("__testOnlyWithExclusiveInstallOperations" in sourceExports, false);
+  assert.equal("__testOnlyReadDeploymentManifest" in verifierExports, false);
+});
+
+test("exclusive writers admit exactly one complete manifest and clean staging", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "accessseal-exclusive-contention-"));
+  const destination = join(directory, "manifest.json");
+  const first = { writer: "first" };
+  const second = { writer: "second" };
+  try {
+    const results = await Promise.allSettled([
+      atomicWriteJsonExclusive(destination, first),
+      atomicWriteJsonExclusive(destination, second),
+    ]);
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+    const bytes = await readFile(destination, "utf8");
+    assert.ok([`${canonicalJson(first)}\n`, `${canonicalJson(second)}\n`].includes(bytes));
+    assert.deepEqual(stagingEntries(await readdir(directory)), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rejects a symbolic-link or junction ancestor before deployment", async () => {
+  await rm(join(fixtureRepoRoot, "work"), { recursive: true, force: true });
+  const outside = await mkdtemp(join(tmpdir(), "accessseal-manifest-outside-"));
+  const work = join(fixtureRepoRoot, "work");
+  const redirectedDeployments = join(work, "deployments");
+  let deployCalls = 0;
+  try {
+    await mkdir(work, { recursive: true });
+    await symlink(outside, redirectedDeployments, process.platform === "win32" ? "junction" : "dir");
+    await assert.rejects(
+      deployAccessSeal(client({
+        deployContract: async () => {
+          deployCalls += 1;
+          return txHash;
+        },
+      }), {
+        network: "studionet",
+        repoRoot: fixtureRepoRoot,
+      }),
+      /symbolic link|junction|ancestor/i,
+    );
+    assert.equal(deployCalls, 0);
+    assert.deepEqual(await readdir(outside), []);
+  } finally {
+    await rm(join(fixtureRepoRoot, "work"), { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("explicit V3 lookup rejects swapped address filenames", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  const otherAddress = "0x8765432109abcdef8765432109abcdef87654321";
+  try {
+    const value = manifest({ contractAddress: otherAddress });
+    await writeRetainedV3Manifest(
+      repoRoot,
+      value.deploymentArtifactSha256,
+      address,
+      value,
+    );
+
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /requested contract address/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit V3 lookup rejects an artifact hash inconsistent with its directory", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  try {
+    const value = manifest();
+    const otherHash = sourceHash(new TextEncoder().encode("different retained artifact"));
+    await writeRetainedV3Manifest(repoRoot, otherHash, address, value);
+
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /artifact hash.*directory/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit V3 lookup rejects ambiguous retained matches", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  try {
+    const first = manifest();
+    const secondHash = sourceHash(new TextEncoder().encode("second retained artifact"));
+    const second = manifest({
+      deploymentArtifactSha256: secondHash,
+      sourceSha256: secondHash,
+    });
+    await writeRetainedV3Manifest(
+      repoRoot,
+      first.deploymentArtifactSha256,
+      address,
+      first,
+    );
+    await writeRetainedV3Manifest(repoRoot, secondHash, address, second);
+
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /ambiguous/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit V3 lookup accepts one physically contained matching manifest", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  try {
+    const value = manifest();
+    await writeRetainedV3Manifest(
+      repoRoot,
+      value.deploymentArtifactSha256,
+      value.contractAddress,
+      value,
+    );
+    const result = await readDeploymentManifest(repoRoot, "studionet", address);
+    assert.equal(result.contractAddress, value.contractAddress);
+    assert.equal(result.deploymentArtifactSha256, value.deploymentArtifactSha256);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("V3 lookup holds a namespace lease until candidate validation returns", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-lease-"));
+  const first = manifest();
+  const secondHash = sourceHash(new TextEncoder().encode("candidate added under lease"));
+  const second = manifest({
+    deploymentArtifactSha256: secondHash,
+    sourceSha256: secondHash,
+  });
+  const v3Root = join(repoRoot, "work", "deployments", "studionet", "v3");
+  try {
+    await writeRetainedV3Manifest(
+      repoRoot,
+      first.deploymentArtifactSha256,
+      first.contractAddress,
+      first,
+    );
+    const sourceExports = await import("../../scripts/source-hash.ts");
+    const withLease = (
+      sourceExports as typeof sourceExports & {
+        withV3ManifestNamespaceLease?: <T>(root: string, action: () => Promise<T>) => Promise<T>;
+      }
+    ).withV3ManifestNamespaceLease;
+    assert.equal(typeof withLease, "function");
+
+    let lookupSettled = false;
+    let lookupOutcome: Promise<{ value?: DeploymentManifest; error?: unknown }> | undefined;
+    await withLease!(v3Root, async () => {
+      lookupOutcome = readDeploymentManifest(repoRoot, "studionet", address).then(
+        (value) => {
+          lookupSettled = true;
+          return { value };
+        },
+        (error: unknown) => {
+          lookupSettled = true;
+          return { error };
+        },
+      );
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+      assert.equal(lookupSettled, false);
+      await writeRetainedV3Manifest(repoRoot, secondHash, address, second);
+    });
+    const outcome = await lookupOutcome!;
+    assert.match(String(outcome.error), /ambiguous|candidate/i);
+    assert.equal(outcome.value, undefined);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("V3 lookup preserves an unowned stale namespace lease and fails closed", {
+  timeout: 10_000,
+}, async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-stale-lease-"));
+  const value = manifest();
+  const v3Root = join(repoRoot, "work", "deployments", "studionet", "v3");
+  const leasePath = join(v3Root, ".accessseal-v3.namespace.lock");
+  const staleBytes = "unowned stale lease must survive\n";
+  try {
+    await writeRetainedV3Manifest(
+      repoRoot,
+      value.deploymentArtifactSha256,
+      value.contractAddress,
+      value,
+    );
+    await writeFile(leasePath, staleBytes, { flag: "wx" });
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /lease.*held|stale|manual recovery/i,
+    );
+    assert.equal(await readFile(leasePath, "utf8"), staleBytes);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("explicit V3 lookup rejects a requested manifest symbolic link", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
+  const outside = join(repoRoot, "outside-manifest.json");
+  const directory = join(
+    repoRoot,
+    "work",
+    "deployments",
+    "studionet",
+    "v3",
+    sourceHash(artifactSource),
+  );
+  try {
+    await mkdir(directory, { recursive: true });
+    await writeFile(outside, `${JSON.stringify({ ...manifest(), contractVersion: "V3" })}\n`);
+    const requestedPath = join(directory, `${address}.json`);
+    try {
+      await symlink(outside, requestedPath, "file");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+      await rm(outside, { force: true });
+      await mkdir(outside, { recursive: true });
+      await symlink(outside, requestedPath, "junction");
+    }
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet", address),
+      /symbolic link|symlink/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("preflights the V3 manifest destination before calling deployContract", async () => {
+  const artifactHash = sourceHash(artifactSource);
+  const versionDirectory = join(
+    fixtureRepoRoot,
+    "work",
+    "deployments",
+    "studionet",
+    "v3",
+    artifactHash,
+  );
+  await rm(versionDirectory, { recursive: true, force: true });
+  await mkdir(join(versionDirectory, ".."), { recursive: true });
+  await writeFile(versionDirectory, "blocks destination directory\n");
+  let deployCalls = 0;
+  const deployContract = async () => {
+    deployCalls += 1;
+    return txHash;
+  };
+  try {
+    await assert.rejects(
+      deployAccessSeal(client({ deployContract }), {
+        network: "studionet",
+        repoRoot: fixtureRepoRoot,
+      }),
+      /manifest destination preflight/i,
+    );
+    assert.equal(deployCalls, 0);
+  } finally {
+    await rm(versionDirectory, { force: true });
+  }
+});
+
+test("deployment preserves an unowned namespace lease and makes zero deployment calls", {
+  timeout: 10_000,
+}, async () => {
+  const v3Root = join(
+    fixtureRepoRoot,
+    "work",
+    "deployments",
+    "studionet",
+    "v3",
+  );
+  const leasePath = join(v3Root, ".accessseal-v3.namespace.lock");
+  const foreignBytes = "foreign namespace lease must survive\n";
+  let deployCalls = 0;
+  await rm(v3Root, { recursive: true, force: true });
+  await mkdir(v3Root, { recursive: true });
+  await writeFile(leasePath, foreignBytes, { flag: "wx" });
+  try {
+    await assert.rejects(
+      deployAccessSeal(client({
+        deployContract: async () => {
+          deployCalls += 1;
+          return txHash;
+        },
+      }), {
+        network: "studionet",
+        repoRoot: fixtureRepoRoot,
+      }),
+      /lease.*held|stale|manual recovery/i,
+    );
+    assert.equal(deployCalls, 0);
+    assert.equal(await readFile(leasePath, "utf8"), foreignBytes);
+  } finally {
+    await rm(v3Root, { recursive: true, force: true });
+  }
 });
 
 test("requires one explicit canonical network for the standalone verifier", () => {
@@ -195,6 +647,7 @@ test("normalizes the pinned simplified receipt and both official address shapes"
   assert.equal((studio as Record<string, unknown>).status_name, "FINALIZED");
   assert.equal((studio as Record<string, unknown>).statusName, undefined);
   for (const addressShape of ["studio", "testnet"] as const) {
+    await removeFixtureV3Manifest();
     const result = await deployAccessSeal(
       client({
         waitForTransactionReceipt: async () => officialReceipt(
@@ -210,7 +663,7 @@ test("normalizes the pinned simplified receipt and both official address shapes"
     );
     assert.equal(result.contractAddress, address);
     assert.deepEqual(
-      JSON.parse(await readFile(deploymentManifestPath(fixtureRepoRoot, "studionet"), "utf8")),
+      JSON.parse(await readFile(v3ManifestPath(result), "utf8")),
       result,
     );
   }
@@ -381,7 +834,7 @@ test("public deployment independently rejects non-repository and dirty worktrees
 });
 
 test("does not write a manifest when authoritative readback fails", async () => {
-  const path = deploymentManifestPath(fixtureRepoRoot, "studionet");
+  const path = v3ManifestPath(manifest());
   await rm(path, { force: true });
   await assert.rejects(
     deployAccessSeal(
@@ -521,6 +974,36 @@ test("frozen schema policy rejects extra privilege and signature drift", () => {
       },
     }),
     /frozen schema/i,
+  );
+});
+
+test("V3 schema exposes buyer evidence sealing and rejects privileged escape hatches", () => {
+  assert.deepEqual(schema.methods.close_evidence, {
+    params: [["case_id", "string"]],
+    kwparams: {},
+    readonly: false,
+    ret: "null",
+    payable: false,
+  });
+  for (const method of ["owner", "upgrade", "override_verdict"] as const) {
+    assert.throws(
+      () =>
+        verifyFrozenSchema({
+          ...schema,
+          methods: { ...schema.methods, [method]: schema.methods.close_evidence },
+        }),
+      /frozen schema/i,
+    );
+  }
+});
+
+test("deployment manifest accepts only the intentionally frozen classification", () => {
+  assert.throws(
+    () =>
+      validateDeploymentManifest(
+        manifest({ contractClassification: "UPGRADEABLE" as "INTENTIONALLY_FROZEN" }),
+      ),
+    /classification/i,
   );
 });
 

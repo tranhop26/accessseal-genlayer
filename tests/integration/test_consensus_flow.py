@@ -1,5 +1,7 @@
+import base64
 import json
 import os
+from datetime import datetime
 
 import pytest
 from gltest.assertions import tx_execution_failed
@@ -8,17 +10,21 @@ from gltest.types import TransactionStatus
 from conftest import (
     assert_accounting_conservation,
     assert_five_validator_consensus,
+    BASE_TIME,
     build_release,
     candidate,
+    create_funded_case,
     EVIDENCE_TYPES,
     FLOWS_HASH,
     io_context,
     open_release,
     ORIGIN,
     PATHS,
+    PROJECT_ROOT,
     read_json,
     record_evidence,
     rpc,
+    submit_complete_evidence,
 )
 from scripts.glsim_support import GenLayerSettlementReader, read_and_verify_settlement_proof
 
@@ -124,6 +130,29 @@ def test_submitted_envelopes_share_served_case_and_observation_time(
     )
 
 
+def test_deployed_get_case_reports_authoritative_before_exact_and_after_cutoff(
+    deployed_contract, actors
+):
+    case_id = create_funded_case(
+        deployed_contract,
+        actors,
+        "integration-cutoff-readback",
+    )
+    created_at = int(datetime.fromisoformat(BASE_TIME).timestamp())
+    cutoff = created_at + 1_800
+
+    for when, expected_read_at in (
+        ("2026-08-13T00:29:59+00:00", cutoff - 1),
+        ("2026-08-13T00:30:00+00:00", cutoff),
+        ("2026-08-13T00:30:01+00:00", cutoff + 1),
+    ):
+        rpc("sim_setTime", [when])
+        readback = read_json(deployed_contract, "get_case", [case_id])
+        assert readback["createdAt"] == created_at
+        assert readback["evidenceCutoff"] == cutoff
+        assert readback["readAt"] == expected_read_at
+
+
 def test_five_validators_finalize_semantic_approval_and_contract_finality(
     deployed_contract, actors, fixture_site
 ):
@@ -205,6 +234,55 @@ def test_five_validators_finalize_semantic_approval_and_contract_finality(
             "finality": finality["status"],
         },
     )
+
+
+def test_early_seal_reviews_complete_evidence_before_cutoff_from_deployed_source(
+    deployed_contract, actors, fixture_site
+):
+    buyer, vendor, reviewer, _ = actors
+    case_id, release = open_release(
+        deployed_contract,
+        actors,
+        fixture_site,
+        "integration-early-seal-approved",
+    )
+    case = read_json(deployed_contract, "get_case", [case_id])
+    deployed_source = base64.b64decode(
+        rpc("gen_getContractCode", [case["contractAddress"]])
+    )
+    tracked_artifact = (PROJECT_ROOT / "contracts/access_seal_deploy.py").read_bytes()
+
+    assert deployed_source == tracked_artifact
+    submit_complete_evidence(deployed_contract, case_id, buyer, vendor)
+    sealed = read_json(deployed_contract, "get_case", [case_id])
+    created_at = int(datetime.fromisoformat(BASE_TIME).timestamp())
+    evidence_cutoff = created_at + case["evidenceDeadline"]
+    assert sealed["evidenceSealedAt"] < evidence_cutoff
+
+    rpc("accessseal_resetValidatorTelemetry", [])
+    receipt = deployed_contract.connect(reviewer).request_review([case_id]).transact(
+        wait_transaction_status=TransactionStatus.FINALIZED,
+        transaction_context=io_context(
+            release,
+            candidate(deployed_contract, case_id, release, "APPROVED"),
+            when=release["transactionTime"],
+        ),
+    )
+
+    telemetry = rpc("accessseal_getValidatorTelemetry", [])
+    assert_five_validator_consensus(receipt, telemetry)
+    review_attempt = read_json(deployed_contract, "get_review_attempt", [case_id, 0, 0])
+    assert review_attempt["decidedAt"] < evidence_cutoff
+    assert read_json(deployed_contract, "get_review", [case_id, 0])["verdict"] == (
+        "APPROVED"
+    )
+    assert read_json(deployed_contract, "get_review_finality", [case_id])["status"] == (
+        "FINALIZED"
+    )
+    decided = read_json(deployed_contract, "get_case", [case_id])
+    assert decided["lifecycle"] == "DECIDED"
+    assert decided["evidenceSealed"] is True
+    assert decided["evidenceSealedBy"] == buyer.address.lower()
 
 
 def test_glsim_exposes_eoa_dispatch_limit_without_claiming_recipient_delivery(

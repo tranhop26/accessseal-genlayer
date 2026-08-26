@@ -1464,7 +1464,35 @@ def test_review_requires_at_least_one_supporting_evidence_item(
     assert contract.get_case_json(case_id)["lifecycle"] == "EVIDENCE_OPEN"
 
 
-def test_review_requires_the_evidence_cutoff(
+def test_buyer_seal_allows_immediate_review_before_evidence_cutoff(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        advance_to_cutoff=False,
+    )
+    mock_adjudication(direct_vm, release)
+
+    contract.as_(buyer).close_evidence(case_id)
+
+    sealed = contract.get_case_json(case_id)
+    assert sealed["lifecycle"] == "EVIDENCE_SEALED"
+    assert sealed["evidenceSealed"] is True
+    assert sealed["evidenceSealedAt"] > 0
+    assert sealed["evidenceSealedBy"] == buyer.as_hex.lower()
+
+    contract.request_review(case_id)
+
+    assert json.loads(contract.get_review_finality(case_id))["status"] == (
+        "PENDING_PROTOCOL_FINALITY"
+    )
+    assert json.loads(contract.get_review(case_id, 0))["verdict"] == "APPROVED"
+
+
+def test_unsealed_complete_evidence_requires_review_after_the_evidence_cutoff(
     contract, direct_vm, buyer, vendor
 ):
     case_id, _release = open_reviewable_case(
@@ -1474,12 +1502,33 @@ def test_review_requires_the_evidence_cutoff(
         vendor,
         advance_to_cutoff=False,
     )
+    direct_vm.warp("2026-08-13T00:30:00+00:00")
 
     contract.request_review.reverts(
         case_id,
         message="review is not eligible before the evidence cutoff",
     )
     assert contract.get_case_json(case_id)["lifecycle"] == "EVIDENCE_OPEN"
+
+
+def test_unsealed_complete_evidence_reviews_one_second_after_cutoff(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        advance_to_cutoff=False,
+    )
+    mock_adjudication(direct_vm, release)
+    direct_vm.warp("2026-08-13T00:30:01+00:00")
+
+    contract.request_review(case_id)
+
+    assert json.loads(contract.get_review_finality(case_id))["status"] == (
+        "PENDING_PROTOCOL_FINALITY"
+    )
 
 
 def test_review_rejects_the_hard_deadline(
@@ -1493,6 +1542,39 @@ def test_review_rejects_the_hard_deadline(
         message="case hard deadline has expired",
     )
     assert contract.get_case_json(case_id)["lifecycle"] == "EVIDENCE_OPEN"
+
+
+def test_sealed_review_rejects_exact_hard_deadline_without_state_changes(
+    contract, direct_vm, buyer, vendor
+):
+    case_id, _release = open_reviewable_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        salt="sealed-exact-hard-deadline",
+        advance_to_cutoff=False,
+    )
+    contract.as_(buyer).close_evidence(case_id)
+    before_case = contract.get_case_json(case_id)
+    before_evidence = json.loads(contract.get_evidence(case_id, 0))
+    before_accounting = json.loads(contract.get_accounting())
+
+    direct_vm.warp("2026-08-13T02:00:00+00:00")
+    contract.request_review.reverts(
+        case_id,
+        message="case hard deadline has expired",
+    )
+
+    assert before_case["lifecycle"] == "EVIDENCE_SEALED"
+    assert before_case["evidenceSealed"] is True
+    after_case = contract.get_case_json(case_id)
+    assert after_case["readAt"] > before_case["readAt"]
+    assert {key: value for key, value in after_case.items() if key != "readAt"} == {
+        key: value for key, value in before_case.items() if key != "readAt"
+    }
+    assert json.loads(contract.get_evidence(case_id, 0)) == before_evidence
+    assert json.loads(contract.get_accounting()) == before_accounting
 
 
 def test_review_epoch_can_only_finalize_once(

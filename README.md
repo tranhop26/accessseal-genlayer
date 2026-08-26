@@ -12,17 +12,21 @@ The repository currently contains complete local implementation and test tooling
 
 1. The buyer proposes a vendor, accessibility-profile hash, three critical-flow hashes, release origin, deadlines, retry limit, and simulated escrow amount.
 2. The vendor accepts the exact canonical terms. The buyer funds the contract with the exact simulated amount.
-3. The vendor opens an evidence epoch with a canonical release manifest and submits the five mandatory bound artifacts: HTML, screenshot, DOM facts, scanner report, and critical-flow trace.
-4. Each GenLayer validator independently fetches the manifest and artifacts, checks same-origin URI policy, byte limits, SHA-256 bindings, media/schema rules, then judges the real bounded content. Website text is untrusted data, not validator instruction.
-5. Consensus stores one of `APPROVED`, `REJECTED`, `REQUEST_MORE_INFO`, or `UNRESOLVED`. Missing proof never becomes approval.
-6. An authenticated finality-only self-message marks the exact review attempt `FINALIZED`.
-7. Anyone may prepare and dispatch an eligible immutable payout/refund intent. Accounting remains conserved and replay-safe.
+3. The vendor opens an evidence epoch with a canonical release manifest and submits exactly six current items: the manifest, HTML, screenshot, DOM facts, scanner report, and critical-flow trace.
+4. Before the hard deadline, the buyer may call `close_evidence` only while the epoch is `EVIDENCE_OPEN` and all six items are present and unexpired. The contract records `evidenceSealed`, `evidenceSealedAt`, and `evidenceSealedBy`, then moves the epoch to `EVIDENCE_SEALED`.
+5. An eligible reviewer may request review immediately after authoritative sealed readback. Without a seal, review remains unavailable until the evidence cutoff has passed; the hard deadline remains a hard stop.
+6. Each GenLayer validator independently fetches the manifest and artifacts, checks same-origin URI policy, byte limits, SHA-256 bindings, media/schema rules, then judges the real bounded content. Website text is untrusted data, not validator instruction.
+7. Consensus stores one of `APPROVED`, `REJECTED`, `REQUEST_MORE_INFO`, or `UNRESOLVED`. Missing proof never becomes approval.
+8. An authenticated finality-only self-message marks the exact review attempt `FINALIZED`.
+9. Anyone may prepare and dispatch an eligible immutable payout/refund intent. Accounting remains conserved and replay-safe.
+
+Early evidence sealing is an authorization to request review sooner; it is **not** approval, protocol finality, payout/refund finality, or settlement.
 
 The contract is `INTENTIONALLY_FROZEN`: there is no owner override, verdict override, recipient redirect, or privileged upgrade method. See [architecture](docs/architecture.md), [threat model](docs/threat-model.md), and [recovery runbook](docs/recovery-runbook.md).
 
 ## Roles
 
-- **Buyer:** creates the case, funds exact simulated escrow, and receives rejection/timeout refunds.
+- **Buyer:** creates the case, funds exact simulated escrow, may seal a complete fresh evidence epoch early, and receives rejection/timeout refunds.
 - **Vendor:** accepts immutable terms, submits the release evidence, cures one `REQUEST_MORE_INFO` epoch, and receives approved payouts.
 - **Reviewer/settler:** any unrelated wallet may request an eligible review, retry an unresolved review, prepare settlement, or dispatch an exact prepared intent.
 - **GenLayer validators:** independently fetch, verify, and semantically judge the bound evidence.
@@ -122,12 +126,16 @@ npm run contract:check
 
 The artifact is generated with pinned `python-minifier==3.2.0`, preserves the exact dependency header, annotations, public/global names, storage and ABI, and must remain at most 48,000 UTF-8 bytes. It must never be hand-edited. Root lint, tests, integration, and build reject a missing or stale artifact; GenVM lint/schema parity and the full direct suite run against the deployed artifact.
 
-The production deployment entrypoint is `deploy/001_deploy_access_seal.ts`. Its GenLayer client must have an environment-provided signer and the requested exact chain identity. It refuses a dirty repository or stale artifact, deploys only the compact artifact, waits for `FINALIZED` plus `FINISHED_WITH_RETURN`, and writes a v2 ignored manifest only after verifying the readable-source hash, deployed-artifact hash, schema, frozen interface, address, transaction, and finalized accounting.
+The production deployment entrypoint is `deploy/001_deploy_access_seal.ts`. Its GenLayer client must have an environment-provided signer and the requested exact chain identity. It refuses a dirty repository or stale artifact, preflights the V3 manifest destination before submitting a deployment, deploys only the compact artifact, waits for `FINALIZED` plus `FINISHED_WITH_RETURN`, and writes an ignored V3 record only after verifying the readable-source hash, deployed-artifact hash, schema, frozen interface, address, transaction, and finalized accounting.
 
-After a deployment manifest exists at `work/deployments/<network>.json`, perform independent readback:
+On POSIX, deployment and manifest lookup additionally require `python3` with `fcntl`, `O_NOFOLLOW`, stable nonzero inode identities, same-filesystem hard links, and reliable local-filesystem `flock` semantics. Network or virtual filesystems that cannot provide those guarantees are unsupported and fail closed. The namespace lock and exact-directory preflight marker are persistent hidden files; complete manifest publication retains one hidden hard-link alias so the final pathname is never exposed with partial bytes. POSIX receipt removal is deliberately manual because pathname deletion cannot be bound safely to an already-verified inode.
+
+AccessSeal V3 is a new frozen contract deployment: deploy it at a new address, record that address and its V3 source/schema readback in a new manifest, and configure clients only after that readback. V2 cases, evidence, review/settlement IDs, storage, and balances do not migrate into V3; each user must use the recovery path encoded by V2 or explicitly create a new V3 case.
+
+V3 manifests are kept beside, never in place of, historical V2 records at `work/deployments/<network>/v3/<deployment-artifact-sha256>/<contract-address>.json`. Perform independent readback against the exact V3 address:
 
 ```powershell
-npm run verify:deployment -- --network testnet_bradbury
+npm run verify:deployment -- --network testnet_bradbury --contract-address <V3_CONTRACT_ADDRESS>
 ```
 
 The verifier re-fetches the deployment transaction and requires exact clean `HEAD`, deterministic artifact regeneration, both tracked source hashes, deployed artifact bytes, schema hash, contract address, finality, execution, frozen schema, and `latest-final` accounting conservation. `sourceSha256` remains an exact alias of `deploymentArtifactSha256`; contradictory values are rejected.
@@ -137,6 +145,8 @@ Do not copy `docs/deployment-manifest.example.json` into production unchanged; i
 ## Settlement and recovery states
 
 - `PENDING`/`ACCEPTED` is not final. Wait for `FINALIZED` and successful execution, then perform authoritative readback.
+- `EVIDENCE_OPEN -> EVIDENCE_SEALED -> review` is available only when the buyer closes a current complete six-item epoch. Read `lifecycle`, `evidenceSealed`, `evidenceSealedAt`, and `evidenceSealedBy` from `get_case` before treating the seal as authoritative. A seal permits immediate review but is not a verdict, finality, or settlement.
+- If the buyer does not seal, the cutoff fallback is unchanged: review becomes eligible only after the evidence cutoff has passed, subject to the hard deadline.
 - `REQUEST_MORE_INFO` allows one vendor cure epoch with a new evidence/replay domain.
 - `UNRESOLVED` never moves value. Anyone may retry after cooldown within the fixed budget; exhausted recovery produces a deterministic refund path.
 - `APPROVED` can prepare only the immutable vendor payout; `REJECTED` can prepare only the immutable buyer refund, and only after the contract-derived finality proof.
@@ -185,8 +195,8 @@ Both are ignored local evidence until deliberately included in a submission pack
 6. Localnet/Studionet value is simulated.
 7. `DISPATCHED_FINALIZED` does not prove child receipt or recipient balance; no automatic external-child retry is claimed.
 8. There is no on-chain case enumeration, persisted review/appeal transaction history, or case `createdAt` view.
-9. Frozen code removes upgrade-key risk but cannot be patched in place. A v2 requires a new deployment and migration by user action.
-10. V2 is not proven until a live Bradbury model canary reaches finalized authoritative readback.
+9. Frozen code removes upgrade-key risk but cannot be patched in place. V3 requires a new-address deployment; V2 does not migrate automatically and users act through the applicable recovery/new-case path.
+10. V3 is not proven until a live Bradbury model canary reaches finalized authoritative readback.
 
 ## Repository map
 
