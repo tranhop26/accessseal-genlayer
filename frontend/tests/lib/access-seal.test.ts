@@ -413,7 +413,7 @@ describe("AccessSeal contract adapter", () => {
     ).resolves.toBe(false);
   });
 
-  it("passes value only to funding and zero to every other write", async () => {
+  it("uses seven consensus rotations only for intelligent review", async () => {
     const connect = vi.fn();
     const writeContract = vi.fn().mockResolvedValue(`0x${"d".repeat(64)}`);
     const client = new AccessSealClient(
@@ -424,21 +424,21 @@ describe("AccessSeal contract adapter", () => {
     await client.fund("case-1", 42n);
     await client.requestReview("case-1");
     expect(connect).toHaveBeenCalledWith("studionet");
-    expect(writeContract).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        functionName: "fund",
-        args: ["case-1"],
-        value: 42n,
-      }),
-    );
-    expect(writeContract).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        functionName: "request_review",
-        args: ["case-1"],
-        value: 0n,
-      }),
+    expect(writeContract).toHaveBeenNthCalledWith(1, {
+      address: "0x1234567890abcdef1234567890abcdef12345678",
+      functionName: "fund",
+      args: ["case-1"],
+      value: 42n,
+    });
+    expect(writeContract).toHaveBeenNthCalledWith(2, {
+      address: "0x1234567890abcdef1234567890abcdef12345678",
+      functionName: "request_review",
+      args: ["case-1"],
+      value: 0n,
+      consensusMaxRotations: 7,
+    });
+    expect(writeContract.mock.calls[0]?.[0]).not.toHaveProperty(
+      "consensusMaxRotations",
     );
   });
 
