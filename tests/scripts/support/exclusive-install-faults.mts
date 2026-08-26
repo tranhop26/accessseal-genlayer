@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import * as realFs from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, toNamespacedPath } from "node:path";
 import test, { mock } from "node:test";
 
 type FaultOperations = {
@@ -60,6 +60,19 @@ function injectedFilesystemError(code: string): Error & { code: string } {
 
 function stagingEntries(names: string[]): string[] {
   return names.filter((name) => name.endsWith(".tmp"));
+}
+
+function canonicalFaultPath(path: string): string {
+  return process.platform === "win32" ? path.toLowerCase() : path;
+}
+
+async function existingCanonicalFaultPath(path: string): Promise<string | undefined> {
+  try {
+    return canonicalFaultPath(await realFs.realpath(path));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
 }
 
 test("production writer rejects a no-op link implementation", async () => {
@@ -182,12 +195,12 @@ test("production writer reports retained staging when cleanup fails", async () =
 });
 
 test("production lookup rejects a requested manifest swapped before its pinned open", async () => {
-  const repoRoot = await realFs.mkdtemp(join(tmpdir(), "accessseal-lookup-swap-"));
+  const rawRepoRoot = await realFs.mkdtemp(join(tmpdir(), "accessseal-lookup-swap-"));
+  const repoRoot = process.platform === "win32" ? toNamespacedPath(rawRepoRoot) : rawRepoRoot;
   const address = "0x1234567890abcdef1234567890abcdef12345678";
   const artifactHash = sourceHash(new TextEncoder().encode("fault harness artifact"));
   const directory = join(repoRoot, "work", "deployments", "studionet", "v3", artifactHash);
   const path = join(directory, `${address}.json`);
-  const faultTarget = process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
   const original = {
     schemaVersion: "accessseal-deployment-manifest/2",
     contractVersion: "V3",
@@ -209,13 +222,12 @@ test("production lookup rejects a requested manifest swapped before its pinned o
   try {
     await realFs.mkdir(directory, { recursive: true });
     await realFs.writeFile(path, `${JSON.stringify(original)}\n`);
+    const faultTarget = canonicalFaultPath(await realFs.realpath(path));
     await assert.rejects(
       withFaultOperations(
         {
           open: async (requested, flags, mode) => {
-            const requestedPath = process.platform === "win32"
-              ? resolve(String(requested)).toLowerCase()
-              : resolve(String(requested));
+            const requestedPath = await existingCanonicalFaultPath(String(requested));
             if (!swapped && requestedPath === faultTarget) {
               swapped = true;
               await realFs.rm(path);
@@ -230,6 +242,6 @@ test("production lookup rejects a requested manifest swapped before its pinned o
     );
     assert.equal(swapped, true);
   } finally {
-    await realFs.rm(repoRoot, { recursive: true, force: true });
+    await realFs.rm(rawRepoRoot, { recursive: true, force: true });
   }
 });
