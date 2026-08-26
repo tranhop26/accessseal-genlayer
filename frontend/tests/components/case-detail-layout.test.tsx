@@ -843,9 +843,11 @@ describe("case detail document layout", () => {
         screen.getByRole("button", { name: "Close evidence & enable review" }),
       ).toBeEnabled(),
     );
-    expect(
-      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
-    ).toBeNull();
+    await waitFor(() =>
+      expect(
+        localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+      ).toBeNull(),
+    );
   });
 
   it("reuses a restored finalized seal hash for readback retry without a duplicate send", async () => {
