@@ -79,6 +79,10 @@ export type EvidenceRecord = {
 };
 export type Hash = `0x${string}`;
 
+type WriteOptions = {
+  consensusMaxRotations?: number;
+};
+
 type SdkClient = {
   connect(network?: string): Promise<void>;
   readContract(args: {
@@ -92,6 +96,7 @@ type SdkClient = {
     functionName: string;
     args: unknown[];
     value: bigint;
+    consensusMaxRotations?: number;
   }): Promise<Hash>;
   canAppeal(args: { txId: Hash }): Promise<boolean>;
   getRoundNumber(args: { txId: Hash }): Promise<bigint>;
@@ -329,6 +334,7 @@ export class AccessSealClient {
     functionName: string,
     args: unknown[],
     value = 0n,
+    options: WriteOptions = {},
   ): Promise<Hash> {
     if (!this.network)
       throw new Error("A wallet network is required for writes.");
@@ -338,6 +344,7 @@ export class AccessSealClient {
       functionName,
       args,
       value,
+      ...options,
     });
   }
   async readCase(caseId: string): Promise<CaseRecord> {
@@ -593,7 +600,9 @@ export class AccessSealClient {
     return this.write("close_evidence", [caseId]);
   }
   requestReview(caseId: string) {
-    return this.write("request_review", [caseId]);
+    return this.write("request_review", [caseId], 0n, {
+      consensusMaxRotations: 7,
+    });
   }
   startCure(caseId: string) {
     return this.write("start_cure", [caseId]);
