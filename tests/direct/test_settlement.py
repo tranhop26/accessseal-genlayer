@@ -6,6 +6,7 @@ from test_adjudication import (
     derived_llm_handler,
     mock_adjudication,
     open_reviewable_case,
+    semantic_only_candidate,
 )
 from test_recovery import _confirm_finality, _finality
 
@@ -151,12 +152,13 @@ def test_wrong_verdict_and_rmi_or_unresolved_never_prepare_settlement(
         approved, message="only a rejected verdict authorizes a refund"
     )
 
-    unresolved, release = open_reviewable_case(
+    unresolved, _release = open_reviewable_case(
         contract, direct_vm, buyer, vendor, salt="no-unresolved-settlement"
     )
-    mock_adjudication(
-        direct_vm, release, status_overrides={"RELEASE_MANIFEST": 503}
-    )
+    def fail_review(_data):
+        raise RuntimeError("model unavailable")
+
+    direct_vm._live_llm_handler = fail_review
     contract.request_review(unresolved)
     _confirm_finality(contract, unresolved)
     contract.prepare_payout.reverts(
@@ -172,8 +174,14 @@ def test_wrong_verdict_and_rmi_or_unresolved_never_prepare_settlement(
         buyer,
         vendor,
         salt="no-rmi-settlement",
-        supporting_evidence=("HTML_BUNDLE",),
     )
+    direct_vm._live_llm_handler = lambda _data: {
+        "ok": semantic_only_candidate(
+            "REQUEST_MORE_INFO",
+            missing=["SCREENSHOT"],
+            rationale="The sealed screenshot evidence needs clarification.",
+        )
+    }
     contract.request_review(rmi)
     _confirm_finality(contract, rmi)
     contract.prepare_payout.reverts(
@@ -195,8 +203,6 @@ def test_hard_timeout_refunds_sealed_unreviewed_evidence(
         salt="sealed-hard-timeout",
         advance_to_cutoff=False,
     )
-    contract.as_(buyer).close_evidence(case_id)
-
     direct_vm.warp("2026-08-13T02:00:01+00:00")
     contract.as_(outsider).timeout_refund(case_id)
 

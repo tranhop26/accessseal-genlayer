@@ -3,7 +3,7 @@ from hashlib import sha256
 
 import pytest
 
-from test_adjudication import open_reviewable_case
+from test_adjudication import open_reviewable_case, semantic_only_candidate
 
 
 PROFILE_HASH = "0x" + "11" * 32
@@ -1375,9 +1375,15 @@ def test_early_seal_rejects_manifestless_cure_epoch_without_mutation(
         direct_vm,
         buyer,
         vendor,
-        supporting_evidence=("HTML_BUNDLE",),
         salt="manifestless-cure-epoch",
     )
+    direct_vm._live_llm_handler = lambda _data: {
+        "ok": semantic_only_candidate(
+            "REQUEST_MORE_INFO",
+            missing=["SCREENSHOT"],
+            rationale="The sealed screenshot evidence needs clarification.",
+        )
+    }
     contract.request_review(case_id)
     finality = json.loads(contract.get_review_finality(case_id))
     self_address = Address(contract.get_case_json(case_id)["contractAddress"])
