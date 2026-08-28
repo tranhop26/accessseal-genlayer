@@ -71,16 +71,10 @@ const MANIFEST_KEYS = ["caseId", "epoch", "files", "profileHash", "schemaVersion
 const FILE_KEYS = ["evidenceType", "mediaType", "path", "sha256"];
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const MAX_TOTAL_BYTES = 131072;
-const AUDITED_PAGE_URLS = [
-  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`,
-  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`,
-  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`,
-] as const;
 const DOM_PAGE_KEYS = [
   "accessibleNames", "disabledStates", "focusableControlOrder", "formLabels", "headings",
   "imageAlternatives", "landmarks", "skipLinkTarget", "url",
 ] as const;
-const FLOW_IDS = ["workspace-navigation", "create-case-preview", "case-section-navigation"] as const;
 const CREATE_FORM_LABELS = [
   "Vendor wallet", "Website origin", "Accessibility profile hash", "Critical flow 1", "Critical flow 2", "Critical flow 3", "Simulated escrow (wei)",
 ] as const;
@@ -88,6 +82,24 @@ const FLOW_CHECKPOINTS = Object.freeze({
   "workspace-navigation": ["skip-focused", "main-focused", "overview-navigation", "cases-navigation"],
   "create-case-preview": ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"],
   "case-section-navigation": ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"],
+});
+
+type SemanticFlow = { id: string; pageUrl: string; checkpoints: readonly string[] };
+type SemanticBinding = { caseId: string; flowsHash: string; subjectOrigin: string; auditedPageUrls: readonly string[]; criticalFlows: readonly SemanticFlow[] };
+const LEGACY_SEMANTIC_BINDING: SemanticBinding = Object.freeze({
+  caseId: LIVE_EVIDENCE_BINDING.caseId,
+  flowsHash: LIVE_EVIDENCE_BINDING.flowsHash,
+  subjectOrigin: LIVE_EVIDENCE_BINDING.subjectOrigin,
+  auditedPageUrls: Object.freeze([
+    `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`,
+    `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`,
+    `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`,
+  ]),
+  criticalFlows: Object.freeze([
+    { id: "workspace-navigation", pageUrl: `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`, checkpoints: FLOW_CHECKPOINTS["workspace-navigation"] },
+    { id: "create-case-preview", pageUrl: `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`, checkpoints: FLOW_CHECKPOINTS["create-case-preview"] },
+    { id: "case-section-navigation", pageUrl: `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`, checkpoints: FLOW_CHECKPOINTS["case-section-navigation"] },
+  ]),
 });
 
 function record(value: unknown, label: string): JsonRecord {
@@ -156,8 +168,8 @@ function objectArray(value: unknown, label: string, keys: readonly string[]): Js
   });
 }
 
-function validateNormalizedPageUrl(value: unknown): string {
-  if (typeof value !== "string" || !value.startsWith(`${LIVE_EVIDENCE_BINDING.subjectOrigin}/`)) {
+function validateNormalizedPageUrl(value: unknown, binding: SemanticBinding): string {
+  if (typeof value !== "string" || !value.startsWith(`${binding.subjectOrigin}/`)) {
     throw new Error("DOM facts page URL is outside the normalized live origin");
   }
   let parsed: URL;
@@ -168,7 +180,7 @@ function validateNormalizedPageUrl(value: unknown): string {
   }
   if (
     parsed.protocol !== "https:" ||
-    parsed.origin !== LIVE_EVIDENCE_BINDING.subjectOrigin ||
+    parsed.origin !== binding.subjectOrigin ||
     parsed.search !== "" ||
     parsed.hash !== "" ||
     parsed.pathname.includes("//") ||
@@ -229,18 +241,18 @@ export function sha256(input: Uint8Array): string {
   return createHash("sha256").update(Buffer.from(input)).digest("hex");
 }
 
-function validateDomFacts(value: unknown, observedAt: number): string[] {
+function validateDomFacts(value: unknown, observedAt: number, binding: SemanticBinding): string[] {
   const facts = record(value, "DOM facts");
   sameString(facts.schemaVersion, "accessseal-dom-facts/1", "DOM facts schema version");
   integer(facts.observedAt, "DOM facts observedAt");
   if (facts.observedAt !== observedAt) throw new Error("DOM facts timestamp does not match capture");
-  if (!Array.isArray(facts.pages) || facts.pages.length !== AUDITED_PAGE_URLS.length) throw new Error("DOM facts must contain exactly three audited pages");
+  if (!Array.isArray(facts.pages) || facts.pages.length !== binding.auditedPageUrls.length) throw new Error("DOM facts must contain exactly three audited pages");
   const urls: string[] = [];
   for (const [index, pageValue] of facts.pages.entries()) {
     const page = record(pageValue, "DOM facts page");
     exactKeys(page, DOM_PAGE_KEYS, "DOM facts page");
-    const url = validateNormalizedPageUrl(page.url);
-    sameString(url, AUDITED_PAGE_URLS[index]!, "DOM facts page URL/order");
+    const url = validateNormalizedPageUrl(page.url, binding);
+    sameString(url, binding.auditedPageUrls[index]!, "DOM facts page URL/order");
     if (stringArray(page.landmarks, "DOM facts landmarks").length === 0) throw new Error("DOM facts landmarks are required");
     const headings = objectArray(page.headings, "DOM facts headings", ["level", "name"]);
     if (headings.length === 0) throw new Error("DOM facts headings are required");
@@ -260,7 +272,7 @@ function validateDomFacts(value: unknown, observedAt: number): string[] {
       nonEmptyString(labelled.control, "DOM facts labelled control");
       nonEmptyString(labelled.label, "DOM facts form label");
     }
-    if (url === AUDITED_PAGE_URLS[1]) {
+    if (url === binding.auditedPageUrls[1]) {
       const observedLabels = new Set(formLabels.map((item) => item.label));
       if (CREATE_FORM_LABELS.some((label) => !observedLabels.has(label))) throw new Error("DOM facts formLabels omit a required Create Case label");
     }
@@ -307,25 +319,25 @@ function validateScannerReport(value: unknown, observedAt: number, urls: string[
   if (scanned.size !== urls.length || urls.some((url) => !scanned.has(url))) throw new Error("scanner report is missing Axe URL coverage");
 }
 
-function validateFlowTrace(value: unknown, observedAt: number): void {
+function validateFlowTrace(value: unknown, observedAt: number, binding: SemanticBinding): void {
   const trace = record(value, "critical-flow trace");
   sameString(trace.schemaVersion, "accessseal-critical-flow-trace/1", "critical-flow schema version");
-  sameString(trace.caseId, LIVE_EVIDENCE_BINDING.caseId, "critical-flow case");
-  sameString(trace.flowsHash, LIVE_EVIDENCE_BINDING.flowsHash, "critical-flow hash");
+  sameString(trace.caseId, binding.caseId, "critical-flow case");
+  sameString(trace.flowsHash, binding.flowsHash, "critical-flow hash");
   integer(trace.observedAt, "critical-flow observedAt");
   if (trace.observedAt !== observedAt) throw new Error("critical-flow timestamp does not match capture");
-  if (!Array.isArray(trace.flows) || trace.flows.length !== FLOW_IDS.length) throw new Error("critical-flow trace must contain exactly three flows");
+  if (!Array.isArray(trace.flows) || trace.flows.length !== binding.criticalFlows.length) throw new Error("critical-flow trace must contain exactly three flows");
   for (const [flowIndex, flowValue] of trace.flows.entries()) {
     const flow = record(flowValue, "critical flow");
-    const flowId = FLOW_IDS[flowIndex]!;
-    sameString(flow.id, flowId, "critical-flow ID/order");
-    const expectedCheckpoints = FLOW_CHECKPOINTS[flowId];
+    const expectedFlow = binding.criticalFlows[flowIndex]!;
+    sameString(flow.id, expectedFlow.id, "critical-flow ID/order");
+    const expectedCheckpoints = expectedFlow.checkpoints;
     if (!Array.isArray(flow.steps) || flow.steps.length !== expectedCheckpoints.length || flow.passed !== true) throw new Error("critical-flow checkpoint coverage is incomplete");
     for (const [stepIndex, stepValue] of flow.steps.entries()) {
       const step = record(stepValue, "critical-flow step");
       sameString(step.checkpoint, expectedCheckpoints[stepIndex]!, "critical-flow checkpoint/order");
-      const stepUrl = validateNormalizedPageUrl(step.page);
-      sameString(stepUrl, AUDITED_PAGE_URLS[flowIndex]!, "critical-flow page URL");
+      const stepUrl = validateNormalizedPageUrl(step.page, binding);
+      sameString(stepUrl, expectedFlow.pageUrl, "critical-flow page URL");
       nonEmptyString(step.action, "critical-flow action");
       nonEmptyString(step.expected, "critical-flow expected result");
       nonEmptyString(step.actual, "critical-flow actual result");
@@ -370,12 +382,12 @@ function validateHtmlSnapshot(payload: Uint8Array): void {
   if (hasJavascriptUrl || unsafe.some((pattern) => pattern.test(safetyText) || pattern.test(renderedText))) throw new Error("HTML snapshot contains unsafe or sensitive state");
 }
 
-export function validateLiveCapture(capture: LiveCapture): void {
+export function validateLiveCapture(capture: LiveCapture, binding: SemanticBinding = LEGACY_SEMANTIC_BINDING): void {
   const value = record(capture, "live capture");
   integer(value.observedAt, "capture observedAt");
-  const urls = validateDomFacts(value.domFacts, value.observedAt as number);
+  const urls = validateDomFacts(value.domFacts, value.observedAt as number, binding);
   validateScannerReport(value.scannerReport, value.observedAt as number, urls);
-  validateFlowTrace(value.criticalFlowTrace, value.observedAt as number);
+  validateFlowTrace(value.criticalFlowTrace, value.observedAt as number, binding);
 }
 
 export function verifyPayload(evidenceType: EvidenceType, payload: Uint8Array): void {
@@ -400,14 +412,14 @@ function validatePayloadBytes(payloads: EvidencePayloads): void {
   if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
 }
 
-function validatePayloadSemantics(payloads: EvidencePayloads): void {
+function validatePayloadSemantics(payloads: EvidencePayloads, binding: SemanticBinding = LEGACY_SEMANTIC_BINDING): void {
   const value = payloads as unknown as Record<string, Uint8Array>;
   validateHtmlSnapshot(value.HTML_BUNDLE);
   const domFacts = jsonPayload(value.DOM_FACTS, "DOM facts");
   const scannerReport = jsonPayload(value.SCANNER_REPORT, "scanner report");
   const criticalFlowTrace = jsonPayload(value.CRITICAL_FLOW_TRACE, "critical-flow trace");
   const observedAt = integer(domFacts.observedAt, "DOM facts observedAt");
-  validateLiveCapture({ observedAt, domFacts, scannerReport, criticalFlowTrace });
+  validateLiveCapture({ observedAt, domFacts, scannerReport, criticalFlowTrace }, binding);
 }
 
 export function buildReleaseManifest(payloads: EvidencePayloads): { manifest: ReleaseManifestV1; bytes: Buffer; releaseDigest: `sha256:${string}` } {
@@ -478,17 +490,23 @@ export function verifyEvidenceBundle(manifestBytes: Uint8Array, payloads: Eviden
 }
 
 export type V4EvidenceBinding = {
+  auditedPageUrls: readonly [string, string, string];
+  casePath: string;
   caseCreatedAt: number;
   caseId: string;
   chainId: string;
   contract: string;
+  criticalFlows: readonly [SemanticFlow, SemanticFlow, SemanticFlow];
   epoch: number;
   evidenceDeadlineSeconds: number;
   flowsHash: string;
   hardDeadlineSeconds: number;
+  maxEnvelopeLifetimeSeconds: number;
+  maxObservationAgeSeconds: number;
   profileHash: string;
   profileVersion: "accessseal-static/1";
   releaseId: string;
+  replayDomain: string;
   sourceCommit: string;
   subjectOrigin: string;
   vendor: string;
@@ -503,7 +521,7 @@ export type ReleaseManifestV4 = {
 };
 
 export const V4_RELEASE_MANIFEST_SCHEMA = "accessseal-release-manifest/2" as const;
-const V4_BINDING_KEYS = ["caseCreatedAt", "caseId", "chainId", "contract", "epoch", "evidenceDeadlineSeconds", "flowsHash", "hardDeadlineSeconds", "profileHash", "profileVersion", "releaseId", "sourceCommit", "subjectOrigin", "vendor"];
+const V4_BINDING_KEYS = ["auditedPageUrls", "caseCreatedAt", "caseId", "casePath", "chainId", "contract", "criticalFlows", "epoch", "evidenceDeadlineSeconds", "flowsHash", "hardDeadlineSeconds", "maxEnvelopeLifetimeSeconds", "maxObservationAgeSeconds", "profileHash", "profileVersion", "releaseId", "replayDomain", "sourceCommit", "subjectOrigin", "vendor"];
 const MIN_LEGIBLE_SCREENSHOT_WIDTH = 320;
 const MIN_LEGIBLE_SCREENSHOT_HEIGHT = 180;
 const MAX_SCREENSHOT_DIMENSION = 4096;
@@ -587,7 +605,11 @@ function validateV4Binding(binding: V4EvidenceBinding): void {
   requireBoundHex(binding.sourceCommit, "V4 sourceCommit", /^[0-9a-f]{40}$/);
   requireBoundHex(binding.profileHash, "V4 profileHash", /^0x[0-9a-f]{64}$/);
   requireBoundHex(binding.flowsHash, "V4 flowsHash", /^0x[0-9a-f]{64}$/);
-  if (!/^v4-[a-z0-9][a-z0-9-]{1,61}$/.test(binding.releaseId) || binding.profileVersion !== "accessseal-static/1" || !/^https:\/\/[a-z0-9.-]+$/.test(binding.subjectOrigin) || !/^0x[0-9a-f]{40}$/.test(binding.vendor) || !/^[0-9]+$/.test(binding.chainId) || !Number.isSafeInteger(binding.epoch) || binding.epoch < 0 || !Number.isSafeInteger(binding.caseCreatedAt) || binding.caseCreatedAt < 0 || !Number.isSafeInteger(binding.evidenceDeadlineSeconds) || binding.evidenceDeadlineSeconds < 1 || !Number.isSafeInteger(binding.hardDeadlineSeconds) || binding.hardDeadlineSeconds < binding.evidenceDeadlineSeconds) throw new Error("V4 evidence binding is invalid");
+  if (!/^v4-[a-z0-9][a-z0-9-]{1,61}$/.test(binding.releaseId) || binding.profileVersion !== "accessseal-static/1" || !/^https:\/\/[a-z0-9.-]+$/.test(binding.subjectOrigin) || !/^0x[0-9a-f]{40}$/.test(binding.vendor) || !/^[0-9]+$/.test(binding.chainId) || !Number.isSafeInteger(binding.epoch) || binding.epoch < 0 || !Number.isSafeInteger(binding.caseCreatedAt) || binding.caseCreatedAt < 0 || !Number.isSafeInteger(binding.evidenceDeadlineSeconds) || binding.evidenceDeadlineSeconds < 1 || !Number.isSafeInteger(binding.hardDeadlineSeconds) || binding.hardDeadlineSeconds < binding.evidenceDeadlineSeconds || !Number.isSafeInteger(binding.maxObservationAgeSeconds) || binding.maxObservationAgeSeconds < 1 || !Number.isSafeInteger(binding.maxEnvelopeLifetimeSeconds) || binding.maxEnvelopeLifetimeSeconds < 1 || !/^[a-z0-9][a-z0-9-]{2,61}$/.test(binding.replayDomain) || binding.casePath !== `/cases/${binding.caseId}` || !Array.isArray(binding.auditedPageUrls) || binding.auditedPageUrls.length !== 3 || binding.auditedPageUrls[0] !== `${binding.subjectOrigin}/cases` || binding.auditedPageUrls[1] !== `${binding.subjectOrigin}/cases/new` || binding.auditedPageUrls[2] !== `${binding.subjectOrigin}${binding.casePath}` || !Array.isArray(binding.criticalFlows) || binding.criticalFlows.length !== 3 || new Set(binding.criticalFlows.map((flow) => flow?.id)).size !== 3 || binding.criticalFlows.some((flow, index) => typeof flow?.id !== "string" || flow.id.length === 0 || flow.pageUrl !== binding.auditedPageUrls[index] || !Array.isArray(flow.checkpoints) || flow.checkpoints.length === 0 || flow.checkpoints.some((checkpoint) => typeof checkpoint !== "string" || checkpoint.length === 0))) throw new Error("V4 evidence binding is invalid");
+}
+
+function semanticBindingForV4(binding: V4EvidenceBinding): SemanticBinding {
+  return { caseId: binding.caseId, flowsHash: binding.flowsHash, subjectOrigin: binding.subjectOrigin, auditedPageUrls: binding.auditedPageUrls, criticalFlows: binding.criticalFlows };
 }
 
 export function verifyV4Payload(evidenceType: EvidenceType, payload: Uint8Array, binding: V4EvidenceBinding): { width: number; height: number } | undefined {
@@ -620,7 +642,7 @@ function validateV4Payloads(payloads: EvidencePayloads, options: V4EvidenceOptio
 export function buildV4ReleaseManifest(payloads: EvidencePayloads, options: V4EvidenceOptions): { manifest: ReleaseManifestV4; bytes: Buffer; releaseDigest: `sha256:${string}` } {
   validateV4Binding(options.binding);
   const dimensions = validateV4Payloads(payloads, options);
-  validatePayloadSemantics(payloads);
+  validatePayloadSemantics(payloads, semanticBindingForV4(options.binding));
   const specs = v4PayloadSpecs(options.binding);
   const screenshotSha256 = `sha256:${sha256(payloads.SCREENSHOT)}` as `sha256:${string}`;
   if (options.reviewImageSha256 !== screenshotSha256) throw new Error("V4 review-image hash does not match the screenshot");

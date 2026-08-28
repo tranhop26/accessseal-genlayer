@@ -192,12 +192,87 @@ function v4Options(screenshot: Uint8Array) {
       sourceCommit,
       subjectOrigin,
       vendor,
+      casePath: `/cases/${caseId}`,
+      auditedPageUrls: [`${subjectOrigin}/cases`, `${subjectOrigin}/cases/new`, `${subjectOrigin}/cases/${caseId}`],
+      criticalFlows: [
+        { id: "workspace-navigation", pageUrl: `${subjectOrigin}/cases`, checkpoints: ["skip-focused", "main-focused", "overview-navigation", "cases-navigation"] },
+        { id: "create-case-preview", pageUrl: `${subjectOrigin}/cases/new`, checkpoints: ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"] },
+        { id: "case-section-navigation", pageUrl: `${subjectOrigin}/cases/${caseId}`, checkpoints: ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"] },
+      ],
+      maxObservationAgeSeconds: 86_400,
+      maxEnvelopeLifetimeSeconds: 518_400,
+      replayDomain: "v4-candidate-replay",
       profileHash: `0x${"0123456789abcdef".repeat(4)}`,
       releaseId: "v4-candidate-20260828",
     },
     reviewImageSha256: `sha256:${sha256(screenshot)}`,
   };
 }
+
+test("V4 semantic validation accepts only a capture bound to its distinct origin, case, flows, and timing", () => {
+  const screenshot = validPng();
+  const binding = {
+    ...v4Options(screenshot).binding,
+    caseId: "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    subjectOrigin: "https://v4-audited.example",
+    flowsHash: "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    caseCreatedAt: 1_900_000_000,
+    evidenceDeadlineSeconds: 7_200,
+    hardDeadlineSeconds: 14_400,
+    casePath: "/cases/0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    auditedPageUrls: [
+      "https://v4-audited.example/cases",
+      "https://v4-audited.example/cases/new",
+      "https://v4-audited.example/cases/0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    ],
+    criticalFlows: (v4Options(screenshot).binding.criticalFlows as Array<any>).map((flow, index) => ({
+      ...flow,
+      id: ["v4-workspace-run", "v4-create-run", "v4-case-run"][index],
+      pageUrl: [
+        "https://v4-audited.example/cases",
+        "https://v4-audited.example/cases/new",
+        "https://v4-audited.example/cases/0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      ][index],
+    })),
+  };
+  const payloads = payloadsFromCapture();
+  const domFacts = JSON.parse(Buffer.from(payloads.DOM_FACTS).toString("utf8")) as Record<string, unknown>;
+  const pages = domFacts.pages as Array<Record<string, unknown>>;
+  const urls = [
+    `${binding.subjectOrigin}/cases`,
+    `${binding.subjectOrigin}/cases/new`,
+    `${binding.subjectOrigin}/cases/${binding.caseId}`,
+  ];
+  domFacts.observedAt = binding.caseCreatedAt + 1;
+  domFacts.pages = pages.map((page, index) => ({ ...page, url: urls[index] }));
+  const scanner = JSON.parse(Buffer.from(payloads.SCANNER_REPORT).toString("utf8")) as Record<string, unknown>;
+  scanner.observedAt = binding.caseCreatedAt + 1;
+  scanner.scans = (scanner.scans as Array<Record<string, unknown>>).map((scan, index) => ({ ...scan, url: urls[index] }));
+  const trace = JSON.parse(Buffer.from(payloads.CRITICAL_FLOW_TRACE).toString("utf8")) as Record<string, unknown>;
+  trace.caseId = binding.caseId;
+  trace.flowsHash = binding.flowsHash;
+  trace.observedAt = binding.caseCreatedAt + 1;
+  trace.flows = (trace.flows as Array<Record<string, unknown>>).map((flow, flowIndex) => ({
+    ...flow,
+    id: ["v4-workspace-run", "v4-create-run", "v4-case-run"][flowIndex],
+    steps: (flow.steps as Array<Record<string, unknown>>).map((step) => ({ ...step, page: urls[flowIndex] })),
+  }));
+  const v4Payloads = {
+    ...payloads,
+    SCREENSHOT: screenshot,
+    DOM_FACTS: Buffer.from(canonicalJson(domFacts)),
+    SCANNER_REPORT: Buffer.from(canonicalJson(scanner)),
+    CRITICAL_FLOW_TRACE: Buffer.from(canonicalJson(trace)),
+  };
+  const options = {
+    binding,
+    reviewImageSha256: `sha256:${sha256(screenshot)}`,
+  };
+  assert.doesNotThrow(() => (schema as any).buildV4ReleaseManifest(v4Payloads, options));
+  assert.throws(() => (schema as any).buildV4ReleaseManifest({ ...v4Payloads, DOM_FACTS: payloads.DOM_FACTS }, options), /origin|URL/i);
+  assert.throws(() => (schema as any).buildV4ReleaseManifest({ ...v4Payloads, CRITICAL_FLOW_TRACE: payloads.CRITICAL_FLOW_TRACE }, options), /case|hash|flow/i);
+  assert.throws(() => (schema as any).buildV4ReleaseManifest({ ...payloads, SCREENSHOT: screenshot }, options), /origin|case|hash|flow/i);
+});
 
 test("canonicalJson sorts object keys recursively while preserving array order", () => {
   assert.equal(canonicalJson({ z: { b: 2, a: 1 }, a: [{ d: 4, c: 3 }, 0] }), '{"a":[{"c":3,"d":4},0],"z":{"a":1,"b":2}}');

@@ -42,8 +42,6 @@ export type BuildLiveEnvelopeOptions = {
 };
 type EnvelopeModeOptions = Pick<BuildLiveEnvelopeOptions, "v4">;
 
-const EVIDENCE_CUTOFF = LIVE_EVIDENCE_BINDING.caseCreatedAt + LIVE_EVIDENCE_BINDING.evidenceDeadlineSeconds;
-const ABSOLUTE_HARD_DEADLINE = LIVE_EVIDENCE_BINDING.caseCreatedAt + LIVE_EVIDENCE_BINDING.hardDeadlineSeconds;
 const GENERATION_ID = /^[0-9a-f]{32}$/;
 
 function requireSafeTimestamp(value: number, label: string): void {
@@ -62,6 +60,8 @@ function validateTimestampDomain(observedAt: number, submittedAt: number, expire
   const createdAt = v4?.binding.caseCreatedAt ?? LIVE_EVIDENCE_BINDING.caseCreatedAt;
   const evidenceDeadlineSeconds = v4?.binding.evidenceDeadlineSeconds ?? LIVE_EVIDENCE_BINDING.evidenceDeadlineSeconds;
   const hardDeadlineSeconds = v4?.binding.hardDeadlineSeconds ?? LIVE_EVIDENCE_BINDING.hardDeadlineSeconds;
+  const maxObservationAgeSeconds = v4?.binding.maxObservationAgeSeconds ?? MAX_OBSERVATION_AGE_SECONDS;
+  const maxEnvelopeLifetimeSeconds = v4?.binding.maxEnvelopeLifetimeSeconds ?? MAX_ENVELOPE_LIFETIME_SECONDS;
   requireSafeTimestamp(observedAt, "observedAt");
   requireSafeTimestamp(submittedAt, "submittedAt");
   requireSafeTimestamp(expiresAt, "expiresAt");
@@ -69,12 +69,12 @@ function validateTimestampDomain(observedAt: number, submittedAt: number, expire
     throw new Error("observedAt is before the fixed case creation timestamp");
   }
   if (submittedAt < observedAt) throw new Error("submittedAt must not be earlier than observedAt");
-  if (submittedAt - observedAt > MAX_OBSERVATION_AGE_SECONDS) throw new Error("observation is stale by more than 86400 seconds");
+  if (submittedAt - observedAt > maxObservationAgeSeconds) throw new Error(`observation is stale by more than ${maxObservationAgeSeconds} seconds`);
   if (submittedAt > createdAt + evidenceDeadlineSeconds) throw new Error("submittedAt is after the fixed case evidence cutoff");
   if (expiresAt <= submittedAt) throw new Error("expiresAt must be later than submittedAt");
   if (expiresAt > createdAt + hardDeadlineSeconds) throw new Error("expiresAt exceeds the fixed case absolute hard deadline");
-  if (expiresAt - submittedAt > MAX_ENVELOPE_LIFETIME_SECONDS) {
-    throw new Error("expiry exceeds the 518400-second case hard-deadline budget");
+  if (expiresAt - submittedAt > maxEnvelopeLifetimeSeconds) {
+    throw new Error(`expiry exceeds the ${maxEnvelopeLifetimeSeconds}-second case hard-deadline budget`);
   }
 }
 
@@ -152,7 +152,8 @@ export function validateLiveEnvelopeSet(
     if (envelope.payloadUri !== expectedPayloadUri(evidenceType, options)) throw new Error("live envelope payload URL is invalid");
     if (nonces.has(envelope.nonce)) throw new Error("live envelope set contains a duplicate nonce");
     nonces.add(envelope.nonce);
-    const noncePrefix = `${binding.releaseId}-${evidenceType.toLowerCase()}-${envelope.submittedAt}-`;
+    const replayPrefix = options?.v4 === undefined ? "" : `${options.v4.binding.replayDomain}-`;
+    const noncePrefix = `${replayPrefix}${binding.releaseId}-${evidenceType.toLowerCase()}-${envelope.submittedAt}-`;
     if (!envelope.nonce.startsWith(noncePrefix)) throw new Error("live envelope nonce does not match its replay domain");
     const currentGenerationId = envelope.nonce.slice(noncePrefix.length);
     requireGenerationId(currentGenerationId);
@@ -226,7 +227,7 @@ export async function buildLiveEnvelopeSet(options: BuildLiveEnvelopeOptions): P
       observedAt,
       submittedAt: options.submittedAt,
       expiresAt: options.expiresAt,
-      nonce: `${envelopeBinding(options).releaseId}-${evidenceType.toLowerCase()}-${options.submittedAt}-${options.generationId}`,
+      nonce: `${options.v4 === undefined ? "" : `${options.v4.binding.replayDomain}-`}${envelopeBinding(options).releaseId}-${evidenceType.toLowerCase()}-${options.submittedAt}-${options.generationId}`,
     };
     const canonical = canonicalizeEvidence(envelope);
     return { envelope, canonicalJson: canonical, evidenceHash: hashEvidence(envelope) };
@@ -472,7 +473,7 @@ async function main(): Promise<void> {
   const options = await v4OptionsFromArguments();
   const submittedAt = Math.floor(Date.now() / 1_000);
   const generationId = randomUUID().replaceAll("-", "");
-  const expiresAt = Math.min(submittedAt + MAX_ENVELOPE_LIFETIME_SECONDS, ABSOLUTE_HARD_DEADLINE);
+  const expiresAt = Math.min(submittedAt + (options.v4?.binding.maxEnvelopeLifetimeSeconds ?? MAX_ENVELOPE_LIFETIME_SECONDS), (options.v4?.binding.caseCreatedAt ?? LIVE_EVIDENCE_BINDING.caseCreatedAt) + (options.v4?.binding.hardDeadlineSeconds ?? LIVE_EVIDENCE_BINDING.hardDeadlineSeconds));
   const set = await buildLiveEnvelopeSet({ publicDir, submittedAt, expiresAt, generationId, ...options });
   await writeLiveEnvelopeSet(set, publicDir, outputDir, options);
   const summary = set.map((item) => ({

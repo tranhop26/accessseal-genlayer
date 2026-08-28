@@ -156,7 +156,7 @@ function validPng(byteLength?: number): Buffer {
 function v4Options(screenshot: Uint8Array) {
   const { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
   return {
-    binding: { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor, profileHash: `0x${"0123456789abcdef".repeat(4)}`, releaseId: "v4-candidate-20260828" },
+    binding: { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor, casePath: `/cases/${caseId}`, auditedPageUrls: [`${subjectOrigin}/cases`, `${subjectOrigin}/cases/new`, `${subjectOrigin}/cases/${caseId}`], criticalFlows: Object.entries(flowCheckpoints).map(([id, checkpoints], index) => ({ id, pageUrl: [`${subjectOrigin}/cases`, `${subjectOrigin}/cases/new`, `${subjectOrigin}/cases/${caseId}`][index]!, checkpoints })), maxObservationAgeSeconds: 86400, maxEnvelopeLifetimeSeconds: 518400, replayDomain: "v4-candidate-replay", profileHash: `0x${"0123456789abcdef".repeat(4)}`, releaseId: "v4-candidate-20260828" },
     reviewImageSha256: `sha256:${sha256(screenshot)}`,
   };
 }
