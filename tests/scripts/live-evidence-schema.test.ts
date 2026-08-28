@@ -7,7 +7,9 @@ import {
   buildReleaseManifest,
   canonicalJson,
   sha256,
+  validateLiveEvidenceBinding,
   validateLiveCapture,
+  verifyPayload,
   verifyEvidenceBundle,
   type EvidencePayloads,
   type LiveCapture,
@@ -126,6 +128,13 @@ function payloadsFromCapture(capture: LiveCapture = makeCapture()): EvidencePayl
   };
 }
 
+function pngBytes(byteLength: number): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(byteLength - 8, 0),
+  ]);
+}
+
 test("canonicalJson sorts object keys recursively while preserving array order", () => {
   assert.equal(canonicalJson({ z: { b: 2, a: 1 }, a: [{ d: 4, c: 3 }, 0] }), '{"a":[{"c":3,"d":4},0],"z":{"a":1,"b":2}}');
 });
@@ -196,6 +205,26 @@ test("rejects individual and aggregate payload size overflow", () => {
     CRITICAL_FLOW_TRACE: Buffer.alloc(16_000, 0x61),
   };
   assert.throws(() => buildReleaseManifest(oversizedAggregate), /aggregate|total|size|bytes/i);
+});
+
+test("accepts an exact 16384-byte PNG and rejects 16385 bytes", () => {
+  assert.doesNotThrow(() => verifyPayload("SCREENSHOT", pngBytes(16_384)));
+  assert.throws(
+    () => verifyPayload("SCREENSHOT", pngBytes(16_385)),
+    /SCREENSHOT exceeds 16384 bytes/,
+  );
+});
+
+test("rejects empty and repeated-hex V4 evidence binding identifiers", () => {
+  assert.doesNotThrow(() => validateLiveEvidenceBinding());
+  for (const binding of [
+    { ...LIVE_EVIDENCE_BINDING, caseId: "" },
+    { ...LIVE_EVIDENCE_BINDING, caseId: `0x${"a".repeat(64)}` },
+    { ...LIVE_EVIDENCE_BINDING, contract: `0x${"b".repeat(40)}` },
+    { ...LIVE_EVIDENCE_BINDING, sourceCommit: "c".repeat(40) },
+  ]) {
+    assert.throws(() => validateLiveEvidenceBinding(binding), /non-empty|canonical|repeated hexadecimal/i);
+  }
 });
 
 test("rejects an aggregate exactly at the exclusive 131072-byte boundary", () => {

@@ -161,6 +161,19 @@ test("builds one OPEN_RELEASE and five canonical APPEND_EVIDENCE envelopes", asy
   }
 });
 
+test("V4 evidence binds the manifest screenshot path, hash, and media type into its envelope", async () => {
+  const set = await built();
+  const verified = await verifyPublicEvidence(publicDir);
+  const manifestScreenshot = verified.manifest.files.find((file) => file.evidenceType === "SCREENSHOT");
+  const screenshotEnvelope = set.find((item) => item.envelope.evidenceType === "SCREENSHOT");
+
+  assert.ok(manifestScreenshot);
+  assert.ok(screenshotEnvelope);
+  assert.equal(screenshotEnvelope.envelope.payloadUri, `${LIVE_EVIDENCE_BINDING.subjectOrigin}${manifestScreenshot.path}`);
+  assert.equal(screenshotEnvelope.envelope.payloadSha256, manifestScreenshot.sha256);
+  assert.equal(screenshotEnvelope.envelope.mediaType, manifestScreenshot.mediaType);
+});
+
 test("rejects invalid freshness and expiry domains", async () => {
   const domFacts = JSON.parse(await readFile(join(publicDir, PAYLOAD_SPECS.DOM_FACTS.path.slice(1)), "utf8")) as { observedAt: number };
   await assert.rejects(

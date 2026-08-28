@@ -227,6 +227,19 @@ test("rejects a conflicting release before writing any other output", async () =
   assert.equal(await readFile(conflict, "utf8"), "different immutable release");
 });
 
+test("V4 evidence refuses to overwrite a historical release with different bytes", async () => {
+  const { input, output } = await fixture();
+  const historicalPath = join(output, PAYLOAD_SPECS.SCREENSHOT.path.slice(1));
+  await mkdir(dirname(historicalPath), { recursive: true });
+  await writeFile(historicalPath, Buffer.from("historical screenshot"));
+
+  const result = run(input, output);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /refus|overwrite|different|immutable/i);
+  assert.deepEqual(await readFile(historicalPath), Buffer.from("historical screenshot"));
+});
+
 test("rejects a missing capture member without creating the public tree", async () => {
   const { input, output } = await fixture();
   await rm(join(input, "scanner-report.json"));

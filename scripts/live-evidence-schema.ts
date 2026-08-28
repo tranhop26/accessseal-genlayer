@@ -19,9 +19,11 @@ export const LIVE_EVIDENCE_BINDING = Object.freeze({
   hardDeadlineSeconds: 604_800,
 });
 
+export const MAX_SCREENSHOT_BYTES = 16_384;
+
 export const PAYLOAD_SPECS = Object.freeze({
   HTML_BUNDLE: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/release.html", mediaType: "text/html", maxBytes: 32768 }),
-  SCREENSHOT: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/screenshot.png", mediaType: "image/png", maxBytes: 65536 }),
+  SCREENSHOT: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/screenshot.png", mediaType: "image/png", maxBytes: MAX_SCREENSHOT_BYTES }),
   DOM_FACTS: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/dom-facts.json", mediaType: "application/json", maxBytes: 16384 }),
   SCANNER_REPORT: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/scanner-report.json", mediaType: "application/json", maxBytes: 16384 }),
   CRITICAL_FLOW_TRACE: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/critical-flow-trace.json", mediaType: "application/json", maxBytes: 16384 }),
@@ -116,6 +118,24 @@ function sameString(value: unknown, expected: string, label: string): void {
 function nonEmptyString(value: unknown, label: string): string {
   if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${label} must be a non-empty string`);
   return value;
+}
+
+function requireBoundHex(value: unknown, label: string, pattern: RegExp): void {
+  if (typeof value !== "string" || !pattern.test(value) || /^(?:0x)?([0-9a-f])\1*$/i.test(value)) {
+    throw new Error(`${label} must be non-empty, canonical, and not repeated hexadecimal`);
+  }
+}
+
+type LiveEvidenceBindingIdentifiers = {
+  caseId: string;
+  contract: string;
+  sourceCommit: string;
+};
+
+export function validateLiveEvidenceBinding(binding: LiveEvidenceBindingIdentifiers = LIVE_EVIDENCE_BINDING): void {
+  requireBoundHex(binding.caseId, "live binding caseId", /^0x[0-9a-f]{64}$/);
+  requireBoundHex(binding.contract, "live binding contract", /^0x[0-9a-f]{40}$/);
+  requireBoundHex(binding.sourceCommit, "live binding sourceCommit", /^[0-9a-f]{40}$/);
 }
 
 function stringArray(value: unknown, label: string): string[] {
@@ -356,17 +376,24 @@ export function validateLiveCapture(capture: LiveCapture): void {
   validateFlowTrace(value.criticalFlowTrace, value.observedAt as number);
 }
 
+export function verifyPayload(evidenceType: EvidenceType, payload: Uint8Array): void {
+  const spec = PAYLOAD_SPECS[evidenceType];
+  const value = bytes(payload, evidenceType);
+  if (value.byteLength > spec.maxBytes) throw new Error(`${evidenceType} exceeds ${spec.maxBytes} bytes`);
+  if (evidenceType === "HTML_BUNDLE" && value.byteLength === 0) throw new Error("HTML_BUNDLE is empty");
+  if (evidenceType === "SCREENSHOT" && !Buffer.from(value).subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+    throw new Error("SCREENSHOT has an invalid PNG signature");
+  }
+}
+
 function validatePayloadBytes(payloads: EvidencePayloads): void {
   const value = record(payloads, "evidence payloads");
   exactKeys(value, EVIDENCE_TYPES, "evidence payloads");
   let total = 0;
   for (const evidenceType of EVIDENCE_TYPES) {
     const payload = bytes(value[evidenceType], evidenceType);
-    const spec = PAYLOAD_SPECS[evidenceType];
-    if (payload.byteLength > spec.maxBytes) throw new Error(`${evidenceType} exceeds its size limit`);
+    verifyPayload(evidenceType, payload);
     total += payload.byteLength;
-    if (evidenceType === "HTML_BUNDLE" && payload.byteLength === 0) throw new Error("HTML_BUNDLE is empty");
-    if (evidenceType === "SCREENSHOT" && !Buffer.from(payload).subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) throw new Error("SCREENSHOT has an invalid PNG signature");
   }
   if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
 }
@@ -382,6 +409,7 @@ function validatePayloadSemantics(payloads: EvidencePayloads): void {
 }
 
 export function buildReleaseManifest(payloads: EvidencePayloads): { manifest: ReleaseManifestV1; bytes: Buffer; releaseDigest: `sha256:${string}` } {
+  validateLiveEvidenceBinding();
   validatePayloadBytes(payloads);
   validatePayloadSemantics(payloads);
   const manifest: ReleaseManifestV1 = {
@@ -432,6 +460,7 @@ function parseManifest(manifestBytes: Uint8Array): ReleaseManifestV1 {
 }
 
 export function verifyEvidenceBundle(manifestBytes: Uint8Array, payloads: EvidencePayloads): ReleaseManifestV1 {
+  validateLiveEvidenceBinding();
   const manifest = parseManifest(manifestBytes);
   validatePayloadBytes(payloads);
   const value = payloads as unknown as Record<string, Uint8Array>;
