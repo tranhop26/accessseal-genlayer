@@ -280,6 +280,33 @@ def test_persistent_web_mock_binary_envelope_decodes_to_exact_bytes():
     assert "bodyBase64" not in decoded["https://fixture.example/screenshot.png"]
 
 
+@pytest.mark.parametrize("control", ("disagreement", "timeout"))
+def test_v4_validator_negative_controls_leave_sealed_funds_and_no_attempt(
+    v4_context, control
+):
+    """Fails if failed validator consensus records a review or unlocks recovery."""
+    outcome = v4_context.run_negative_control(control)
+
+    assert outcome["receipt"]["tx_execution_result"] == "FINISHED_WITH_ERROR"
+    assert outcome["telemetry"]["validatorCallbackInvocations"] >= 1
+    assert any(
+        not callback["agreed"]
+        for session in outcome["telemetry"]["validatorOutcomes"]
+        for callback in session
+    )
+    if control == "timeout":
+        assert any(
+            callback.get("timedOut") is True
+            for session in outcome["telemetry"]["validatorOutcomes"]
+            for callback in session
+        )
+    assert outcome["reviewResultExists"] is False
+    assert outcome["reviewAttemptExists"] is False
+    assert outcome["case"]["lifecycle"] == "EVIDENCE_SEALED"
+    assert outcome["accounting"]["reserved"] == outcome["reservedBefore"]
+    assert outcome["retryEligible"] is False
+
+
 CONTRACT = "0x" + "cd" * 20
 RECIPIENT = "0x" + "ab" * 20
 PARENT_TX = "0x" + "11" * 32

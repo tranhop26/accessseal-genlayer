@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 import subprocess
@@ -25,21 +26,74 @@ if not session_id:
 if version("genlayer-test") != RUNNER_FINGERPRINT["glsimVersion"]:
     raise RuntimeError("pinned genlayer-test version mismatch")
 
-_validator_telemetry: list[dict[str, int]] = []
-_active_telemetry: dict[str, int] | None = None
+_validator_telemetry: list[dict[str, object]] = []
+_active_telemetry: dict[str, object] | None = None
 _run_validators = glsim_consensus._run_validators
+_restore_storages = glsim_consensus._restore_storages
+_snapshot_storages = glsim_consensus._snapshot_storages
+
+
+def _snapshot_storages_with_instances(engine):
+    snapshot = _snapshot_storages(engine)
+    snapshot["instances"] = copy.deepcopy(engine._instances)
+    return snapshot
+
+
+def _restore_storages_without_stale_instances(engine, snapshot, state_snapshot_id):
+    _restore_storages(engine, snapshot, state_snapshot_id)
+    # GLSim restores the storage map after a failed consensus rotation but
+    # retains cached contract instances that still reference leader-mutated
+    # storage. Evicting the cache makes the next read/call reload the restored
+    # state, matching the rollback boundary the integration tests exercise.
+    engine._instances = snapshot["instances"]
+
+
+glsim_consensus._restore_storages = _restore_storages_without_stale_instances
+glsim_consensus._snapshot_storages = _snapshot_storages_with_instances
 
 
 def _telemetry_run_validators(vm, captured, num_validators):
-    wrapped = []
-    for stored_result, leader_fn, validator_fn in captured:
-        def observed_validator(result, callback=validator_fn):
+    import genlayer.gl.vm as gl_vm
+
+    votes = []
+    validator_configs = getattr(vm, "_accessseal_validator_configs", [])
+    for node in range(num_validators):
+        if validator_configs:
+            _install_validator_node_mocks(vm, validator_configs[node])
+        configured_timeout = bool(
+            validator_configs
+            and validator_configs[node].get("config", {}).get(
+                "accesssealCallbackTimeout", False
+            )
+        )
+        all_agree = True
+        for stored_result, _leader_fn, validator_fn in captured:
             if _active_telemetry is not None:
                 _active_telemetry["callbackInvocations"] += 1
-            return callback(result)
-
-        wrapped.append((stored_result, leader_fn, observed_validator))
-    return _run_validators(vm, wrapped, num_validators)
+                _active_telemetry["activeValidator"] = node
+            if configured_timeout:
+                if _active_telemetry is not None:
+                    _active_telemetry.setdefault("validatorOutcomes", []).append(
+                        {"node": node, "agreed": False, "timedOut": True}
+                    )
+                all_agree = False
+                break
+            try:
+                agreed = validator_fn(gl_vm.Return(calldata=stored_result))
+                if _active_telemetry is not None:
+                    _active_telemetry.setdefault("validatorOutcomes", []).append(
+                        {"node": node, "agreed": agreed}
+                    )
+                if not agreed:
+                    all_agree = False
+                    break
+            except Exception:
+                all_agree = False
+                break
+        votes.append("agree" if all_agree else "disagree")
+    if _active_telemetry is not None:
+        _active_telemetry.pop("activeValidator", None)
+    return votes
 
 
 glsim_consensus._run_validators = _telemetry_run_validators
@@ -51,6 +105,12 @@ def _telemetry_run_consensus(*args, **kwargs):
     session = {
         "callbackInvocations": 0,
         "capturedValidatorSessions": 0,
+        "sealArtifactFetches": 0,
+        "reviewArtifactRefetches": 0,
+        "reviewImageFetches": 0,
+        "reviewAiCalls": 0,
+        "method": "",
+        "nodes": {},
     }
     _active_telemetry = session
     try:
@@ -75,7 +135,7 @@ app = create_app(
     verbose=False,
     seed="accessseal-task-6",
 )
-setup_sdk_paths(Path("contracts/access_seal_deploy.py"), version=GENVM_VERSION)
+setup_sdk_paths(Path("contracts/access_seal.py"), version=GENVM_VERSION)
 for module_name in list(sys.modules):
     if module_name == "genlayer" or module_name.startswith("genlayer."):
         sys.modules.pop(module_name, None)
@@ -107,6 +167,12 @@ def _runtime_call_method(*args, **kwargs):
     import genlayer.gl as gl
 
     gl.message_raw["datetime"] = app.state.engine.vm.get_message_raw()["datetime"]
+    if (
+        _active_telemetry is not None
+        and not _active_telemetry["method"]
+        and len(args) > 1
+    ):
+        _active_telemetry["method"] = args[1]
     return _engine_call_method(*args, **kwargs)
 
 
@@ -128,10 +194,31 @@ def _typed_call_from_calldata(contract_address, calldata_bytes, sender=None):
 
 app.state.engine.call_from_calldata = _typed_call_from_calldata
 
-_accessseal_source_path = Path("contracts/access_seal_deploy.py").resolve()
+_accessseal_source_path = Path("contracts/access_seal.py").resolve()
 _accessseal_source = _accessseal_source_path.read_bytes()
 
 _install_sim_config_mocks = glsim_server._install_sim_config_mocks
+
+
+def _clear_node_mocks(vm):
+    vm._web_mocks.clear()
+    vm._web_mocks_hit.clear()
+    vm._llm_mocks.clear()
+    vm._llm_mocks_hit.clear()
+
+
+def _install_validator_node_mocks(vm, validator):
+    _clear_node_mocks(vm)
+    plugin_config = validator.get("plugin_config", {})
+    web = plugin_config.get("mock_web_response", {}).get(
+        "nondet_web_request", {}
+    )
+    decode_binary_web_mocks(web)
+    for url, response in web.items():
+        vm.mock_web(__import__("re").escape(url), response)
+    llm = plugin_config.get("mock_response", {}).get("response", {})
+    for pattern, response in llm.items():
+        vm.mock_llm(pattern, response)
 
 
 def _binary_safe_install_sim_config_mocks(engine, sim_config):
@@ -146,10 +233,67 @@ def _binary_safe_install_sim_config_mocks(engine, sim_config):
             .get("nondet_web_request", {})
         )
         decode_binary_web_mocks(responses)
+    overrides = (
+        sim_config.get("accesssealValidatorOverrides", [])
+        if isinstance(sim_config, dict)
+        else []
+    )
+    engine.vm._accessseal_validator_configs = overrides or validators
     return _install_sim_config_mocks(engine, sim_config)
 
 
 glsim_server._install_sim_config_mocks = _binary_safe_install_sim_config_mocks
+
+
+_match_web_mock = app.state.engine.vm._match_web_mock
+_match_llm_mock = app.state.engine.vm._match_llm_mock
+
+
+def _node_telemetry():
+    if _active_telemetry is None:
+        return None
+    node = _active_telemetry.get("activeValidator", "leader")
+    nodes = _active_telemetry["nodes"]
+    return nodes.setdefault(
+        str(node),
+        {
+            "sealArtifactFetches": 0,
+            "reviewArtifactRefetches": 0,
+            "reviewImageFetches": 0,
+            "reviewAiCalls": 0,
+        },
+    )
+
+
+def _increment_telemetry(field):
+    node = _node_telemetry()
+    if _active_telemetry is not None:
+        _active_telemetry[field] += 1
+    if node is not None:
+        node[field] += 1
+
+
+def _telemetry_match_web_mock(url, method="GET"):
+    if _active_telemetry is not None:
+        phase = _active_telemetry.get("method")
+        if phase == "close_evidence":
+            _increment_telemetry("sealArtifactFetches")
+        elif phase == "request_review":
+            if str(url).lower().endswith(".png"):
+                _increment_telemetry("reviewImageFetches")
+            else:
+                _increment_telemetry("reviewArtifactRefetches")
+    return _match_web_mock(url, method)
+
+
+def _telemetry_match_llm_mock(prompt):
+    if _active_telemetry is not None and _active_telemetry.get("method") == "request_review":
+        _increment_telemetry("reviewAiCalls")
+    return _match_llm_mock(prompt)
+
+
+app.state.engine.vm._match_web_mock = _telemetry_match_web_mock
+app.state.engine.vm._match_llm_mock = _telemetry_match_llm_mock
 _install_persistent_mocks = glsim_server.RPC_METHODS["sim_installMocks"]
 
 
@@ -277,7 +421,16 @@ def _reset_validator_telemetry(_state, _engine, _params):
 
 
 def _get_validator_telemetry(_state, _engine, _params):
+    fields = (
+        "sealArtifactFetches",
+        "reviewArtifactRefetches",
+        "reviewImageFetches",
+        "reviewAiCalls",
+    )
     return {
+        "validatorCallbackInvocations": sum(
+            entry["callbackInvocations"] for entry in _validator_telemetry
+        ),
         "callbackInvocations": sum(
             entry["callbackInvocations"] for entry in _validator_telemetry
         ),
@@ -285,6 +438,14 @@ def _get_validator_telemetry(_state, _engine, _params):
             entry["capturedValidatorSessions"] for entry in _validator_telemetry
         ),
         "consensusSessions": len(_validator_telemetry),
+        "nodes": [entry["nodes"] for entry in _validator_telemetry],
+        "validatorOutcomes": [
+            entry.get("validatorOutcomes", []) for entry in _validator_telemetry
+        ],
+        **{
+            field: sum(entry[field] for entry in _validator_telemetry)
+            for field in fields
+        },
     }
 
 
