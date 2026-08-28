@@ -147,6 +147,7 @@ def test_v4_outsider_permissionlessly_prepares_and_executes_vendor_payout(
     """Fails if settlement authority can change the approved vendor recipient."""
     settlement, accounting = v4_context.run_outsider_payout()
 
+    assert settlement["reviewRequester"] == settlement["outsider"]
     assert settlement["recipient"] == settlement["vendor"]
     assert settlement["executor"] == settlement["outsider"]
     assert accounting["totalDeposits"] == (

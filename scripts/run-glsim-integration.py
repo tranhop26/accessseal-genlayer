@@ -60,34 +60,27 @@ def _telemetry_run_validators(vm, captured, num_validators):
     for node in range(num_validators):
         if validator_configs:
             _install_validator_node_mocks(vm, validator_configs[node])
-        configured_timeout = bool(
-            validator_configs
-            and validator_configs[node].get("config", {}).get(
-                "accesssealCallbackTimeout", False
-            )
-        )
         all_agree = True
         for stored_result, _leader_fn, validator_fn in captured:
             if _active_telemetry is not None:
                 _active_telemetry["callbackInvocations"] += 1
+                _active_telemetry["validatorCallbackEntries"] += 1
                 _active_telemetry["activeValidator"] = node
-            if configured_timeout:
-                if _active_telemetry is not None:
-                    _active_telemetry.setdefault("validatorOutcomes", []).append(
-                        {"node": node, "agreed": False, "timedOut": True}
-                    )
-                all_agree = False
-                break
-            try:
-                agreed = validator_fn(gl_vm.Return(calldata=stored_result))
-                if _active_telemetry is not None:
-                    _active_telemetry.setdefault("validatorOutcomes", []).append(
-                        {"node": node, "agreed": agreed}
-                    )
-                if not agreed:
-                    all_agree = False
-                    break
-            except Exception:
+            agreed = validator_fn(gl_vm.Return(calldata=stored_result))
+            timed_out = (
+                _active_telemetry is not None
+                and node in _active_telemetry["timedOutValidators"]
+            )
+            if _active_telemetry is not None:
+                _active_telemetry.setdefault("validatorOutcomes", []).append(
+                    {
+                        "node": node,
+                        "entered": True,
+                        "agreed": agreed,
+                        "timedOut": timed_out,
+                    }
+                )
+            if not agreed:
                 all_agree = False
                 break
         votes.append("agree" if all_agree else "disagree")
@@ -104,6 +97,9 @@ def _telemetry_run_consensus(*args, **kwargs):
     global _active_telemetry
     session = {
         "callbackInvocations": 0,
+        "validatorCallbackEntries": 0,
+        "callbackTimeouts": 0,
+        "timedOutValidators": [],
         "capturedValidatorSessions": 0,
         "sealArtifactFetches": 0,
         "reviewArtifactRefetches": 0,
@@ -265,6 +261,31 @@ def _node_telemetry():
     )
 
 
+def _active_validator_is_configured_to_timeout():
+    if _active_telemetry is None:
+        return False
+    node = _active_telemetry.get("activeValidator")
+    configs = getattr(app.state.engine.vm, "_accessseal_validator_configs", [])
+    return (
+        isinstance(node, int)
+        and node < len(configs)
+        and bool(
+            configs[node]
+            .get("config", {})
+            .get("accesssealCallbackTimeout", False)
+        )
+    )
+
+
+def _record_callback_timeout():
+    if _active_telemetry is None:
+        return
+    node = _active_telemetry["activeValidator"]
+    if node not in _active_telemetry["timedOutValidators"]:
+        _active_telemetry["timedOutValidators"].append(node)
+        _active_telemetry["callbackTimeouts"] += 1
+
+
 def _increment_telemetry(field):
     node = _node_telemetry()
     if _active_telemetry is not None:
@@ -289,6 +310,12 @@ def _telemetry_match_web_mock(url, method="GET"):
 def _telemetry_match_llm_mock(prompt):
     if _active_telemetry is not None and _active_telemetry.get("method") == "request_review":
         _increment_telemetry("reviewAiCalls")
+        if _active_validator_is_configured_to_timeout():
+            # This runs from within the real validator callback's bounded review
+            # prompt. The contract handles this exact callback failure as a
+            # disagreement, so rollback is exercised without fabricating a vote.
+            _record_callback_timeout()
+            raise TimeoutError("AccessSeal validator callback prompt timed out")
     return _match_llm_mock(prompt)
 
 
@@ -431,6 +458,12 @@ def _get_validator_telemetry(_state, _engine, _params):
         "validatorCallbackInvocations": sum(
             entry["callbackInvocations"] for entry in _validator_telemetry
         ),
+        "validatorCallbackEntries": sum(
+            entry["validatorCallbackEntries"] for entry in _validator_telemetry
+        ),
+        "callbackTimeouts": sum(
+            entry["callbackTimeouts"] for entry in _validator_telemetry
+        ),
         "callbackInvocations": sum(
             entry["callbackInvocations"] for entry in _validator_telemetry
         ),
@@ -449,11 +482,29 @@ def _get_validator_telemetry(_state, _engine, _params):
     }
 
 
+def _get_last_consensus_outcome(_state, _engine, _params):
+    if not _validator_telemetry:
+        raise RuntimeError("no consensus outcome is available")
+    session = _validator_telemetry[-1]
+    outcomes = session.get("validatorOutcomes", [])
+    rejected = any(not outcome["agreed"] for outcome in outcomes)
+    return {
+        "status": "FINALIZED",
+        "tx_execution_result": "FINISHED_WITH_ERROR" if rejected else "FINISHED_WITH_RETURN",
+        "consensusRejected": rejected,
+        "validatorCallbackEntries": session["validatorCallbackEntries"],
+        "callbackTimeouts": session["callbackTimeouts"],
+    }
+
+
 glsim_server.RPC_METHODS["accessseal_getFingerprint"] = _runner_fingerprint
 glsim_server.RPC_METHODS["accessseal_resetValidatorTelemetry"] = (
     _reset_validator_telemetry
 )
 glsim_server.RPC_METHODS["accessseal_getValidatorTelemetry"] = (
     _get_validator_telemetry
+)
+glsim_server.RPC_METHODS["accessseal_getLastConsensusOutcome"] = (
+    _get_last_consensus_outcome
 )
 run_server(app, host="127.0.0.1", port=4000)

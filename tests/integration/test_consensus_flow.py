@@ -244,7 +244,11 @@ def test_v4_five_validators_finalize_approval_from_stored_context(v4_context):
     assert telemetry["reviewImageFetches"] == 6
     assert telemetry["reviewAiCalls"] == 6
     assert telemetry["reviewArtifactRefetches"] == 0
-    review_nodes = telemetry["nodes"][-1]
+    review_nodes = next(
+        nodes
+        for nodes in telemetry["nodes"]
+        if any(node["reviewAiCalls"] for node in nodes.values())
+    )
     assert set(review_nodes) == {"leader", "0", "1", "2", "3", "4"}
     assert all(
         node["reviewImageFetches"] == node["reviewAiCalls"] == 1
@@ -252,7 +256,20 @@ def test_v4_five_validators_finalize_approval_from_stored_context(v4_context):
         for node in review_nodes.values()
     )
     assert readback["review"]["verdict"] == "APPROVED"
+    assert readback["attempt"]["status"] == "FINALIZED"
+    assert readback["attempt"]["epoch"] == readback["finality"]["epoch"]
+    assert readback["attempt"]["attempt"] == readback["finality"]["attempt"]
+    assert readback["attempt"]["proofId"] == readback["finality"]["proofId"]
     assert readback["finality"]["status"] == "FINALIZED"
+    assert readback["caseAfterReview"]["lifecycle"] == "DECIDED"
+    assert readback["settlement"]["recipient"] == readback["vendor"]
+    assert readback["settlement"]["executor"] == readback["outsider"]
+    assert readback["accounting"]["totalDeposits"] == (
+        readback["accounting"]["reserved"]
+        + readback["accounting"]["pendingDispatch"]
+        + readback["accounting"]["dispatchedPayouts"]
+        + readback["accounting"]["dispatchedRefunds"]
+    )
 
 
 def test_early_seal_reviews_complete_evidence_before_cutoff_from_deployed_source(

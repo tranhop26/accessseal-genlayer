@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 from genlayer_py import create_account
+from genlayer_py.exceptions import GenLayerError
 from gltest import get_validator_factory
 from gltest.contracts.contract import Contract
 from gltest.assertions import tx_execution_succeeded
@@ -658,30 +659,54 @@ class V4IntegrationContext:
         return {
             "status": transaction["status"],
             "tx_execution_result": transaction.get("txExecutionResultName"),
+            "sender": transaction.get("from_address", transaction.get("from")),
         }
 
-    def run_happy_path(self):
+    def run_happy_path(self, *, review_requester=None, suffix="happy"):
         rpc("accessseal_resetValidatorTelemetry", [])
-        case_id, release = self._seal("happy")
-        _buyer, _vendor, reviewer, _outsider = self.actors
-        review = self.contract.connect(reviewer).request_review([case_id]).transact(
+        case_id, release = self._seal(suffix)
+        _buyer, vendor, reviewer, outsider = self.actors
+        requester = review_requester or reviewer
+        review = self.contract.connect(requester).request_review([case_id]).transact(
             wait_transaction_status=TransactionStatus.FINALIZED,
             transaction_context=v4_io_context(
                 release, candidate(self.contract, case_id, release, "APPROVED")
             ),
         )
-        return (
-            self._receipt_readback(review),
-            rpc("accessseal_getValidatorTelemetry", []),
+        receipt = self._receipt_readback(review)
+        review_readback = {
+            "review": read_json(self.contract, "get_review", [case_id, 0]),
+            "attempt": read_json(
+                self.contract, "get_review_attempt", [case_id, 0, 0]
+            ),
+            "finality": read_json(
+                self.contract, "get_review_finality", [case_id]
+            ),
+            "caseAfterReview": read_json(self.contract, "get_case", [case_id]),
+        }
+        self.contract.connect(outsider).prepare_payout([case_id]).transact(
+            wait_transaction_status=TransactionStatus.FINALIZED
+        )
+        prepared = read_json(self.contract, "get_settlement", [case_id])
+        self.contract.connect(outsider).execute_settlement(
+            [case_id, prepared["settlementId"]]
+        ).transact(wait_transaction_status=TransactionStatus.FINALIZED)
+        settlement = read_json(self.contract, "get_settlement", [case_id])
+        settlement["vendor"] = vendor.address.lower()
+        settlement["outsider"] = outsider.address.lower()
+        settlement["reviewRequester"] = receipt["sender"]
+        review_readback.update(
             {
-                "review": read_json(self.contract, "get_review", [case_id, 0]),
-                "attempt": read_json(
-                    self.contract, "get_review_attempt", [case_id, 0, 0]
-                ),
-                "finality": read_json(
-                    self.contract, "get_review_finality", [case_id]
-                ),
-            },
+                "settlement": settlement,
+                "accounting": read_json(self.contract, "get_accounting", []),
+                "vendor": vendor.address.lower(),
+                "outsider": outsider.address.lower(),
+            }
+        )
+        return (
+            receipt,
+            rpc("accessseal_getValidatorTelemetry", []),
+            review_readback,
         )
 
     def run_negative_control(self, control):
@@ -713,31 +738,40 @@ class V4IntegrationContext:
                 wait_transaction_status=TransactionStatus.FINALIZED,
                 transaction_context=context,
             )
-            receipt = self._receipt_readback(review)
-        except Exception:
-            receipt = {
-                "status": "UNDETERMINED",
-                "tx_execution_result": "FINISHED_WITH_ERROR",
-            }
-        try:
-            attempt = read_json(self.contract, "get_review_attempt", [case_id, 0, 0])
-        except Exception:
-            attempt = None
-        try:
-            retry = self.contract.connect(outsider).retry_review(
-                [case_id, f"{control}-retry"]
-            ).transact(
-                wait_transaction_status=TransactionStatus.FINALIZED,
-                transaction_context={"genvm_datetime": RETRY_TIME},
-            )
-            retry_rejected = not tx_execution_succeeded(retry)
-        except Exception:
-            retry_rejected = True
+        except GenLayerError as error:
+            if str(error) != "Transaction failed":
+                raise
+            receipt = rpc("accessseal_getLastConsensusOutcome", [])
+            assert receipt["consensusRejected"] is True
+        else:
+            raise AssertionError("negative validator control unexpectedly succeeded")
+
+        def missing_readback(method, args, expected_message):
+            try:
+                read_json(self.contract, method, args)
+            except GenLayerError as error:
+                assert expected_message in str(error), str(error)
+                return False
+            raise AssertionError(f"{method} unexpectedly exists")
+
+        review_exists = missing_readback("get_review", [case_id, 0], "review does not exist")
+        attempt_exists = missing_readback(
+            "get_review_attempt",
+            [case_id, 0, 0],
+            "review attempt does not exist",
+        )
+        retry = self.contract.connect(outsider).retry_review(
+            [case_id, f"{control}-retry"]
+        ).transact(
+            wait_transaction_status=TransactionStatus.FINALIZED,
+            transaction_context={"genvm_datetime": RETRY_TIME},
+        )
+        retry_rejected = not tx_execution_succeeded(retry)
         return {
             "receipt": receipt,
             "telemetry": rpc("accessseal_getValidatorTelemetry", []),
-            "reviewResultExists": attempt is not None,
-            "reviewAttemptExists": attempt is not None,
+            "reviewResultExists": review_exists,
+            "reviewAttemptExists": attempt_exists,
             "case": read_json(self.contract, "get_case", [case_id]),
             "accounting": read_json(self.contract, "get_accounting", []),
             "reservedBefore": reserved_before,
@@ -745,20 +779,11 @@ class V4IntegrationContext:
         }
 
     def run_outsider_payout(self):
-        _receipt, _telemetry, readback = self.run_happy_path()
-        case_id = readback["attempt"]["caseId"]
-        _buyer, vendor, _reviewer, outsider = self.actors
-        self.contract.connect(outsider).prepare_payout([case_id]).transact(
-            wait_transaction_status=TransactionStatus.FINALIZED
+        _buyer, _vendor, _reviewer, outsider = self.actors
+        _receipt, _telemetry, readback = self.run_happy_path(
+            review_requester=outsider, suffix="outsider-payout"
         )
-        prepared = read_json(self.contract, "get_settlement", [case_id])
-        self.contract.connect(outsider).execute_settlement(
-            [case_id, prepared["settlementId"]]
-        ).transact(wait_transaction_status=TransactionStatus.FINALIZED)
-        settlement = read_json(self.contract, "get_settlement", [case_id])
-        settlement["vendor"] = vendor.address.lower()
-        settlement["outsider"] = outsider.address.lower()
-        return settlement, read_json(self.contract, "get_accounting", [])
+        return readback["settlement"], readback["accounting"]
 
 
 @pytest.fixture

@@ -300,11 +300,65 @@ def test_v4_validator_negative_controls_leave_sealed_funds_and_no_attempt(
             for session in outcome["telemetry"]["validatorOutcomes"]
             for callback in session
         )
+        assert outcome["telemetry"]["validatorCallbackEntries"] >= 1
+        assert outcome["telemetry"]["callbackTimeouts"] >= 1
+        assert any(
+            callback.get("entered") is True and callback.get("timedOut") is True
+            for session in outcome["telemetry"]["validatorOutcomes"]
+            for callback in session
+        )
     assert outcome["reviewResultExists"] is False
     assert outcome["reviewAttemptExists"] is False
     assert outcome["case"]["lifecycle"] == "EVIDENCE_SEALED"
     assert outcome["accounting"]["reserved"] == outcome["reservedBefore"]
     assert outcome["retryEligible"] is False
+
+
+def test_v4_negative_control_queries_review_and_attempt_independently(
+    v4_context, monkeypatch
+):
+    """Fails if missing review state is inferred from only the attempt lookup."""
+    observed = []
+    real_read_json = harness.read_json
+
+    def tracked_read_json(contract, method, args):
+        observed.append(method)
+        return real_read_json(contract, method, args)
+
+    monkeypatch.setattr(harness, "read_json", tracked_read_json)
+    outcome = v4_context.run_negative_control("disagreement")
+
+    assert outcome["reviewResultExists"] is False
+    assert outcome["reviewAttemptExists"] is False
+    assert "get_review" in observed
+    assert "get_review_attempt" in observed
+
+
+def test_v4_negative_control_does_not_mask_unexpected_receipt_failures(
+    v4_context, monkeypatch
+):
+    """Fails if a fixture or transport error is fabricated as consensus rejection."""
+    case_id, release = v4_context._seal("unexpected-receipt")
+    _buyer, _vendor, reviewer, _outsider = v4_context.actors
+    monkeypatch.setattr(v4_context, "_seal", lambda _suffix: (case_id, release))
+
+    class BrokenReviewRequest:
+        def request_review(self, _args):
+            return self
+
+        def transact(self, **_kwargs):
+            raise RuntimeError("sensitivity: receipt readback failed")
+
+    real_connect = v4_context.contract.connect
+
+    def broken_connect(account):
+        if account.address == reviewer.address:
+            return BrokenReviewRequest()
+        return real_connect(account)
+
+    monkeypatch.setattr(v4_context.contract, "connect", broken_connect)
+    with pytest.raises(RuntimeError, match="sensitivity: receipt readback failed"):
+        v4_context.run_negative_control("disagreement")
 
 
 CONTRACT = "0x" + "cd" * 20
