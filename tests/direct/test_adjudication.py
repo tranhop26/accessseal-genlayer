@@ -1100,10 +1100,17 @@ def test_review_node_fetches_one_image_and_calls_ai_once(
 
     contract.request_review(case_id)
 
+    leader_fetches = list(calls.web_gets)
+    leader_prompts = calls.ai_prompts
+    assert leader_fetches == [screenshot_uri]
+    assert leader_prompts == 1
+
     assert direct_vm.run_validator() is True
-    assert calls.web_gets == [screenshot_uri, screenshot_uri]
-    assert calls.ai_prompts == 2
-    assert all("release-manifest" not in uri for uri in calls.web_gets)
+
+    validator_fetches = calls.web_gets[len(leader_fetches) :]
+    validator_prompts = calls.ai_prompts - leader_prompts
+    assert validator_fetches == [screenshot_uri]
+    assert validator_prompts == 1
 
 
 def _assert_post_seal_review_failure_is_atomic(contract, case_id, before_case):
