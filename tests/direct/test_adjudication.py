@@ -1100,9 +1100,125 @@ def test_review_node_fetches_one_image_and_calls_ai_once(
 
     contract.request_review(case_id)
 
-    assert calls.web_gets == [screenshot_uri]
-    assert calls.ai_prompts == 1
+    assert direct_vm.run_validator() is True
+    assert calls.web_gets == [screenshot_uri, screenshot_uri]
+    assert calls.ai_prompts == 2
     assert all("release-manifest" not in uri for uri in calls.web_gets)
+
+
+def _assert_post_seal_review_failure_is_atomic(contract, case_id, before_case):
+    after_case = contract.get_case_json(case_id)
+    assert after_case["lifecycle"] == "EVIDENCE_SEALED"
+    assert {
+        key: value for key, value in after_case.items() if key != "readAt"
+    } == {
+        key: value for key, value in before_case.items() if key != "readAt"
+    }
+    contract.get_review.reverts(case_id, 0, message="review does not exist")
+    contract.get_review_attempt.reverts(
+        case_id, 0, 0, message="review attempt does not exist"
+    )
+    contract.get_review_finality.reverts(
+        case_id, message="review finality proof does not exist"
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "body", "status", "message"),
+    (
+        (
+            "unavailable",
+            b"",
+            404,
+            "review screenshot returned an unavailable response",
+        ),
+        ("non-png", b"not-a-png", 200, "review screenshot was not a PNG"),
+        (
+            "oversize",
+            b"\x89PNG\r\n\x1a\n" + b"x" * 16_377,
+            200,
+            "review screenshot exceeded its byte bound",
+        ),
+        (
+            "hash-mismatch",
+            b"\x89PNG\r\n\x1a\npost-seal-tamper",
+            200,
+            "review screenshot hash did not match its binding",
+        ),
+    ),
+)
+def test_post_seal_screenshot_failure_leaves_review_state_atomic(
+    failure,
+    body,
+    status,
+    message,
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
+):
+    case_id = _seal_v4_review_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        complete_v4_case,
+        v4_web_routes,
+    )
+    screenshot_uri = json.loads(contract.get_review_context(case_id, 0))["imageUri"]
+    before_case = contract.get_case_json(case_id)
+    before_accounting = json.loads(contract.get_accounting())
+    direct_vm.clear_mocks()
+    direct_vm.mock_web(
+        "^" + re.escape(screenshot_uri) + "$",
+        {"method": "GET", "status": status, "body": body},
+    )
+
+    contract.request_review.reverts(case_id, message=message)
+
+    _assert_post_seal_review_failure_is_atomic(contract, case_id, before_case)
+    assert json.loads(contract.get_accounting()) == before_accounting
+
+
+def test_post_seal_screenshot_transport_failure_leaves_review_state_atomic(
+    monkeypatch,
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
+):
+    from genlayer import gl
+
+    case_id = _seal_v4_review_case(
+        contract,
+        direct_vm,
+        buyer,
+        vendor,
+        complete_v4_case,
+        v4_web_routes,
+    )
+    screenshot_uri = json.loads(contract.get_review_context(case_id, 0))["imageUri"]
+    before_case = contract.get_case_json(case_id)
+    before_accounting = json.loads(contract.get_accounting())
+    original_get = gl.nondet.web.get
+
+    def raise_for_screenshot(uri, **kwargs):
+        if uri == screenshot_uri:
+            raise RuntimeError("network unavailable")
+        return original_get(uri, **kwargs)
+
+    monkeypatch.setattr(gl.nondet.web, "get", raise_for_screenshot)
+
+    contract.request_review.reverts(
+        case_id, message="review screenshot could not be fetched"
+    )
+
+    _assert_post_seal_review_failure_is_atomic(contract, case_id, before_case)
+    assert json.loads(contract.get_accounting()) == before_accounting
 
 
 def test_review_requires_at_least_one_supporting_evidence_item(
