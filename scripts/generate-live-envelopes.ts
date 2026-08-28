@@ -58,18 +58,21 @@ function requireGenerationId(value: string): void {
   }
 }
 
-function validateTimestampDomain(observedAt: number, submittedAt: number, expiresAt: number): void {
+function validateTimestampDomain(observedAt: number, submittedAt: number, expiresAt: number, v4?: V4EvidenceOptions): void {
+  const createdAt = v4?.binding.caseCreatedAt ?? LIVE_EVIDENCE_BINDING.caseCreatedAt;
+  const evidenceDeadlineSeconds = v4?.binding.evidenceDeadlineSeconds ?? LIVE_EVIDENCE_BINDING.evidenceDeadlineSeconds;
+  const hardDeadlineSeconds = v4?.binding.hardDeadlineSeconds ?? LIVE_EVIDENCE_BINDING.hardDeadlineSeconds;
   requireSafeTimestamp(observedAt, "observedAt");
   requireSafeTimestamp(submittedAt, "submittedAt");
   requireSafeTimestamp(expiresAt, "expiresAt");
-  if (observedAt < LIVE_EVIDENCE_BINDING.caseCreatedAt) {
+  if (observedAt < createdAt) {
     throw new Error("observedAt is before the fixed case creation timestamp");
   }
   if (submittedAt < observedAt) throw new Error("submittedAt must not be earlier than observedAt");
   if (submittedAt - observedAt > MAX_OBSERVATION_AGE_SECONDS) throw new Error("observation is stale by more than 86400 seconds");
-  if (submittedAt > EVIDENCE_CUTOFF) throw new Error("submittedAt is after the fixed case evidence cutoff");
+  if (submittedAt > createdAt + evidenceDeadlineSeconds) throw new Error("submittedAt is after the fixed case evidence cutoff");
   if (expiresAt <= submittedAt) throw new Error("expiresAt must be later than submittedAt");
-  if (expiresAt > ABSOLUTE_HARD_DEADLINE) throw new Error("expiresAt exceeds the fixed case absolute hard deadline");
+  if (expiresAt > createdAt + hardDeadlineSeconds) throw new Error("expiresAt exceeds the fixed case absolute hard deadline");
   if (expiresAt - submittedAt > MAX_ENVELOPE_LIFETIME_SECONDS) {
     throw new Error("expiry exceeds the 518400-second case hard-deadline budget");
   }
@@ -187,7 +190,7 @@ export function validateLiveEnvelopeSet(
       throw new Error("V4 review-image hash does not match the screenshot envelope");
     }
   }
-  validateTimestampDomain(observedAt!, submittedAt!, expiresAt!);
+  validateTimestampDomain(observedAt!, submittedAt!, expiresAt!, options?.v4);
   if (observedAt !== sharedObservedAt(verified)) {
     throw new Error("live envelope observedAt does not match the verified public evidence timestamp");
   }
@@ -199,7 +202,7 @@ export async function buildLiveEnvelopeSet(options: BuildLiveEnvelopeOptions): P
   requireGenerationId(options.generationId);
   const verified = await verifyPublicEvidence(options.publicDir, { v4: options.v4 });
   const observedAt = sharedObservedAt(verified);
-  validateTimestampDomain(observedAt, options.submittedAt, options.expiresAt);
+  validateTimestampDomain(observedAt, options.submittedAt, options.expiresAt, options.v4);
 
   const manifestFiles = new Map(verified.manifest.files.map((file) => [file.evidenceType, file]));
   const set = EVIDENCE_ORDER.map((evidenceType, index): BuiltEnvelope => {

@@ -177,13 +177,17 @@ function validPng(byteLength?: number): Buffer {
 }
 
 function v4Options(screenshot: Uint8Array) {
-  const { caseId, chainId, contract, epoch, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
+  const { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
   return {
     binding: {
       caseId,
+      caseCreatedAt,
       chainId,
       contract,
       epoch,
+      evidenceDeadlineSeconds,
+      flowsHash,
+      hardDeadlineSeconds,
       profileVersion,
       sourceCommit,
       subjectOrigin,
@@ -286,6 +290,18 @@ test("V4 rejects signature-only, truncated, and non-legible PNG screenshots", ()
     actual.subarray(0, -1),
   ]) {
     assert.throws(() => (schema as any).verifyV4Payload("SCREENSHOT", screenshot, v4Options(screenshot).binding), /PNG|truncated|incomplete/i);
+  }
+});
+
+test("V4 rejects CRC-valid PNGs whose IDAT stream is empty or corrupt", () => {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(320, 0);
+  header.writeUInt32BE(180, 4);
+  header[8] = 8;
+  const emptyIdat = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk("IHDR", header), pngChunk("IDAT", Buffer.alloc(0)), pngChunk("IEND", Buffer.alloc(0))]);
+  const corruptIdat = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk("IHDR", header), pngChunk("IDAT", Buffer.from("not-deflate")), pngChunk("IEND", Buffer.alloc(0))]);
+  for (const screenshot of [emptyIdat, corruptIdat]) {
+    assert.throws(() => (schema as any).verifyV4Payload("SCREENSHOT", screenshot, v4Options(screenshot).binding), /IDAT|PNG|decode/i);
   }
 });
 

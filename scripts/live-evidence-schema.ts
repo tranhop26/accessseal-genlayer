@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { inflateSync } from "node:zlib";
 
 export const LIVE_EVIDENCE_BINDING = Object.freeze({
   caseId: "0xd3f684621674542957dbacb152e08616a3d315722091cc27dc3b5a9938cb6dd0",
@@ -128,6 +129,7 @@ function requireBoundHex(value: unknown, label: string, pattern: RegExp): void {
 
 type LiveEvidenceBindingIdentifiers = {
   caseId: string;
+  caseCreatedAt: number;
   contract: string;
   sourceCommit: string;
 };
@@ -476,10 +478,14 @@ export function verifyEvidenceBundle(manifestBytes: Uint8Array, payloads: Eviden
 }
 
 export type V4EvidenceBinding = {
+  caseCreatedAt: number;
   caseId: string;
   chainId: string;
   contract: string;
   epoch: number;
+  evidenceDeadlineSeconds: number;
+  flowsHash: string;
+  hardDeadlineSeconds: number;
   profileHash: string;
   profileVersion: "accessseal-static/1";
   releaseId: string;
@@ -497,7 +503,7 @@ export type ReleaseManifestV4 = {
 };
 
 export const V4_RELEASE_MANIFEST_SCHEMA = "accessseal-release-manifest/2" as const;
-const V4_BINDING_KEYS = ["caseId", "chainId", "contract", "epoch", "profileHash", "profileVersion", "releaseId", "sourceCommit", "subjectOrigin", "vendor"];
+const V4_BINDING_KEYS = ["caseCreatedAt", "caseId", "chainId", "contract", "epoch", "evidenceDeadlineSeconds", "flowsHash", "hardDeadlineSeconds", "profileHash", "profileVersion", "releaseId", "sourceCommit", "subjectOrigin", "vendor"];
 const MIN_LEGIBLE_SCREENSHOT_WIDTH = 320;
 const MIN_LEGIBLE_SCREENSHOT_HEIGHT = 180;
 const MAX_SCREENSHOT_DIMENSION = 4096;
@@ -534,6 +540,10 @@ export function pngDimensions(payload: Uint8Array): { width: number; height: num
   let height = 0;
   let sawHeader = false;
   let sawImageData = false;
+  const idat: Buffer[] = [];
+  let bitDepth = 0;
+  let colorType = 0;
+  let interlace = 0;
   while (offset < bytes.length) {
     if (offset + 12 > bytes.length) throw new Error("SCREENSHOT PNG is truncated");
     const length = bytes.readUInt32BE(offset);
@@ -546,15 +556,23 @@ export function pngDimensions(payload: Uint8Array): { width: number; height: num
       if (type !== "IHDR" || length !== 13) throw new Error("SCREENSHOT PNG requires IHDR first");
       width = bytes.readUInt32BE(dataStart);
       height = bytes.readUInt32BE(dataStart + 4);
-      const bitDepth = bytes[dataStart + 8]!;
-      const colorType = bytes[dataStart + 9]!;
+      bitDepth = bytes[dataStart + 8]!;
+      colorType = bytes[dataStart + 9]!;
+      interlace = bytes[dataStart + 12]!;
       const allowed: Record<number, readonly number[]> = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
       if (width === 0 || height === 0 || bytes[dataStart + 10] !== 0 || bytes[dataStart + 11] !== 0 || ![0, 1].includes(bytes[dataStart + 12]!) || !allowed[colorType]?.includes(bitDepth)) throw new Error("SCREENSHOT PNG IHDR is invalid");
       sawHeader = true;
     } else if (type === "IHDR") throw new Error("SCREENSHOT PNG contains multiple IHDR chunks");
-    if (type === "IDAT") sawImageData = true;
+    if (type === "IDAT") { sawImageData = true; idat.push(bytes.subarray(dataStart, dataEnd)); }
     if (type === "IEND") {
       if (length !== 0 || !sawImageData || dataEnd + 4 !== bytes.length) throw new Error("SCREENSHOT PNG IEND is invalid");
+      if (interlace !== 0 || bitDepth !== 8 || ![0, 2, 4, 6].includes(colorType)) throw new Error("SCREENSHOT PNG format is unsupported");
+      let decoded: Buffer;
+      try { decoded = inflateSync(Buffer.concat(idat)); } catch { throw new Error("SCREENSHOT PNG IDAT cannot be decoded"); }
+      const channels = ({ 0: 1, 2: 3, 4: 2, 6: 4 } as Record<number, number>)[colorType]!;
+      const rowBytes = width * channels;
+      if (decoded.byteLength !== height * (rowBytes + 1)) throw new Error("SCREENSHOT PNG IDAT scanlines are invalid");
+      for (let row = 0; row < height; row += 1) if (decoded[row * (rowBytes + 1)]! > 4) throw new Error("SCREENSHOT PNG filter is invalid");
       return { width, height };
     }
     offset = dataEnd + 4;
@@ -568,7 +586,8 @@ function validateV4Binding(binding: V4EvidenceBinding): void {
   requireBoundHex(binding.contract, "V4 contract", /^0x[0-9a-f]{40}$/);
   requireBoundHex(binding.sourceCommit, "V4 sourceCommit", /^[0-9a-f]{40}$/);
   requireBoundHex(binding.profileHash, "V4 profileHash", /^0x[0-9a-f]{64}$/);
-  if (!/^v4-[a-z0-9][a-z0-9-]{1,61}$/.test(binding.releaseId) || binding.profileVersion !== "accessseal-static/1" || !/^https:\/\/[a-z0-9.-]+$/.test(binding.subjectOrigin) || !/^0x[0-9a-f]{40}$/.test(binding.vendor) || !/^[0-9]+$/.test(binding.chainId) || !Number.isSafeInteger(binding.epoch) || binding.epoch < 0) throw new Error("V4 evidence binding is invalid");
+  requireBoundHex(binding.flowsHash, "V4 flowsHash", /^0x[0-9a-f]{64}$/);
+  if (!/^v4-[a-z0-9][a-z0-9-]{1,61}$/.test(binding.releaseId) || binding.profileVersion !== "accessseal-static/1" || !/^https:\/\/[a-z0-9.-]+$/.test(binding.subjectOrigin) || !/^0x[0-9a-f]{40}$/.test(binding.vendor) || !/^[0-9]+$/.test(binding.chainId) || !Number.isSafeInteger(binding.epoch) || binding.epoch < 0 || !Number.isSafeInteger(binding.caseCreatedAt) || binding.caseCreatedAt < 0 || !Number.isSafeInteger(binding.evidenceDeadlineSeconds) || binding.evidenceDeadlineSeconds < 1 || !Number.isSafeInteger(binding.hardDeadlineSeconds) || binding.hardDeadlineSeconds < binding.evidenceDeadlineSeconds) throw new Error("V4 evidence binding is invalid");
 }
 
 export function verifyV4Payload(evidenceType: EvidenceType, payload: Uint8Array, binding: V4EvidenceBinding): { width: number; height: number } | undefined {

@@ -139,8 +139,8 @@ function validPng(): Buffer {
 }
 
 function v4Options(screenshot: Uint8Array) {
-  const { caseId, chainId, contract, epoch, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
-  return { binding: { caseId, chainId, contract, epoch, profileVersion, sourceCommit, subjectOrigin, vendor, profileHash: `0x${"0123456789abcdef".repeat(4)}`, releaseId: "v4-candidate-20260828" }, reviewImageSha256: `sha256:${sha256(screenshot)}` };
+  const { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
+  return { binding: { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor, profileHash: `0x${"0123456789abcdef".repeat(4)}`, releaseId: "v4-candidate-20260828" }, reviewImageSha256: `sha256:${sha256(screenshot)}` };
 }
 
 test("verifies a V2 versioned-manifest bundle without trusting cached metadata", async () => {
