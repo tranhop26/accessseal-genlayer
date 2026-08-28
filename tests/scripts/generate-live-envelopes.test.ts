@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { deflateSync } from "node:zlib";
 import test, { afterEach, beforeEach } from "node:test";
 
 import { MEDIA_TYPES, canonicalizeEvidence, hashEvidence } from "../../scripts/generate-evidence.ts";
@@ -12,7 +13,7 @@ import {
   type BuiltEnvelope,
 } from "../../scripts/generate-live-envelopes.ts";
 import { generateLiveEvidenceBundle, verifyPublicEvidence } from "../../scripts/generate-live-evidence.ts";
-import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS, RELEASE_MANIFEST_PATH } from "../../scripts/live-evidence-schema.ts";
+import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS, RELEASE_MANIFEST_PATH, sha256 } from "../../scripts/live-evidence-schema.ts";
 
 const roots: string[] = [];
 let publicDir = "";
@@ -106,6 +107,42 @@ async function built(): Promise<BuiltEnvelope[]> {
   return buildLiveEnvelopeSet({ publicDir, submittedAt, expiresAt, generationId });
 }
 
+function crc32(bytes: Uint8Array): number {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let index = 0; index < 8; index += 1) value = (value >>> 1) ^ (-(value & 1) & 0xedb88320);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function chunk(type: string, data: Uint8Array): Buffer {
+  const result = Buffer.alloc(12 + data.byteLength);
+  result.writeUInt32BE(data.byteLength, 0);
+  result.write(type, 4, "ascii");
+  Buffer.from(data).copy(result, 8);
+  result.writeUInt32BE(crc32(result.subarray(4, 8 + data.byteLength)), 8 + data.byteLength);
+  return result;
+}
+
+function validPng(): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(320, 0);
+  header.writeUInt32BE(180, 4);
+  header[8] = 8;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.alloc((320 + 1) * 180))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function v4Options(screenshot: Uint8Array) {
+  const { caseId, chainId, contract, epoch, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
+  return { binding: { caseId, chainId, contract, epoch, profileVersion, sourceCommit, subjectOrigin, vendor, profileHash: `0x${"0123456789abcdef".repeat(4)}`, releaseId: "v4-candidate-20260828" }, reviewImageSha256: `sha256:${sha256(screenshot)}` };
+}
+
 test("verifies a V2 versioned-manifest bundle without trusting cached metadata", async () => {
   const verified = await verifyPublicEvidence(publicDir);
   assert.equal(verified.manifest.files.length, 5);
@@ -161,9 +198,18 @@ test("builds one OPEN_RELEASE and five canonical APPEND_EVIDENCE envelopes", asy
   }
 });
 
-test("V4 evidence binds the manifest screenshot path, hash, and media type into its envelope", async () => {
-  const set = await built();
-  const verified = await verifyPublicEvidence(publicDir);
+test("V4 envelopes carry the manifest-bound screenshot path, hash, and media type", async () => {
+  const screenshot = validPng();
+  const capture = join(roots[0]!, "v4-capture");
+  await mkdir(capture);
+  for (const [name, source] of [["release.html", "release.html"], ["dom-facts.json", "dom-facts.json"], ["scanner-report.json", "scanner-report.json"], ["critical-flow-trace.json", "critical-flow-trace.json"]] as const) {
+    await writeFile(join(capture, name), await readFile(join(roots[0]!, "capture", source)));
+  }
+  await writeFile(join(capture, "screenshot.png"), screenshot);
+  const v4 = v4Options(screenshot);
+  await generateLiveEvidenceBundle(capture, publicDir, { v4 } as any);
+  const set = await (buildLiveEnvelopeSet as any)({ publicDir, submittedAt, expiresAt, generationId, v4 }) as BuiltEnvelope[];
+  const verified = await verifyPublicEvidence(publicDir, { v4 } as any);
   const manifestScreenshot = verified.manifest.files.find((file) => file.evidenceType === "SCREENSHOT");
   const screenshotEnvelope = set.find((item) => item.envelope.evidenceType === "SCREENSHOT");
 
@@ -172,6 +218,8 @@ test("V4 evidence binds the manifest screenshot path, hash, and media type into 
   assert.equal(screenshotEnvelope.envelope.payloadUri, `${LIVE_EVIDENCE_BINDING.subjectOrigin}${manifestScreenshot.path}`);
   assert.equal(screenshotEnvelope.envelope.payloadSha256, manifestScreenshot.sha256);
   assert.equal(screenshotEnvelope.envelope.mediaType, manifestScreenshot.mediaType);
+  assert.equal(verified.manifest.schemaVersion, "accessseal-release-manifest/2");
+  assert.equal((verified.manifest as any).reviewImage.sha256, screenshotEnvelope.envelope.payloadSha256);
 });
 
 test("rejects invalid freshness and expiry domains", async () => {

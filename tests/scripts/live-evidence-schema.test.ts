@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { deflateSync } from "node:zlib";
 import test from "node:test";
+import * as schema from "../../scripts/live-evidence-schema.ts";
 import {
   LIVE_EVIDENCE_BINDING,
   PAYLOAD_SPECS,
@@ -135,6 +137,64 @@ function pngBytes(byteLength: number): Buffer {
   ]);
 }
 
+function crc32(bytes: Uint8Array): number {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let index = 0; index < 8; index += 1) value = (value >>> 1) ^ (-(value & 1) & 0xedb88320);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Uint8Array): Buffer {
+  const chunk = Buffer.alloc(12 + data.byteLength);
+  chunk.writeUInt32BE(data.byteLength, 0);
+  chunk.write(type, 4, "ascii");
+  Buffer.from(data).copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, 8 + data.byteLength)), 8 + data.byteLength);
+  return chunk;
+}
+
+function validPng(byteLength?: number): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(320, 0);
+  header.writeUInt32BE(180, 4);
+  header[8] = 8;
+  header[9] = 0;
+  const pixels = Buffer.alloc((320 + 1) * 180);
+  const base = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(pixels)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+  if (byteLength === undefined) return base;
+  return Buffer.concat([
+    base.subarray(0, -12),
+    pngChunk("tEXt", Buffer.alloc(byteLength - base.byteLength - 12, 0x61)),
+    base.subarray(-12),
+  ]);
+}
+
+function v4Options(screenshot: Uint8Array) {
+  const { caseId, chainId, contract, epoch, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
+  return {
+    binding: {
+      caseId,
+      chainId,
+      contract,
+      epoch,
+      profileVersion,
+      sourceCommit,
+      subjectOrigin,
+      vendor,
+      profileHash: `0x${"0123456789abcdef".repeat(4)}`,
+      releaseId: "v4-candidate-20260828",
+    },
+    reviewImageSha256: `sha256:${sha256(screenshot)}`,
+  };
+}
+
 test("canonicalJson sorts object keys recursively while preserving array order", () => {
   assert.equal(canonicalJson({ z: { b: 2, a: 1 }, a: [{ d: 4, c: 3 }, 0] }), '{"a":[{"c":3,"d":4},0],"z":{"a":1,"b":2}}');
 });
@@ -207,12 +267,41 @@ test("rejects individual and aggregate payload size overflow", () => {
   assert.throws(() => buildReleaseManifest(oversizedAggregate), /aggregate|total|size|bytes/i);
 });
 
-test("accepts an exact 16384-byte PNG and rejects 16385 bytes", () => {
-  assert.doesNotThrow(() => verifyPayload("SCREENSHOT", pngBytes(16_384)));
+test("V4 accepts a structurally valid exact 16384-byte PNG and rejects 16385 bytes", () => {
+  const exact = validPng(16_384);
+  const overflow = validPng(16_385);
+  assert.equal(exact.byteLength, 16_384);
+  assert.equal(overflow.byteLength, 16_385);
+  assert.doesNotThrow(() => (schema as any).verifyV4Payload("SCREENSHOT", exact, v4Options(exact).binding));
   assert.throws(
-    () => verifyPayload("SCREENSHOT", pngBytes(16_385)),
+    () => (schema as any).verifyV4Payload("SCREENSHOT", overflow, v4Options(overflow).binding),
     /SCREENSHOT exceeds 16384 bytes/,
   );
+});
+
+test("V4 rejects signature-only, truncated, and non-legible PNG screenshots", () => {
+  const actual = validPng();
+  for (const screenshot of [
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    actual.subarray(0, -1),
+  ]) {
+    assert.throws(() => (schema as any).verifyV4Payload("SCREENSHOT", screenshot, v4Options(screenshot).binding), /PNG|truncated|incomplete/i);
+  }
+});
+
+test("V4 manifest records the exact review-image path, hash, media type, and dimensions", () => {
+  const screenshot = validPng();
+  const payloads = { ...payloadsFromCapture(), SCREENSHOT: screenshot };
+  const built = (schema as any).buildV4ReleaseManifest(payloads, v4Options(screenshot));
+  assert.equal(built.manifest.schemaVersion, "accessseal-release-manifest/2");
+  assert.deepEqual(built.manifest.reviewImage, {
+    path: "/evidence/releases/v4-candidate-20260828/screenshot.png",
+    mediaType: "image/png",
+    sha256: `sha256:${sha256(screenshot)}`,
+    width: 320,
+    height: 180,
+  });
+  assert.doesNotThrow(() => (schema as any).verifyV4EvidenceBundle(built.bytes, payloads, v4Options(screenshot)));
 });
 
 test("rejects empty and repeated-hex V4 evidence binding identifiers", () => {

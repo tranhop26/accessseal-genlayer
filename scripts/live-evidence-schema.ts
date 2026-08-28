@@ -23,7 +23,7 @@ export const MAX_SCREENSHOT_BYTES = 16_384;
 
 export const PAYLOAD_SPECS = Object.freeze({
   HTML_BUNDLE: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/release.html", mediaType: "text/html", maxBytes: 32768 }),
-  SCREENSHOT: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/screenshot.png", mediaType: "image/png", maxBytes: MAX_SCREENSHOT_BYTES }),
+  SCREENSHOT: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/screenshot.png", mediaType: "image/png", maxBytes: 65536 }),
   DOM_FACTS: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/dom-facts.json", mediaType: "application/json", maxBytes: 16384 }),
   SCANNER_REPORT: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/scanner-report.json", mediaType: "application/json", maxBytes: 16384 }),
   CRITICAL_FLOW_TRACE: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/critical-flow-trace.json", mediaType: "application/json", maxBytes: 16384 }),
@@ -473,4 +473,150 @@ export function verifyEvidenceBundle(manifestBytes: Uint8Array, payloads: Eviden
   if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
   validatePayloadSemantics(payloads);
   return manifest;
+}
+
+export type V4EvidenceBinding = {
+  caseId: string;
+  chainId: string;
+  contract: string;
+  epoch: number;
+  profileHash: string;
+  profileVersion: "accessseal-static/1";
+  releaseId: string;
+  sourceCommit: string;
+  subjectOrigin: string;
+  vendor: string;
+};
+
+export type V4EvidenceOptions = { binding: V4EvidenceBinding; reviewImageSha256: `sha256:${string}` };
+export type ReleaseManifestV4 = {
+  binding: V4EvidenceBinding;
+  files: ReleaseManifestFileV1[];
+  reviewImage: { height: number; mediaType: "image/png"; path: string; sha256: `sha256:${string}`; width: number };
+  schemaVersion: "accessseal-release-manifest/2";
+};
+
+export const V4_RELEASE_MANIFEST_SCHEMA = "accessseal-release-manifest/2" as const;
+const V4_BINDING_KEYS = ["caseId", "chainId", "contract", "epoch", "profileHash", "profileVersion", "releaseId", "sourceCommit", "subjectOrigin", "vendor"];
+const MIN_LEGIBLE_SCREENSHOT_WIDTH = 320;
+const MIN_LEGIBLE_SCREENSHOT_HEIGHT = 180;
+const MAX_SCREENSHOT_DIMENSION = 4096;
+
+export function v4ReleaseManifestPath(binding: V4EvidenceBinding): string {
+  return `/evidence/releases/${binding.releaseId}/release-manifest.json`;
+}
+
+export function v4PayloadSpecs(binding: V4EvidenceBinding) {
+  const base = `/evidence/releases/${binding.releaseId}`;
+  return Object.freeze({
+    HTML_BUNDLE: Object.freeze({ path: `${base}/release.html`, mediaType: "text/html", maxBytes: 32768 }),
+    SCREENSHOT: Object.freeze({ path: `${base}/screenshot.png`, mediaType: "image/png", maxBytes: MAX_SCREENSHOT_BYTES }),
+    DOM_FACTS: Object.freeze({ path: `${base}/dom-facts.json`, mediaType: "application/json", maxBytes: 16384 }),
+    SCANNER_REPORT: Object.freeze({ path: `${base}/scanner-report.json`, mediaType: "application/json", maxBytes: 16384 }),
+    CRITICAL_FLOW_TRACE: Object.freeze({ path: `${base}/critical-flow-trace.json`, mediaType: "application/json", maxBytes: 16384 }),
+  });
+}
+
+function crc32(bytes: Uint8Array): number {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let shift = 0; shift < 8; shift += 1) value = (value >>> 1) ^ (-(value & 1) & 0xedb88320);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+export function pngDimensions(payload: Uint8Array): { width: number; height: number } {
+  const bytes = Buffer.from(payload);
+  if (!bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) throw new Error("SCREENSHOT has an invalid PNG signature");
+  let offset = PNG_SIGNATURE.length;
+  let width = 0;
+  let height = 0;
+  let sawHeader = false;
+  let sawImageData = false;
+  while (offset < bytes.length) {
+    if (offset + 12 > bytes.length) throw new Error("SCREENSHOT PNG is truncated");
+    const length = bytes.readUInt32BE(offset);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > bytes.length) throw new Error("SCREENSHOT PNG chunk is truncated");
+    const type = bytes.toString("ascii", offset + 4, dataStart);
+    if (!/^[A-Za-z]{4}$/.test(type) || crc32(bytes.subarray(offset + 4, dataEnd)) !== bytes.readUInt32BE(dataEnd)) throw new Error("SCREENSHOT PNG chunk is invalid");
+    if (!sawHeader) {
+      if (type !== "IHDR" || length !== 13) throw new Error("SCREENSHOT PNG requires IHDR first");
+      width = bytes.readUInt32BE(dataStart);
+      height = bytes.readUInt32BE(dataStart + 4);
+      const bitDepth = bytes[dataStart + 8]!;
+      const colorType = bytes[dataStart + 9]!;
+      const allowed: Record<number, readonly number[]> = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+      if (width === 0 || height === 0 || bytes[dataStart + 10] !== 0 || bytes[dataStart + 11] !== 0 || ![0, 1].includes(bytes[dataStart + 12]!) || !allowed[colorType]?.includes(bitDepth)) throw new Error("SCREENSHOT PNG IHDR is invalid");
+      sawHeader = true;
+    } else if (type === "IHDR") throw new Error("SCREENSHOT PNG contains multiple IHDR chunks");
+    if (type === "IDAT") sawImageData = true;
+    if (type === "IEND") {
+      if (length !== 0 || !sawImageData || dataEnd + 4 !== bytes.length) throw new Error("SCREENSHOT PNG IEND is invalid");
+      return { width, height };
+    }
+    offset = dataEnd + 4;
+  }
+  throw new Error("SCREENSHOT PNG is incomplete");
+}
+
+function validateV4Binding(binding: V4EvidenceBinding): void {
+  exactKeys(binding as unknown as JsonRecord, V4_BINDING_KEYS, "V4 evidence binding");
+  requireBoundHex(binding.caseId, "V4 caseId", /^0x[0-9a-f]{64}$/);
+  requireBoundHex(binding.contract, "V4 contract", /^0x[0-9a-f]{40}$/);
+  requireBoundHex(binding.sourceCommit, "V4 sourceCommit", /^[0-9a-f]{40}$/);
+  requireBoundHex(binding.profileHash, "V4 profileHash", /^0x[0-9a-f]{64}$/);
+  if (!/^v4-[a-z0-9][a-z0-9-]{1,61}$/.test(binding.releaseId) || binding.profileVersion !== "accessseal-static/1" || !/^https:\/\/[a-z0-9.-]+$/.test(binding.subjectOrigin) || !/^0x[0-9a-f]{40}$/.test(binding.vendor) || !/^[0-9]+$/.test(binding.chainId) || !Number.isSafeInteger(binding.epoch) || binding.epoch < 0) throw new Error("V4 evidence binding is invalid");
+}
+
+export function verifyV4Payload(evidenceType: EvidenceType, payload: Uint8Array, binding: V4EvidenceBinding): { width: number; height: number } | undefined {
+  validateV4Binding(binding);
+  const spec = v4PayloadSpecs(binding)[evidenceType];
+  if (payload.byteLength > spec.maxBytes) throw new Error(`${evidenceType} exceeds ${spec.maxBytes} bytes`);
+  if (evidenceType === "HTML_BUNDLE" && payload.byteLength === 0) throw new Error("HTML_BUNDLE is empty");
+  if (evidenceType !== "SCREENSHOT") return undefined;
+  const dimensions = pngDimensions(payload);
+  if (dimensions.width < MIN_LEGIBLE_SCREENSHOT_WIDTH || dimensions.height < MIN_LEGIBLE_SCREENSHOT_HEIGHT || dimensions.width > MAX_SCREENSHOT_DIMENSION || dimensions.height > MAX_SCREENSHOT_DIMENSION) throw new Error("SCREENSHOT dimensions are not legible");
+  return dimensions;
+}
+
+function validateV4Payloads(payloads: EvidencePayloads, options: V4EvidenceOptions): { width: number; height: number } {
+  const value = record(payloads, "evidence payloads");
+  exactKeys(value, EVIDENCE_TYPES, "evidence payloads");
+  let total = 0;
+  let screenshot: { width: number; height: number } | undefined;
+  for (const evidenceType of EVIDENCE_TYPES) {
+    const payload = bytes(value[evidenceType], evidenceType);
+    const dimensions = verifyV4Payload(evidenceType, payload, options.binding);
+    if (dimensions !== undefined) screenshot = dimensions;
+    total += payload.byteLength;
+  }
+  if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
+  if (screenshot === undefined) throw new Error("V4 screenshot is missing");
+  return screenshot;
+}
+
+export function buildV4ReleaseManifest(payloads: EvidencePayloads, options: V4EvidenceOptions): { manifest: ReleaseManifestV4; bytes: Buffer; releaseDigest: `sha256:${string}` } {
+  validateV4Binding(options.binding);
+  const dimensions = validateV4Payloads(payloads, options);
+  validatePayloadSemantics(payloads);
+  const specs = v4PayloadSpecs(options.binding);
+  const screenshotSha256 = `sha256:${sha256(payloads.SCREENSHOT)}` as `sha256:${string}`;
+  if (options.reviewImageSha256 !== screenshotSha256) throw new Error("V4 review-image hash does not match the screenshot");
+  const manifest: ReleaseManifestV4 = {
+    schemaVersion: V4_RELEASE_MANIFEST_SCHEMA,
+    binding: { ...options.binding },
+    files: EVIDENCE_TYPES.map((evidenceType) => ({ evidenceType, mediaType: specs[evidenceType].mediaType, path: specs[evidenceType].path, sha256: `sha256:${sha256(payloads[evidenceType])}` })),
+    reviewImage: { path: specs.SCREENSHOT.path, mediaType: "image/png", sha256: screenshotSha256, ...dimensions },
+  };
+  const bytes = Buffer.from(canonicalJson(manifest));
+  return { manifest, bytes, releaseDigest: `sha256:${sha256(bytes)}` };
+}
+
+export function verifyV4EvidenceBundle(manifestBytes: Uint8Array, payloads: EvidencePayloads, options: V4EvidenceOptions): ReleaseManifestV4 {
+  const built = buildV4ReleaseManifest(payloads, options);
+  if (!Buffer.from(manifestBytes).equals(built.bytes)) throw new Error("V4 release manifest does not match its exact bound evidence");
+  return built.manifest;
 }

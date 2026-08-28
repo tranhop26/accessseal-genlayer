@@ -14,7 +14,10 @@ import {
   PAYLOAD_SPECS,
   RELEASE_MANIFEST_PATH,
   canonicalJson,
+  v4PayloadSpecs,
+  v4ReleaseManifestPath,
   type EvidenceType,
+  type V4EvidenceOptions,
 } from "./live-evidence-schema.ts";
 
 const MAX_OBSERVATION_AGE_SECONDS = 86_400;
@@ -30,12 +33,14 @@ export type BuiltEnvelope = {
   evidenceHash: `sha256:${string}`;
 };
 
-type BuildLiveEnvelopeOptions = {
+export type BuildLiveEnvelopeOptions = {
   publicDir: string;
   submittedAt: number;
   expiresAt: number;
   generationId: string;
+  v4?: V4EvidenceOptions;
 };
+type EnvelopeModeOptions = Pick<BuildLiveEnvelopeOptions, "v4">;
 
 const EVIDENCE_CUTOFF = LIVE_EVIDENCE_BINDING.caseCreatedAt + LIVE_EVIDENCE_BINDING.evidenceDeadlineSeconds;
 const ABSOLUTE_HARD_DEADLINE = LIVE_EVIDENCE_BINDING.caseCreatedAt + LIVE_EVIDENCE_BINDING.hardDeadlineSeconds;
@@ -96,18 +101,24 @@ function sharedObservedAt(verified: VerifiedPublicEvidence): number {
   return values[0]!;
 }
 
-function expectedPayloadUri(evidenceType: string): string {
+function envelopeBinding(options?: EnvelopeModeOptions) {
+  return options?.v4?.binding ?? LIVE_EVIDENCE_BINDING;
+}
+
+function expectedPayloadUri(evidenceType: string, options?: EnvelopeModeOptions): string {
+  const binding = envelopeBinding(options);
   if (evidenceType === "RELEASE_MANIFEST") {
-    return `${LIVE_EVIDENCE_BINDING.subjectOrigin}${RELEASE_MANIFEST_PATH}`;
+    return `${binding.subjectOrigin}${options?.v4 === undefined ? RELEASE_MANIFEST_PATH : v4ReleaseManifestPath(options.v4.binding)}`;
   }
-  const spec = PAYLOAD_SPECS[evidenceType as EvidenceType];
+  const spec = (options?.v4 === undefined ? PAYLOAD_SPECS : v4PayloadSpecs(options.v4.binding))[evidenceType as EvidenceType];
   if (spec === undefined) throw new Error(`unsupported live evidence type: ${evidenceType}`);
-  return `${LIVE_EVIDENCE_BINDING.subjectOrigin}${spec.path}`;
+  return `${binding.subjectOrigin}${spec.path}`;
 }
 
 export function validateLiveEnvelopeSet(
   set: readonly BuiltEnvelope[],
   verified: VerifiedPublicEvidence,
+  options?: EnvelopeModeOptions,
 ): void {
   if (set.length !== EVIDENCE_ORDER.length) throw new Error("live envelope set must contain exactly six items");
   const verifiedDigests = new Map(verified.manifest.files.map((file) => [file.evidenceType, file.sha256]));
@@ -117,6 +128,7 @@ export function validateLiveEnvelopeSet(
   let submittedAt: number | undefined;
   let expiresAt: number | undefined;
   let generationId: string | undefined;
+  const binding = envelopeBinding(options);
 
   for (const [index, item] of set.entries()) {
     const envelope = item.envelope;
@@ -125,19 +137,19 @@ export function validateLiveEnvelopeSet(
     }
     const evidenceType = EVIDENCE_ORDER[index]!;
     if (envelope.evidenceType !== evidenceType) throw new Error("live envelope evidence order or type is invalid");
-    if (envelope.chainId !== LIVE_EVIDENCE_BINDING.chainId) throw new Error("live envelope chain domain is invalid");
-    if (envelope.contract !== LIVE_EVIDENCE_BINDING.contract) throw new Error("live envelope contract domain is invalid");
-    if (envelope.caseId !== LIVE_EVIDENCE_BINDING.caseId) throw new Error("live envelope case domain is invalid");
-    if (envelope.epoch !== LIVE_EVIDENCE_BINDING.epoch) throw new Error("live envelope epoch domain is invalid");
-    if (envelope.subjectOrigin !== LIVE_EVIDENCE_BINDING.subjectOrigin) throw new Error("live envelope subject origin is invalid");
-    if (envelope.issuer !== LIVE_EVIDENCE_BINDING.vendor) throw new Error("live envelope issuer is invalid");
-    if (envelope.profileVersion !== LIVE_EVIDENCE_BINDING.profileVersion) throw new Error("live envelope profile version is invalid");
+    if (envelope.chainId !== binding.chainId) throw new Error("live envelope chain domain is invalid");
+    if (envelope.contract !== binding.contract) throw new Error("live envelope contract domain is invalid");
+    if (envelope.caseId !== binding.caseId) throw new Error("live envelope case domain is invalid");
+    if (envelope.epoch !== binding.epoch) throw new Error("live envelope epoch domain is invalid");
+    if (envelope.subjectOrigin !== binding.subjectOrigin) throw new Error("live envelope subject origin is invalid");
+    if (envelope.issuer !== binding.vendor) throw new Error("live envelope issuer is invalid");
+    if (envelope.profileVersion !== binding.profileVersion) throw new Error("live envelope profile version is invalid");
     if (envelope.action !== (index === 0 ? "OPEN_RELEASE" : "APPEND_EVIDENCE")) throw new Error("live envelope action is invalid");
     if (envelope.mediaType !== MEDIA_TYPES[evidenceType]) throw new Error("live envelope media type is invalid");
-    if (envelope.payloadUri !== expectedPayloadUri(evidenceType)) throw new Error("live envelope payload URL is invalid");
+    if (envelope.payloadUri !== expectedPayloadUri(evidenceType, options)) throw new Error("live envelope payload URL is invalid");
     if (nonces.has(envelope.nonce)) throw new Error("live envelope set contains a duplicate nonce");
     nonces.add(envelope.nonce);
-    const noncePrefix = `${LIVE_EVIDENCE_BINDING.releaseId}-${evidenceType.toLowerCase()}-${envelope.submittedAt}-`;
+    const noncePrefix = `${binding.releaseId}-${evidenceType.toLowerCase()}-${envelope.submittedAt}-`;
     if (!envelope.nonce.startsWith(noncePrefix)) throw new Error("live envelope nonce does not match its replay domain");
     const currentGenerationId = envelope.nonce.slice(noncePrefix.length);
     requireGenerationId(currentGenerationId);
@@ -168,6 +180,13 @@ export function validateLiveEnvelopeSet(
   if (set[0]!.envelope.payloadSha256 !== releaseDigest) {
     throw new Error("release manifest payload digest does not match the release digest");
   }
+  if (options?.v4 !== undefined) {
+    const screenshot = set.find((item) => item.envelope.evidenceType === "SCREENSHOT");
+    const reviewImage = (verified.manifest as { reviewImage?: { sha256?: string } }).reviewImage;
+    if (screenshot?.envelope.payloadSha256 !== options.v4.reviewImageSha256 || reviewImage?.sha256 !== options.v4.reviewImageSha256) {
+      throw new Error("V4 review-image hash does not match the screenshot envelope");
+    }
+  }
   validateTimestampDomain(observedAt!, submittedAt!, expiresAt!);
   if (observedAt !== sharedObservedAt(verified)) {
     throw new Error("live envelope observedAt does not match the verified public evidence timestamp");
@@ -178,7 +197,7 @@ export async function buildLiveEnvelopeSet(options: BuildLiveEnvelopeOptions): P
   requireSafeTimestamp(options.submittedAt, "submittedAt");
   requireSafeTimestamp(options.expiresAt, "expiresAt");
   requireGenerationId(options.generationId);
-  const verified = await verifyPublicEvidence(options.publicDir);
+  const verified = await verifyPublicEvidence(options.publicDir, { v4: options.v4 });
   const observedAt = sharedObservedAt(verified);
   validateTimestampDomain(observedAt, options.submittedAt, options.expiresAt);
 
@@ -188,28 +207,28 @@ export async function buildLiveEnvelopeSet(options: BuildLiveEnvelopeOptions): P
     if (index > 0 && manifestFile === undefined) throw new Error(`manifest is missing ${evidenceType}`);
     const envelope: EvidenceEnvelopeV1 = {
       schemaVersion: "accessseal-evidence/1",
-      chainId: LIVE_EVIDENCE_BINDING.chainId,
-      contract: LIVE_EVIDENCE_BINDING.contract,
-      caseId: LIVE_EVIDENCE_BINDING.caseId,
-      epoch: LIVE_EVIDENCE_BINDING.epoch,
+      chainId: envelopeBinding(options).chainId,
+      contract: envelopeBinding(options).contract,
+      caseId: envelopeBinding(options).caseId,
+      epoch: envelopeBinding(options).epoch,
       action: index === 0 ? "OPEN_RELEASE" : "APPEND_EVIDENCE",
-      subjectOrigin: LIVE_EVIDENCE_BINDING.subjectOrigin,
-      profileVersion: LIVE_EVIDENCE_BINDING.profileVersion,
+      subjectOrigin: envelopeBinding(options).subjectOrigin,
+      profileVersion: envelopeBinding(options).profileVersion,
       releaseDigest: verified.releaseDigest,
       evidenceType,
-      issuer: LIVE_EVIDENCE_BINDING.vendor,
-      payloadUri: expectedPayloadUri(evidenceType),
+      issuer: envelopeBinding(options).vendor,
+      payloadUri: expectedPayloadUri(evidenceType, options),
       payloadSha256: index === 0 ? verified.releaseDigest : manifestFile!.sha256,
       mediaType: MEDIA_TYPES[evidenceType]!,
       observedAt,
       submittedAt: options.submittedAt,
       expiresAt: options.expiresAt,
-      nonce: `${LIVE_EVIDENCE_BINDING.releaseId}-${evidenceType.toLowerCase()}-${options.submittedAt}-${options.generationId}`,
+      nonce: `${envelopeBinding(options).releaseId}-${evidenceType.toLowerCase()}-${options.submittedAt}-${options.generationId}`,
     };
     const canonical = canonicalizeEvidence(envelope);
     return { envelope, canonicalJson: canonical, evidenceHash: hashEvidence(envelope) };
   });
-  validateLiveEnvelopeSet(set, verified);
+  validateLiveEnvelopeSet(set, verified, options);
   return set;
 }
 
@@ -299,6 +318,7 @@ function envelopeSummary(set: readonly BuiltEnvelope[]) {
 async function validateInstalledEnvelopeDirectory(
   path: string,
   verified: VerifiedPublicEvidence,
+  options?: { v4?: V4EvidenceOptions },
 ): Promise<void> {
   if (!await inspectSafeOutputDirectory(path, true)) {
     throw new Error("live envelope directory is missing");
@@ -318,7 +338,7 @@ async function validateInstalledEnvelopeDirectory(
     }
     set.push({ envelope, canonicalJson: canonical, evidenceHash: hashEvidence(envelope) });
   }
-  validateLiveEnvelopeSet(set, verified);
+  validateLiveEnvelopeSet(set, verified, options);
   const expectedSummary = canonicalJson(envelopeSummary(set));
   if ((await readFile(join(path, "summary.json"), "utf8")) !== expectedSummary) {
     throw new Error("installed live envelope summary does not match its envelope set");
@@ -330,13 +350,14 @@ async function recoverEnvelopeSwap(
   stagingRoot: string,
   backupRoot: string,
   verified: VerifiedPublicEvidence,
+  options?: { v4?: V4EvidenceOptions },
 ): Promise<void> {
   const hasOutput = await inspectSafeOutputDirectory(outputRoot, false);
-  if (hasOutput) await validateInstalledEnvelopeDirectory(outputRoot, verified);
+  if (hasOutput) await validateInstalledEnvelopeDirectory(outputRoot, verified, options);
   const hasBackup = await inspectSafeOutputDirectory(backupRoot, false);
   if (hasBackup) {
     if (!hasOutput) {
-      await validateInstalledEnvelopeDirectory(backupRoot, verified);
+      await validateInstalledEnvelopeDirectory(backupRoot, verified, options);
       await rename(backupRoot, outputRoot);
     } else {
       await removeSafeOutputDirectory(backupRoot);
@@ -352,18 +373,19 @@ export async function writeLiveEnvelopeSet(
   set: readonly BuiltEnvelope[],
   publicDirectory: string,
   outputDirectory: string,
+  options?: { v4?: V4EvidenceOptions },
 ): Promise<void> {
   const requestedOutput = resolve(outputDirectory);
   if (requestedOutput !== resolve("work/evidence/live-envelopes")) {
     throw new Error("live envelopes may only be written under the approved ignored output directory");
   }
-  const verified = await verifyPublicEvidence(publicDirectory);
-  validateLiveEnvelopeSet(set, verified);
+  const verified = await verifyPublicEvidence(publicDirectory, options);
+  validateLiveEnvelopeSet(set, verified, options);
   const outputParent = await ensureRealDirectory(dirname(requestedOutput));
   const outputRoot = join(outputParent, "live-envelopes");
   const stagingRoot = join(outputParent, ".live-envelopes.staging");
   const backupRoot = join(outputParent, ".live-envelopes.backup");
-  await recoverEnvelopeSwap(outputRoot, stagingRoot, backupRoot, verified);
+  await recoverEnvelopeSwap(outputRoot, stagingRoot, backupRoot, verified, options);
   const summary = envelopeSummary(set);
   const writes = [
     ...set.map((item, index) => ({
@@ -401,7 +423,7 @@ export async function writeLiveEnvelopeSet(
         await handle.close();
       }
     }
-    await validateInstalledEnvelopeDirectory(stagingRoot, verified);
+    await validateInstalledEnvelopeDirectory(stagingRoot, verified, options);
     if (await stat(outputRoot) !== undefined) {
       await rename(outputRoot, backupRoot);
     }
@@ -430,14 +452,26 @@ function argument(name: string): string {
   return value;
 }
 
+async function v4OptionsFromArguments(): Promise<{ v4?: V4EvidenceOptions }> {
+  const index = process.argv.indexOf("--v4-binding");
+  if (index < 0) return {};
+  const filename = process.argv[index + 1];
+  if (filename === undefined || filename.startsWith("--")) throw new Error("missing required argument --v4-binding");
+  let parsed: unknown;
+  try { parsed = JSON.parse(await readFile(filename, "utf8")); } catch { throw new Error("V4 binding file must contain valid JSON"); }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("V4 binding file must contain an object");
+  return { v4: parsed as V4EvidenceOptions };
+}
+
 async function main(): Promise<void> {
   const publicDir = argument("--public-dir");
   const outputDir = resolve(argument("--output-dir"));
+  const options = await v4OptionsFromArguments();
   const submittedAt = Math.floor(Date.now() / 1_000);
   const generationId = randomUUID().replaceAll("-", "");
   const expiresAt = Math.min(submittedAt + MAX_ENVELOPE_LIFETIME_SECONDS, ABSOLUTE_HARD_DEADLINE);
-  const set = await buildLiveEnvelopeSet({ publicDir, submittedAt, expiresAt, generationId });
-  await writeLiveEnvelopeSet(set, publicDir, outputDir);
+  const set = await buildLiveEnvelopeSet({ publicDir, submittedAt, expiresAt, generationId, ...options });
+  await writeLiveEnvelopeSet(set, publicDir, outputDir, options);
   const summary = set.map((item) => ({
     evidenceType: item.envelope.evidenceType,
     action: item.envelope.action,
