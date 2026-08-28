@@ -1252,10 +1252,15 @@ def test_open_requires_release_manifest_and_bounded_nonce(
 
 
 def test_buyer_seals_exact_complete_fresh_evidence_profile_before_cutoff(
-    contract, direct_vm, buyer, vendor
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
 ):
-    case_id = funded_case(contract, direct_vm, buyer, vendor)
-    open_complete_early_seal_profile(contract, case_id, vendor)
+    case_id, release = complete_v4_case(contract, buyer, vendor)
+    v4_web_routes(release)
 
     contract.as_(buyer).close_evidence(case_id)
 
@@ -1426,10 +1431,15 @@ def test_close_evidence_rejects_hard_deadline_without_mutating_readback(
 
 
 def test_close_evidence_rejects_second_close_without_mutating_readback(
-    contract, direct_vm, buyer, vendor
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
 ):
-    case_id = funded_case(contract, direct_vm, buyer, vendor)
-    open_complete_early_seal_profile(contract, case_id, vendor)
+    case_id, release = complete_v4_case(contract, buyer, vendor)
+    v4_web_routes(release)
     contract.as_(buyer).close_evidence(case_id)
     before = case_evidence_and_accounting(contract, case_id)
 
@@ -1442,10 +1452,15 @@ def test_close_evidence_rejects_second_close_without_mutating_readback(
 
 
 def test_append_rejects_after_early_seal_without_mutating_readback(
-    contract, direct_vm, buyer, vendor
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
 ):
-    case_id = funded_case(contract, direct_vm, buyer, vendor)
-    open_complete_early_seal_profile(contract, case_id, vendor)
+    case_id, release = complete_v4_case(contract, buyer, vendor)
+    v4_web_routes(release)
     contract.as_(buyer).close_evidence(case_id)
     appended = envelope_for(
         contract,

@@ -173,6 +173,10 @@ def complete_v4_case(direct_vm: Any):
         vendor: Any,
         *,
         failure: str | None = None,
+        artifact_mutator: Callable[
+            [dict[str, Any], dict[str, Any], dict[str, Any]], None
+        ]
+        | None = None,
     ) -> tuple[str, dict[str, Any]]:
         direct_vm.warp("2026-08-13T00:00:00+00:00")
         case_id = contract.as_(buyer).create_case(
@@ -255,6 +259,8 @@ def complete_v4_case(direct_vm: Any):
             flow_trace["flows"][0]["passed"] = 1
         elif failure == "unsafe":
             scanner["scans"][0]["passes"] = 9_007_199_254_740_992
+        if artifact_mutator is not None:
+            artifact_mutator(dom_facts, scanner, flow_trace)
         bodies = {
             "HTML_BUNDLE": b"<!doctype html><main id='main-content'>AccessSeal</main>",
             "SCREENSHOT": screenshot,
@@ -324,8 +330,17 @@ def complete_v4_case(direct_vm: Any):
             )
         release = {
             "manifestBody": manifest_body,
+            "manifestUri": V4_ORIGIN + V4_PATHS["RELEASE_MANIFEST"],
             "bodies": bodies,
             "failure": failure,
+            "payloads": {
+                evidence_type: {
+                    "body": bodies[evidence_type],
+                    "mediaType": V4_MEDIA_TYPES[evidence_type],
+                    "uri": V4_ORIGIN + V4_PATHS[evidence_type],
+                }
+                for evidence_type in V4_EVIDENCE_TYPES
+            },
         }
         if failure == "stale":
             direct_vm.warp("2026-08-13T01:30:01+00:00")

@@ -1292,46 +1292,84 @@ class AccessSeal(gl.Contract):
             if any(not isinstance(item, str) for item in landmarks):
                 raise gl.vm.UserError("DOM landmarks must contain strings")
             headings = self._context_list(page.get("headings"), "DOM headings")
+            normalized_headings: list[object] = []
             for heading in headings:
                 if not isinstance(heading, dict):
                     raise gl.vm.UserError("DOM heading must be an object")
-                self._context_integer(heading.get("level"), "DOM heading level")
-                self._context_string(heading.get("name"), "DOM heading name")
+                level = self._context_integer(
+                    heading.get("level"), "DOM heading level"
+                )
+                if level < 1 or level > 6:
+                    raise gl.vm.UserError("DOM heading level is invalid")
+                normalized_headings.append(
+                    {
+                        "level": level,
+                        "name": self._context_string(
+                            heading.get("name"), "DOM heading name"
+                        ),
+                    }
+                )
             labels = self._context_list(page.get("formLabels"), "DOM form labels")
+            normalized_labels: list[object] = []
             for label in labels:
                 if not isinstance(label, dict):
                     raise gl.vm.UserError("DOM form label must be an object")
-                self._context_string(label.get("control"), "DOM form control")
-                self._context_string(label.get("label"), "DOM form label")
+                normalized_labels.append(
+                    {
+                        "control": self._context_string(
+                            label.get("control"), "DOM form control"
+                        ),
+                        "label": self._context_string(
+                            label.get("label"), "DOM form label"
+                        ),
+                    }
+                )
             images = self._context_list(
                 page.get("imageAlternatives"), "DOM image alternatives"
             )
+            normalized_images: list[object] = []
             for image in images:
                 if not isinstance(image, dict):
                     raise gl.vm.UserError("DOM image alternative must be an object")
-                self._context_string(image.get("alt"), "DOM image alternative text")
-                self._context_string(image.get("src"), "DOM image source")
+                if not isinstance(image.get("decorative"), bool):
+                    raise gl.vm.UserError(
+                        "DOM image decorative state must be boolean"
+                    )
+                normalized_images.append(
+                    {
+                        "alt": self._context_string(
+                            image.get("alt"), "DOM image alternative text"
+                        ),
+                        "decorative": image["decorative"],
+                        "src": self._context_string(
+                            image.get("src"), "DOM image source"
+                        ),
+                    }
+                )
             normalized_pages.append(
                 {
                     "url": self._context_url(page.get("url"), origin, "DOM page URL"),
-                    "landmarks": landmarks,
-                    "headings": headings,
-                    "formLabels": labels,
-                    "imageAlternatives": images,
+                    "landmarks": [str(item) for item in landmarks],
+                    "headings": normalized_headings,
+                    "formLabels": normalized_labels,
+                    "imageAlternatives": normalized_images,
                     "skipLinkTarget": self._context_string(
                         page.get("skipLinkTarget"), "DOM skip link target"
                     ),
                 }
             )
 
-        tool = scanner.get("tool")
-        if isinstance(tool, str):
-            self._context_string(tool, "scanner tool")
-        elif isinstance(tool, dict):
-            self._context_string(tool.get("name"), "scanner tool name")
-            self._context_string(tool.get("version"), "scanner tool version")
-        else:
+        raw_tool = scanner.get("tool")
+        if not isinstance(raw_tool, dict):
             raise gl.vm.UserError("scanner tool type is invalid")
+        tool = {
+            "name": self._context_string(
+                raw_tool.get("name"), "scanner tool name"
+            ),
+            "version": self._context_string(
+                raw_tool.get("version"), "scanner tool version"
+            ),
+        }
         normalized_scans: list[object] = []
         for scan in self._context_list(scanner.get("scans"), "scanner scans"):
             if not isinstance(scan, dict):
@@ -1339,10 +1377,23 @@ class AccessSeal(gl.Contract):
             violations = self._context_list(
                 scan.get("violations"), "scanner violations"
             )
+            normalized_violations: list[object] = []
             for violation in violations:
                 if not isinstance(violation, dict):
                     raise gl.vm.UserError("scanner violation must be an object")
-                self._context_string(violation.get("id"), "scanner violation ID")
+                impact = self._context_string(
+                    violation.get("impact"), "scanner violation impact"
+                )
+                if impact not in ("minor", "moderate", "serious", "critical"):
+                    raise gl.vm.UserError("scanner violation impact is invalid")
+                normalized_violations.append(
+                    {
+                        "id": self._context_string(
+                            violation.get("id"), "scanner violation ID"
+                        ),
+                        "impact": impact,
+                    }
+                )
             incomplete_ids: list[str] = []
             for item in self._context_list(
                 scan.get("incomplete"), "scanner incomplete findings"
@@ -1357,7 +1408,7 @@ class AccessSeal(gl.Contract):
                     "url": self._context_url(
                         scan.get("url"), origin, "scanner scan URL"
                     ),
-                    "violations": violations,
+                    "violations": normalized_violations,
                     "incompleteIds": incomplete_ids,
                     "passes": self._context_integer(
                         scan.get("passes"), "scanner passes"
@@ -1407,6 +1458,9 @@ class AccessSeal(gl.Contract):
             or any(not isinstance(blockers[code], bool) for code in blockers)
         ):
             raise gl.vm.UserError("critical flow material blockers are invalid")
+        normalized_blockers = {
+            code: blockers[code] for code in MATERIAL_BLOCKER_CODES
+        }
 
         screenshot_body = bodies["SCREENSHOT"]
         if not screenshot_body.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -1432,7 +1486,7 @@ class AccessSeal(gl.Contract):
             "criticalFlows": {
                 "flowsHash": flow_trace["flowsHash"],
                 "flows": normalized_flows,
-                "materialBlockers": blockers,
+                "materialBlockers": normalized_blockers,
             },
             "screenshot": {
                 "uri": screenshot["payloadUri"],
@@ -1478,7 +1532,24 @@ class AccessSeal(gl.Contract):
                 return False
         except (TypeError, ValueError, UnicodeEncodeError):
             return False
-        if not isinstance(context, dict) or context.get("schemaVersion") != REVIEW_CONTEXT_SCHEMA:
+        if (
+            not isinstance(context, dict)
+            or sorted(context.keys())
+            != sorted(
+                [
+                    "binding",
+                    "criticalFlows",
+                    "dom",
+                    "evidence",
+                    "expiresAt",
+                    "observedAt",
+                    "scanner",
+                    "schemaVersion",
+                    "screenshot",
+                ]
+            )
+            or context.get("schemaVersion") != REVIEW_CONTEXT_SCHEMA
+        ):
             return False
         if record["contextHash"] != _review_context_hash(context_json):
             return False
@@ -1493,15 +1564,229 @@ class AccessSeal(gl.Contract):
             "subjectOrigin": self.subject_origins[case_id],
         }:
             return False
+
+        def valid_string(value: object) -> bool:
+            return isinstance(value, str) and _utf8_size(value) is not None
+
+        def valid_integer(value: object, *, positive: bool = False) -> bool:
+            return (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and (value > 0 if positive else value >= 0)
+                and value <= MAX_SAFE_JSON_INTEGER
+            )
+
+        def exact_keys(value: object, keys: list[str]) -> bool:
+            return isinstance(value, dict) and sorted(value.keys()) == sorted(keys)
+
+        def bounded_list(value: object) -> bool:
+            return isinstance(value, list) and len(value) <= MAX_EVIDENCE_PER_EPOCH
+
+        def string_list(value: object) -> bool:
+            return bounded_list(value) and all(valid_string(item) for item in value)
+
+        epoch_key = self._epoch_key(case_id, epoch)
+        count = self.evidence_counts[epoch_key]
+        if int(count) != len(MANDATORY_EVIDENCE_TYPES):
+            return False
+        stored_by_type: dict[str, dict[str, object]] = {}
+        try:
+            for index in range(int(count)):
+                evidence_key = self._evidence_key(
+                    case_id, epoch, u256(index)
+                )
+                envelope = json.loads(self.evidence_envelopes[evidence_key])
+                if not isinstance(envelope, dict):
+                    return False
+                evidence_type = envelope.get("evidenceType")
+                if (
+                    not isinstance(evidence_type, str)
+                    or evidence_type in stored_by_type
+                ):
+                    return False
+                stored_by_type[evidence_type] = envelope
+            expected_evidence = [
+                {
+                    "evidenceType": evidence_type,
+                    "sha256": stored_by_type[evidence_type]["payloadSha256"],
+                }
+                for evidence_type in MANDATORY_EVIDENCE_TYPES
+            ]
+            expected_observed_at = min(
+                int(stored_by_type[evidence_type]["observedAt"])
+                for evidence_type in MANDATORY_EVIDENCE_TYPES
+            )
+            expected_expires_at = min(
+                int(stored_by_type[evidence_type]["expiresAt"])
+                for evidence_type in MANDATORY_EVIDENCE_TYPES
+            )
+            screenshot_envelope = stored_by_type["SCREENSHOT"]
+        except (KeyError, TypeError, ValueError):
+            return False
+        evidence = context.get("evidence")
+        if evidence != expected_evidence:
+            return False
+        for item in evidence:
+            if (
+                not exact_keys(item, ["evidenceType", "sha256"])
+                or not valid_string(item["evidenceType"])
+                or not _is_lowercase_sha256_text(item["sha256"])
+            ):
+                return False
+        if (
+            not valid_integer(context.get("observedAt"))
+            or not valid_integer(context.get("expiresAt"), positive=True)
+            or context["observedAt"] != expected_observed_at
+            or context["expiresAt"] != expected_expires_at
+        ):
+            return False
+
+        origin = self.subject_origins[case_id]
+
+        def valid_origin_url(value: object) -> bool:
+            return valid_string(value) and (
+                value == origin or value.startswith(origin + "/")
+            )
+
+        dom = context.get("dom")
+        if not exact_keys(dom, ["pages"]) or not bounded_list(dom["pages"]):
+            return False
+        page_urls: list[str] = []
+        for page in dom["pages"]:
+            if not exact_keys(
+                page,
+                [
+                    "formLabels",
+                    "headings",
+                    "imageAlternatives",
+                    "landmarks",
+                    "skipLinkTarget",
+                    "url",
+                ],
+            ):
+                return False
+            if (
+                not valid_origin_url(page["url"])
+                or page["url"] in page_urls
+                or not string_list(page["landmarks"])
+                or not valid_string(page["skipLinkTarget"])
+            ):
+                return False
+            page_urls.append(page["url"])
+            if not bounded_list(page["headings"]):
+                return False
+            for heading in page["headings"]:
+                if (
+                    not exact_keys(heading, ["level", "name"])
+                    or not valid_integer(heading["level"], positive=True)
+                    or heading["level"] > 6
+                    or not valid_string(heading["name"])
+                ):
+                    return False
+            if not bounded_list(page["formLabels"]):
+                return False
+            for label in page["formLabels"]:
+                if (
+                    not exact_keys(label, ["control", "label"])
+                    or not valid_string(label["control"])
+                    or not valid_string(label["label"])
+                ):
+                    return False
+            if not bounded_list(page["imageAlternatives"]):
+                return False
+            for image in page["imageAlternatives"]:
+                if (
+                    not exact_keys(image, ["alt", "decorative", "src"])
+                    or not valid_string(image["alt"])
+                    or not isinstance(image["decorative"], bool)
+                    or not valid_string(image["src"])
+                ):
+                    return False
+
+        scanner = context.get("scanner")
+        if not exact_keys(scanner, ["scans", "tool"]):
+            return False
+        tool = scanner["tool"]
+        if (
+            not exact_keys(tool, ["name", "version"])
+            or not valid_string(tool["name"])
+            or not valid_string(tool["version"])
+            or not bounded_list(scanner["scans"])
+        ):
+            return False
+        scan_urls: list[str] = []
+        for scan in scanner["scans"]:
+            if not exact_keys(
+                scan,
+                ["incompleteIds", "passes", "url", "violations"],
+            ):
+                return False
+            if (
+                not valid_origin_url(scan["url"])
+                or scan["url"] in scan_urls
+                or not string_list(scan["incompleteIds"])
+                or not valid_integer(scan["passes"])
+                or not bounded_list(scan["violations"])
+            ):
+                return False
+            scan_urls.append(scan["url"])
+            for violation in scan["violations"]:
+                if (
+                    not exact_keys(violation, ["id", "impact"])
+                    or not valid_string(violation["id"])
+                    or violation["impact"]
+                    not in ("minor", "moderate", "serious", "critical")
+                ):
+                    return False
+        if scan_urls != page_urls:
+            return False
+
+        critical_flows = context.get("criticalFlows")
+        if (
+            not exact_keys(
+                critical_flows,
+                ["flows", "flowsHash", "materialBlockers"],
+            )
+            or critical_flows["flowsHash"] != self.flows_hashes[case_id]
+            or not bounded_list(critical_flows["flows"])
+        ):
+            return False
+        for flow in critical_flows["flows"]:
+            if (
+                not exact_keys(flow, ["checkpoints", "id", "passed"])
+                or not valid_string(flow["id"])
+                or not isinstance(flow["passed"], bool)
+                or not bounded_list(flow["checkpoints"])
+            ):
+                return False
+            for checkpoint in flow["checkpoints"]:
+                if (
+                    not exact_keys(checkpoint, ["checkpoint", "passed"])
+                    or not valid_string(checkpoint["checkpoint"])
+                    or not isinstance(checkpoint["passed"], bool)
+                ):
+                    return False
+        blockers = critical_flows["materialBlockers"]
+        if (
+            not exact_keys(blockers, list(MATERIAL_BLOCKER_CODES))
+            or any(not isinstance(blockers[code], bool) for code in blockers)
+        ):
+            return False
+
         screenshot = context.get("screenshot")
         return (
-            isinstance(screenshot, dict)
+            exact_keys(
+                screenshot, ["byteLength", "mediaType", "sha256", "uri"]
+            )
             and record["imageUri"] == screenshot.get("uri")
             and record["imageSha256"] == screenshot.get("sha256")
+            and screenshot.get("uri") == screenshot_envelope["payloadUri"]
+            and screenshot.get("sha256")
+            == screenshot_envelope["payloadSha256"]
+            and valid_origin_url(screenshot.get("uri"))
             and screenshot.get("mediaType") == "image/png"
-            and isinstance(screenshot.get("byteLength"), int)
-            and not isinstance(screenshot.get("byteLength"), bool)
-            and 0 < screenshot["byteLength"] <= MAX_SCREENSHOT_BYTES
+            and valid_integer(screenshot.get("byteLength"), positive=True)
+            and screenshot["byteLength"] <= MAX_SCREENSHOT_BYTES
             and _is_lowercase_sha256_text(record["contextHash"])
             and _is_lowercase_sha256_text(record["imageSha256"])
         )

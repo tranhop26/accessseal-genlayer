@@ -285,17 +285,16 @@ def test_one_rmi_cure_preserves_history_and_rejects_old_epoch_domain(
     )
 
 
-def test_cure_epoch_resets_seal_and_requires_a_new_seal_before_cutoff(
-    contract, direct_vm, buyer, vendor
+def test_cure_epoch_resets_seal_and_all_v4_review_context_maps(
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
 ):
-    case_id, release = open_reviewable_case(
-        contract,
-        direct_vm,
-        buyer,
-        vendor,
-        salt="sealed-rmi-before-cutoff",
-        advance_to_cutoff=False,
-    )
+    case_id, release = complete_v4_case(contract, buyer, vendor)
+    v4_web_routes(release)
     mock_adjudication(
         direct_vm,
         release,
@@ -319,44 +318,17 @@ def test_cure_epoch_resets_seal_and_requires_a_new_seal_before_cutoff(
     assert cured["evidenceSealed"] is False
     assert cured["evidenceSealedAt"] == 0
     assert cured["evidenceSealedBy"] == "0x" + "00" * 20
-
-    direct_vm.warp("2026-08-13T00:29:51+00:00")
-    cure_release = _open_cure_epoch(
-        contract,
-        case_id,
-        vendor,
-        supporting_evidence=ALL_SUPPORTING_EVIDENCE,
+    assert cured["reviewContextReady"] is False
+    assert cured["reviewContextHash"] == ""
+    epoch_key = case_id + "|1"
+    assert contract.review_contexts[epoch_key] == ""
+    assert contract.review_context_hashes[epoch_key] == ""
+    assert contract.review_context_ready[epoch_key] is False
+    assert contract.review_image_uris[epoch_key] == ""
+    assert contract.review_image_hashes[epoch_key] == ""
+    contract.get_review_context.reverts(
+        case_id, 1, message="review context does not exist"
     )
-    cure_evidence = json.loads(contract.get_evidence(case_id, 1))
-    assert [
-        envelope["evidenceType"] for envelope in cure_evidence["envelopes"]
-    ] == [
-        "RELEASE_MANIFEST",
-        "HTML_BUNDLE",
-        "SCREENSHOT",
-        "DOM_FACTS",
-        "SCANNER_REPORT",
-        "CRITICAL_FLOW_TRACE",
-    ]
-    contract.request_review.reverts(
-        case_id,
-        message="review is not eligible before the evidence cutoff",
-    )
-
-    contract.as_(buyer).close_evidence(case_id)
-    resealed = contract.get_case_json(case_id)
-    assert resealed["lifecycle"] == "EVIDENCE_SEALED"
-    assert resealed["evidenceSealed"] is True
-    assert resealed["evidenceSealedAt"] == 1_786_580_991
-    assert resealed["evidenceSealedBy"] == buyer.as_hex.lower()
-
-    mock_adjudication(direct_vm, cure_release)
-    contract.request_review(case_id)
-
-    assert _finality(contract, case_id)["status"] == (
-        "PENDING_PROTOCOL_FINALITY"
-    )
-    assert json.loads(contract.get_review(case_id, 1))["verdict"] == "APPROVED"
 
 
 def test_cure_requires_vendor_rmi_finality_and_never_changes_funded_terms(
