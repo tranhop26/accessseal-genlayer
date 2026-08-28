@@ -1738,7 +1738,7 @@ class AccessSeal(gl.Contract):
                     not in ("minor", "moderate", "serious", "critical")
                 ):
                     return False
-        if scan_urls != page_urls:
+        if sorted(scan_urls) != sorted(page_urls):
             return False
 
         critical_flows = context.get("criticalFlows")

@@ -250,6 +250,65 @@ def test_unsafe_integer_in_unretained_nested_metadata_is_not_authoritative(
     assert "9007199254740992" not in context_json
 
 
+def test_close_evidence_accepts_independently_ordered_dom_and_scanner_urls(
+    contract,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
+):
+    def add_second_page_in_independent_order(dom, scanner, _flow):
+        second_url = "https://fixture.accessseal.local/cases/new"
+        dom["pages"].append(
+            {
+                "url": second_url,
+                "landmarks": ["nav:Workspace", "main"],
+                "headings": [{"level": 1, "name": "Create case"}],
+                "accessibleNames": [
+                    {"role": "link", "name": "Skip to content"}
+                ],
+                "formLabels": [
+                    {"control": "vendor", "label": "Vendor address"}
+                ],
+                "imageAlternatives": [],
+                "skipLinkTarget": "#main-content",
+                "focusableControlOrder": ["link:Skip to content"],
+                "disabledStates": [],
+            }
+        )
+        scanner["scans"] = [
+            {
+                "url": second_url,
+                "violations": [],
+                "incomplete": [],
+                "passes": 42,
+            },
+            scanner["scans"][0],
+        ]
+
+    case_id, release = complete_v4_case(
+        contract,
+        buyer,
+        vendor,
+        artifact_mutator=add_second_page_in_independent_order,
+    )
+    v4_web_routes(release)
+
+    contract.as_(buyer).close_evidence(case_id)
+
+    context = json.loads(
+        json.loads(contract.get_review_context(case_id, 0))["contextJson"]
+    )
+    assert [page["url"] for page in context["dom"]["pages"]] == [
+        "https://fixture.accessseal.local/cases",
+        "https://fixture.accessseal.local/cases/new",
+    ]
+    assert [scan["url"] for scan in context["scanner"]["scans"]] == [
+        "https://fixture.accessseal.local/cases/new",
+        "https://fixture.accessseal.local/cases",
+    ]
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
