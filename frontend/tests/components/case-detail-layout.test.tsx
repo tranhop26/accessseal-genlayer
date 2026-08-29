@@ -729,14 +729,11 @@ describe("case detail document layout", () => {
     ).toHaveLength(1);
   });
 
-  it("disables the seal action for a wrong wallet and lets the user change wallets", async () => {
-    const changeAccount = vi.fn().mockResolvedValue(undefined);
+  it("disables the seal action for a wrong wallet without duplicating the header wallet control", async () => {
     mockWallet(evidenceOpenReadback(), {
       address: VENDOR,
-      changeAccount,
       evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
     });
-    const user = userEvent.setup();
 
     render(<CaseDetail caseId={CASE_ID} />);
 
@@ -749,8 +746,9 @@ describe("case detail document layout", () => {
     expect(
       screen.getAllByText(/vendor wallet.*buyer wallet/i)[0],
     ).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Change wallet" }));
-    expect(changeAccount).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("button", { name: "Change wallet" }),
+    ).not.toBeInTheDocument();
   });
 
   it("enables the seal action only for the complete authoritative current epoch", async () => {

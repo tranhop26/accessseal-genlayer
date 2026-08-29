@@ -7,9 +7,13 @@ import { test as base, expect, type Page } from "@playwright/test";
 import { createAccount, createClient } from "genlayer-js";
 import { localnet } from "genlayer-js/chains";
 import { TransactionStatus } from "genlayer-js/types";
+import { keccak256, stringToHex } from "viem";
+import { AccessSealClient } from "../../src/lib/access-seal";
+import { reconcileCase } from "../../src/lib/transactions";
 
 const projectRoot = resolve(import.meta.dirname, "../../..");
 const rpcUrl = "http://127.0.0.1:4000/api";
+const contractChainId = 1;
 const profileHash = `0x${"11".repeat(32)}`;
 const subjectOrigin = "https://fixture.accessseal.test";
 const screenshotBase64 =
@@ -90,13 +94,22 @@ export type AccessSealRuntime = {
   selectRole(page: Page, role: Role): Promise<void>;
   selectNextRole(page: Page, role: Role): Promise<void>;
   setWalletMode(page: Page, mode: WalletMode): Promise<void>;
+  holdNextTransaction(page: Page): Promise<void>;
+  releaseHeldTransaction(page: Page): Promise<void>;
   beginTest(page: Page): Promise<void>;
   setReviewTime(page: Page): Promise<void>;
   prepareHardTimeout(page: Page, caseId: string): Promise<void>;
   buildRelease(caseId: string, options?: { epoch?: number; keyboardTrap?: boolean; supporting?: EvidenceType[] }): ReleaseFixture;
-  installReview(release: ReleaseFixture, verdict: "APPROVED" | "REJECTED" | "UNRESOLVED", options?: { unavailableManifest?: boolean }): Promise<void>;
+  installEvidence(release: ReleaseFixture): Promise<void>;
+  installReview(
+    release: ReleaseFixture,
+    verdict: "APPROVED" | "REJECTED" | "REQUEST_MORE_INFO" | "UNRESOLVED",
+    options?: { unavailableScreenshot?: boolean },
+  ): Promise<void>;
   resetValidatorTelemetry(): Promise<void>;
   readValidatorTelemetry(): Promise<ValidatorTelemetry>;
+  readTransaction(hash: string): Promise<unknown>;
+  diagnoseCase(caseId: string): Promise<string>;
 };
 
 export type ValidatorTelemetry = {
@@ -259,14 +272,60 @@ function makeRelease(
   const epoch = options.epoch ?? 0;
   const keyboardTrap = options.keyboardTrap ?? false;
   const supporting = options.supporting ?? [...evidenceTypes];
+  const observedAt = currentTimestamp - 12;
+  const flows = [
+    "Keyboard checkout",
+    "Labeled account creation",
+    "Order status announcement",
+  ];
+  const flowsHash = keccak256(stringToHex(JSON.stringify(flows)));
+  const materialBlockers = {
+    "focus-obscured": false,
+    "inoperable-critical-flow": false,
+    "keyboard-trap": keyboardTrap,
+    "meaningless-alt-text": false,
+    "missing-form-label": false,
+  };
   const bodies: Record<(typeof evidenceTypes)[number], string | Buffer> = {
     HTML_BUNDLE: keyboardTrap
       ? '<main><button id="start">Start</button><div data-keyboard-trap="true">Blocked</div></main>'
       : '<main><label for="email">Email</label><input id="email"><button>Place order</button><p role="status">Ready</p></main>',
     SCREENSHOT: Buffer.from(screenshotBase64, "base64"),
-    DOM_FACTS: stable({ focusObscured: false, forms: [{ control: "email", label: "Email" }], images: [{ alt: "Blue running shoe", src: "shoe.jpg" }] }),
-    SCANNER_REPORT: stable({ engine: "fixture-scanner/1", score: keyboardTrap ? 70 : 100, violations: keyboardTrap ? ["keyboard-trap"] : [] }),
-    CRITICAL_FLOW_TRACE: stable({ completed: !keyboardTrap, flow: "checkout", keyboardTrap, steps: keyboardTrap ? ["start", "blocked"] : ["email", "place-order", "status"] }),
+    DOM_FACTS: stable({
+      schemaVersion: "accessseal-dom-facts/1",
+      observedAt,
+      pages: [{
+        url: `${subjectOrigin}/checkout`,
+        landmarks: ["main"],
+        headings: [{ level: 1, name: "Checkout" }],
+        formLabels: [{ control: "email", label: "Email" }],
+        imageAlternatives: [{ alt: "Blue running shoe", decorative: false, src: `${subjectOrigin}/shoe.jpg` }],
+        skipLinkTarget: "main",
+      }],
+    }),
+    SCANNER_REPORT: stable({
+      schemaVersion: "accessseal-scanner-report/1",
+      observedAt,
+      tool: { name: "fixture-scanner", version: "1.0.0" },
+      scans: [{
+        url: `${subjectOrigin}/checkout`,
+        violations: keyboardTrap ? [{ id: "keyboard-trap", impact: "serious" }] : [],
+        incomplete: [],
+        passes: keyboardTrap ? 7 : 8,
+      }],
+    }),
+    CRITICAL_FLOW_TRACE: stable({
+      schemaVersion: "accessseal-critical-flow-trace/1",
+      observedAt,
+      caseId,
+      flowsHash,
+      flows: flows.map((id, index) => ({
+        id,
+        passed: !(keyboardTrap && index === 0),
+        steps: [{ checkpoint: index === 0 ? "Complete checkout by keyboard" : id, passed: !(keyboardTrap && index === 0) }],
+      })),
+      materialBlockers,
+    }),
   };
   const manifest = {
     schemaVersion: "accessseal-release-manifest/1",
@@ -286,7 +345,7 @@ function makeRelease(
   const submittedAt = currentTimestamp - 2;
   const base = {
     schemaVersion: "accessseal-evidence/1",
-    chainId: "61127",
+    chainId: String(contractChainId),
     contract: contractAddress,
     caseId,
     epoch,
@@ -294,7 +353,7 @@ function makeRelease(
     profileVersion: "accessseal-static/1",
     releaseDigest,
     issuer: vendor,
-    observedAt: submittedAt - 10,
+    observedAt,
     submittedAt,
     expiresAt: submittedAt + 200_000,
   };
@@ -329,6 +388,7 @@ function makeRelease(
 export const test = base.extend<TestFixtures, WorkerFixtures>({
   runtime: [async ({}, provide) => {
     let glsim: ChildProcess | undefined;
+    let glsimDiagnostic = "";
     let next: ChildProcess | undefined;
     let bridge: Server | undefined;
     try {
@@ -339,11 +399,28 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         if (error instanceof Error && error.message.includes("refuses to reuse")) throw error;
       }
       const sessionId = randomUUID().replaceAll("-", "");
-      glsim = spawn("python", ["scripts/run-glsim-integration.py"], {
+      const glsimScript = resolve(projectRoot, "scripts/run-glsim-integration.py").replaceAll("\\", "/");
+      const glsimBootstrap = [
+        "from pathlib import Path",
+        "import sys",
+        `path = Path(${JSON.stringify(glsimScript)})`,
+        "sys.path.insert(0, str(path.parent))",
+        "source = path.read_text(encoding='utf-8')",
+        `source = source.replace('chain_id=61127,', 'chain_id=${contractChainId},', 1)`,
+        `source = source.replace('from glsim_support import decode_binary_web_mocks', 'from glsim_support import decode_binary_web_mocks\\nRUNNER_FINGERPRINT = {**RUNNER_FINGERPRINT, \\\"chainId\\\": ${contractChainId}}', 1)`,
+        "exec(compile(source, str(path), 'exec'), {'__name__': '__main__', '__file__': str(path)})",
+      ].join("\n");
+      glsim = spawn("python", ["-c", glsimBootstrap], {
         cwd: projectRoot,
         env: { ...process.env, ACCESSSEAL_GLSIM_SESSION_ID: sessionId },
-        stdio: "ignore",
+        stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+      });
+      glsim.stdout?.on("data", (chunk) => {
+        glsimDiagnostic = `${glsimDiagnostic}${String(chunk)}`.slice(-4_000);
+      });
+      glsim.stderr?.on("data", (chunk) => {
+        glsimDiagnostic = `${glsimDiagnostic}${String(chunk)}`.slice(-4_000);
       });
       {
         const deadline = Date.now() + 20_000;
@@ -354,7 +431,8 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
             ready = true;
             break;
           } catch {}
-          if (glsim.exitCode !== null) throw new Error("owned GLSim exited before readiness");
+          if (glsim.exitCode !== null)
+            throw new Error(`owned GLSim exited before readiness: ${glsimDiagnostic.trim()}`);
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
         }
         if (!ready) throw new Error("GLSim readiness deadline exceeded");
@@ -363,7 +441,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         "accessseal_getFingerprint",
         [],
       );
-      if (fingerprint.sessionId !== sessionId || fingerprint.validators !== 5 || fingerprint.chainId !== 61127)
+      if (fingerprint.sessionId !== sessionId || fingerprint.validators !== 5 || fingerprint.chainId !== contractChainId)
         throw new Error("owned GLSim fingerprint mismatch");
       const accounts = {
         buyer: createAccount(),
@@ -517,6 +595,20 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
              mode,
            );
         },
+        async holdNextTransaction(page) {
+          await page.evaluate(() =>
+            (window as unknown as {
+              __accessSealWallet: { holdNextTransaction(): void };
+            }).__accessSealWallet.holdNextTransaction(),
+          );
+        },
+        async releaseHeldTransaction(page) {
+          await page.evaluate(() =>
+            (window as unknown as {
+              __accessSealWallet: { releaseHeldTransaction(): void };
+            }).__accessSealWallet.releaseHeldTransaction(),
+          );
+        },
         async setReviewTime(page) {
           currentTimestamp = activeCaseTimestamp + 172_800;
           await rpc("sim_setTime", [new Date(currentTimestamp * 1000).toISOString()]);
@@ -560,20 +652,28 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         buildRelease(caseId, options) {
           return makeRelease(contractAddress, addresses.vendor, caseId, currentTimestamp, options);
         },
+        async installEvidence(release) {
+          await rpc("sim_installMocks", {
+            web_mocks: structuredClone(release.webMocks),
+            llm_mocks: {},
+            strict: true,
+          });
+        },
         async installReview(release, verdict, options = {}) {
           const webMocks = structuredClone(release.webMocks);
-          if (options.unavailableManifest)
-            webMocks[`${subjectOrigin}/.well-known/accessseal/release-manifest.json`]!.status = 503;
+          if (options.unavailableScreenshot)
+            webMocks[`${subjectOrigin}${paths.SCREENSHOT}`]!.status = 503;
           const blockers = verdict === "REJECTED" ? ["keyboard-trap"] : [];
+          const missingEvidence = verdict === "REQUEST_MORE_INFO" ? ["SCREENSHOT"] : [];
           const candidate = {
-            schemaVersion: "accessseal-review/1",
             verdict,
-            releaseDigest: release.releaseDigest,
-            profileHash,
             materialBlockers: blockers,
-            missingEvidence: [],
-            evidenceRefs: release.evidenceRefs,
-            rationale: blockers.length ? "Bound critical flow contains a keyboard trap." : "Bound artifacts establish no material accessibility blocker.",
+            missingEvidence,
+            rationale: blockers.length
+              ? "Bound critical flow contains a keyboard trap."
+              : missingEvidence.length
+                ? "The sealed screenshot evidence needs clarification."
+                : "Bound artifacts establish no material accessibility blocker.",
           };
           await rpc("sim_installMocks", {
             web_mocks: webMocks,
@@ -586,6 +686,23 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         },
         async readValidatorTelemetry() {
           return rpc<ValidatorTelemetry>("accessseal_getValidatorTelemetry", []);
+        },
+        async readTransaction(hash) {
+          return rpc("eth_getTransactionByHash", [hash]);
+        },
+        async diagnoseCase(caseId) {
+          try {
+            const reader = new AccessSealClient(
+              createClient({ chain: localnet, endpoint: rpcUrl }) as never,
+              contractAddress,
+            );
+            const value = await reconcileCase(reader, caseId);
+            return JSON.stringify(value, (_, item) =>
+              typeof item === "bigint" ? item.toString() : item,
+            );
+          } catch (error) {
+            return `readback error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`;
+          }
         },
       };
        await provide(runtime);
@@ -602,6 +719,8 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       let nextRole: Role | undefined;
       let mode = "ready";
       let inFlight = 0;
+      let holdTransaction = false;
+      let releaseTransaction: (() => void) | undefined;
       let walletRequestMethods: string[] = [];
       const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
       const emit = (event: string, value?: unknown) => listeners.get(event)?.forEach((listener) => listener(value));
@@ -633,6 +752,13 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
             if (method === "wallet_requestSnaps") return { "npm:genlayer-wallet-plugin": { id: "npm:genlayer-wallet-plugin" } };
             if (method === "eth_sendTransaction") {
               if (mode === "reject") throw Object.assign(new Error("User rejected transaction"), { code: 4001 });
+              if (holdTransaction) {
+                holdTransaction = false;
+                await new Promise<void>((resolve) => {
+                  releaseTransaction = resolve;
+                });
+                releaseTransaction = undefined;
+              }
               const response = await fetch(bridgeUrl, {
                 method: "POST",
                 headers: { "content-type": "application/json" },
@@ -663,6 +789,16 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
             const methods = walletRequestMethods;
             walletRequestMethods = [];
             return methods;
+          },
+          holdNextTransaction() {
+            if (inFlight !== 0 || holdTransaction || releaseTransaction)
+              throw new Error("wallet transaction gate is already active");
+            holdTransaction = true;
+          },
+          releaseHeldTransaction() {
+            if (!releaseTransaction)
+              throw new Error("no wallet transaction is awaiting confirmation");
+            releaseTransaction();
           },
           selectNextRole(selectedRole: Role) {
             if (inFlight !== 0) throw new Error("wallet account selection configured during an active provider request");

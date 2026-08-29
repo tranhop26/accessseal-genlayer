@@ -614,6 +614,42 @@ describe("transaction truth", () => {
     expect(result.settlement).toBeNull();
   });
 
+  it("fails closed when a V4 review context hash differs from the authoritative case binding", async () => {
+    const source = {
+      readCase: vi.fn().mockResolvedValue({
+        caseId: "case-1",
+        lifecycle: "DECIDED",
+        epoch: 0,
+        profileHash: `sha256:${"a".repeat(64)}`,
+        reviewContextHash: `sha256:${"b".repeat(64)}`,
+      }),
+      readReview: vi.fn().mockResolvedValue({
+        schemaVersion: "accessseal-review/2",
+        verdict: "APPROVED",
+        profileHash: `sha256:${"a".repeat(64)}`,
+        contextHash: `sha256:${"c".repeat(64)}`,
+      }),
+      readReviewFinality: vi.fn().mockRejectedValue(
+        new Error("review finality proof does not exist"),
+      ),
+      readAccounting: vi.fn().mockResolvedValue({
+        totalDeposits: 10n,
+        reserved: 10n,
+        pendingDispatch: 0n,
+        dispatchedPayouts: 0n,
+        dispatchedRefunds: 0n,
+      }),
+      readSettlement: vi.fn().mockRejectedValue(
+        new Error("settlement intent does not exist"),
+      ),
+      readReviewAttempt: vi.fn(),
+    };
+
+    await expect(reconcileCase(source as never, "case-1")).rejects.toThrow(
+      "Review readback context binding is invalid.",
+    );
+  });
+
   it("surfaces settlement transport outages instead of treating them as absent", async () => {
     const source = {
       readCase: vi.fn().mockResolvedValue({

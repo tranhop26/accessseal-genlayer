@@ -368,7 +368,7 @@
 
 .workflowOverviewHeader,
 .commandPanelHeader,
-.evidenceWorkspaceItem > header,
+.evidenceSummary,
 .activityList header {
   align-items: flex-start;
   display: flex;
@@ -526,17 +526,41 @@
 .evidenceWorkspaceItem {
   border: 1px solid var(--as-border);
   border-radius: var(--as-radius-sm);
-  display: grid;
-  gap: 0.85rem;
   overflow: hidden;
+}
+
+.evidenceDetails {
+  min-width: 0;
+}
+
+.evidenceSummary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  list-style-position: inside;
+  min-height: 44px;
   padding: 1rem;
 }
 
-.evidenceWorkspaceItem h3 {
+.evidenceSummary > span:first-child {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.evidenceMediaType {
   color: var(--as-muted);
   font-size: 0.78rem;
   font-weight: 650;
-  margin-top: 0.25rem;
+}
+
+.evidenceDetailsBody {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+  padding: 0 1rem 1rem;
 }
 
 .evidenceTypeLabel {
@@ -558,7 +582,7 @@
 }
 
 .semanticSuccess { background: var(--as-success-surface); color: var(--as-success); }
-.semanticWarning { background: var(--as-warning-surface); color: var(--as-warning); }
+.semanticWarning { background: var(--as-warning-surface); color: #855900; }
 .semanticDanger { background: var(--as-danger-surface); color: var(--as-danger); }
 
 .safePreview {
@@ -973,6 +997,41 @@
   opacity: 0.5;
 }
 
+.walletPromptBackdrop {
+  align-items: center;
+  background: rgb(10 37 64 / 48%);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 1rem;
+  position: fixed;
+  z-index: 40;
+}
+
+.walletPrompt {
+  background: var(--as-surface);
+  border-radius: var(--as-radius-md);
+  box-shadow: 0 24px 80px rgb(10 37 64 / 28%);
+  max-width: 30rem;
+  padding: 1.5rem;
+  width: min(100%, 30rem);
+}
+
+.walletPrompt h2 {
+  margin: 0;
+}
+
+.walletPrompt p {
+  color: var(--as-muted);
+  line-height: 1.55;
+}
+
+@media (min-width: 768px) and (max-width: 1099px) {
+  .evidenceReviewSplit {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 767px) {
   .summaryGrid,
   .twoColumn,
@@ -1006,6 +1065,25 @@
   .accountingMetrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .summaryAction {
+    background: var(--as-surface);
+    bottom: calc(4.35rem + env(safe-area-inset-bottom));
+    box-shadow: 0 -10px 24px rgb(10 37 64 / 8%);
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+    position: sticky;
+    z-index: 4;
+  }
+
+  .hashCode,
+  .summaryItem code,
+  .compactDl code,
+  .card code,
+  .actionCard code {
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
 }
 
 @media (max-width: 479px) {
@@ -1013,7 +1091,7 @@
   .summaryAction,
   .workflowOverviewHeader,
   .commandPanelHeader,
-  .evidenceWorkspaceItem > header,
+  .evidenceSummary,
   .activityList header,
   .dispatchState,
   .errorNotice {

@@ -93,6 +93,23 @@ export function CaseDetail({ caseId }: { caseId: string }) {
   const [tx, setTx] = useState<TransactionState | null>(null);
   const [walletConfirmation, setWalletConfirmation] =
     useState<PendingAction | null>(null);
+  const [walletPromptDismissed, setWalletPromptDismissed] = useState(false);
+  const walletPromptRef = useRef<HTMLDivElement>(null);
+  const walletPromptReturnFocusRef = useRef<HTMLElement | null>(null);
+  const restoreWalletPromptFocus = useCallback(() => {
+    const target = walletPromptReturnFocusRef.current;
+    if (target && !target.matches(":disabled, [aria-disabled='true']")) {
+      target.focus();
+      return;
+    }
+    document.getElementById("main-content")?.focus();
+  }, []);
+  const closeWalletPrompt = useCallback(() => {
+    const shouldRestoreFocus =
+      walletPromptRef.current?.contains(document.activeElement) ?? false;
+    setWalletConfirmation(null);
+    if (shouldRestoreFocus) restoreWalletPromptFocus();
+  }, [restoreWalletPromptFocus]);
   const [awaitingSealReadback, setAwaitingSealReadback] = useState<Hash | null>(
     null,
   );
@@ -507,11 +524,16 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     }
     setError("");
     setTx(waitingForWallet());
-    if (action) setWalletConfirmation(action);
+    if (action) {
+      walletPromptReturnFocusRef.current = document.activeElement as HTMLElement;
+      setWalletPromptDismissed(false);
+      setWalletConfirmation(action);
+    }
     writeLock.current = true;
     setWriteBusy(true);
     try {
       const hash = await operation();
+      if (action) closeWalletPrompt();
       if (action === "close_evidence") persistPendingSeal(hash);
       monitoredSealHashRef.current = action === "close_evidence" ? hash : null;
       if (!data) throw new Error("Authoritative case readback is unavailable.");
@@ -527,7 +549,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         cause instanceof Error ? cause.message : "Transaction was rejected.",
       );
     } finally {
-      setWalletConfirmation(null);
+      closeWalletPrompt();
       monitoredSealHashRef.current = null;
       writeLock.current = false;
       setWriteBusy(false);
@@ -562,6 +584,28 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     wallet.sdk,
     wallet.status,
   ]);
+  useEffect(() => {
+    if (walletConfirmation !== "close_evidence" || walletPromptDismissed)
+      return;
+    const prompt = walletPromptRef.current;
+    if (!prompt) return;
+    const dismiss = prompt.querySelector<HTMLButtonElement>("button");
+    dismiss?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setWalletPromptDismissed(true);
+        restoreWalletPromptFocus();
+        return;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault();
+        dismiss?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [restoreWalletPromptFocus, walletConfirmation, walletPromptDismissed]);
   async function inspectEnvelope() {
     try {
       const parsed = JSON.parse(evidenceJson) as EvidenceEnvelopeV1;
@@ -893,15 +937,32 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           </Button>
         </div>
       )}
-      {walletConfirmation === "close_evidence" && (
-        <section
-          className={styles.pendingCallout}
-          role="status"
-          aria-live="polite"
-        >
-          Confirm the seal in your wallet. No lifecycle change is shown until
-          final execution and contract readback both succeed.
-        </section>
+      {walletConfirmation === "close_evidence" && !walletPromptDismissed && (
+        <div className={styles.walletPromptBackdrop}>
+          <div
+            aria-labelledby="wallet-prompt-title"
+            aria-modal="true"
+            className={styles.walletPrompt}
+            ref={walletPromptRef}
+            role="dialog"
+          >
+            <span className={styles.eyebrow}>Wallet confirmation</span>
+            <h2 id="wallet-prompt-title">Confirm evidence seal</h2>
+            <p>
+              Confirm the seal in your wallet. No lifecycle change is shown
+              until final execution and contract readback both succeed.
+            </p>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setWalletPromptDismissed(true);
+                restoreWalletPromptFocus();
+              }}
+            >
+              Dismiss wallet prompt
+            </Button>
+          </div>
+        </div>
       )}
       {tx && <StatusPanel state={tx} />}
       {canRetryPendingSeal && (
@@ -982,19 +1043,6 @@ export function CaseDetail({ caseId }: { caseId: string }) {
                   the contract lifecycle.
                 </p>
               )}
-              {workspaceModel?.primaryAction.id === "CLOSE_EVIDENCE" &&
-                workspaceModel.roleWarning && (
-                  <Button
-                    variant="secondary"
-                    onClick={() =>
-                      void (wallet.status === "connected"
-                        ? wallet.changeAccount()
-                        : wallet.connect())
-                    }
-                  >
-                    {wallet.status === "connected" ? "Change wallet" : "Connect buyer wallet"}
-                  </Button>
-                )}
             </>
           }
         />
@@ -1046,12 +1094,33 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           <div><span>Dispatched</span><strong>{(data.accounting.dispatchedPayouts + data.accounting.dispatchedRefunds).toString()}</strong></div>
         </div>
         {data.settlement && (
-          <dl className={styles.reviewFacts}>
-            <div><dt>Settlement ID</dt><dd><code>{data.settlement.settlementId}</code></dd></div>
-            <div><dt>Recipient</dt><dd><code>{data.settlement.recipient}</code></dd></div>
-            <div><dt>Kind and reason</dt><dd>{data.settlement.kind} · {data.settlement.reason}</dd></div>
-            <div><dt>Review proof</dt><dd><code>{data.settlement.reviewProofId}</code></dd></div>
-          </dl>
+          <>
+            <div
+              className={styles.dispatchState}
+              data-dispatched={data.settlement.status === "DISPATCHED_FINALIZED"}
+            >
+              <span>Contract dispatch</span>
+              <strong>
+                {data.settlement.kind} · {data.settlement.amount.toString()} wei
+              </strong>
+            </div>
+            <dl className={styles.reviewFacts}>
+              <div><dt>Intent ID</dt><dd><code>{data.settlement.settlementId}</code></dd></div>
+              <div><dt>Recipient</dt><dd><code>{data.settlement.recipient}</code></dd></div>
+              <div><dt>Kind</dt><dd>{data.settlement.kind}</dd></div>
+              <div><dt>Reason</dt><dd>{data.settlement.reason}</dd></div>
+              <div><dt>Review proof</dt><dd><code>{data.settlement.reviewProofId}</code></dd></div>
+            </dl>
+            {data.settlement.status === "DISPATCHED_FINALIZED" && (
+              <div className={styles.confirmation} data-confirmed="false">
+                <strong>Recipient confirmation pending</strong>
+                <p>
+                  The contract proves finalized message dispatch only. Child
+                  receipt or recipient balance has not yet been confirmed.
+                </p>
+              </div>
+            )}
+          </>
         )}
       </section>
       <CaseActivity rows={workspaceModel?.activityRows ?? []} />

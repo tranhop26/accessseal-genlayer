@@ -457,6 +457,11 @@ export async function reconcileCase(
     : null;
   if (review && review.profileHash !== authoritativeCase.profileHash)
     throw new Error("Review readback profile binding is invalid.");
+  if (
+    review?.contextHash &&
+    review.contextHash !== authoritativeCase.reviewContextHash
+  )
+    throw new Error("Review readback context binding is invalid.");
   if (reviewFinality && reviewFinality.epoch !== authoritativeCase.epoch)
     throw new Error("Review finality epoch binding is invalid.");
   if (

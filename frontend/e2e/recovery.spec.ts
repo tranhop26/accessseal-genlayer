@@ -1,10 +1,11 @@
 import { test, expect } from "./fixtures/wallet";
+import type { Route } from "@playwright/test";
 import { createFundedCase, expectCurrentStage, review, submitRelease, writeAndConfirm } from "./fixtures/workflow";
 
 async function readAccounting(page: import("@playwright/test").Page) {
-  const region = page.getByRole("heading", { name: "Conservation readback" }).locator("..");
+  const region = page.getByRole("region", { name: "Simulated escrow" });
   const values = await Promise.all(
-    ["Total deposits", "Reserved", "Pending", "Dispatched"].map(async (label) =>
+    ["Total deposits", "Reserved", "Pending dispatch", "Dispatched"].map(async (label) =>
       BigInt(
         (
           await region
@@ -20,10 +21,15 @@ async function readAccounting(page: import("@playwright/test").Page) {
 }
 
 const reviewDecision = (page: import("@playwright/test").Page) =>
-  page.getByRole("region", { name: "Review decision" });
+  page.getByRole("region", { name: "Intelligent review" });
 
 const settlementRegion = (page: import("@playwright/test").Page) =>
-  page.getByRole("region", { name: "Settlement" });
+  page.getByRole("region", { name: "Simulated escrow" });
+
+const primaryAction = (page: import("@playwright/test").Page, name: string) =>
+  page
+    .getByRole("region", { name: "Case summary" })
+    .getByRole("button", { name });
 
 async function settlementField(
   page: import("@playwright/test").Page,
@@ -43,9 +49,13 @@ test("unrelated actor dispatches an immutable rejected refund with conserved acc
   await review(page, app, release, "REJECTED");
   await expect(reviewDecision(page).getByText("REJECTED", { exact: true })).toBeVisible();
   await writeAndConfirm(page, "Prepare settlement", "SETTLEMENT_PENDING", async () =>
-    page.getByText(/REFUND/).isVisible(),
+    settlementRegion(page)
+      .getByText("REFUND · 50000 wei", { exact: true })
+      .isVisible(),
   );
-  await expect(page.getByText(/REFUND · 50000 wei/)).toBeVisible();
+  await expect(
+    settlementRegion(page).getByText("REFUND · 50000 wei", { exact: true }),
+  ).toBeVisible();
   await expect(settlementRegion(page)).toContainText(app.addresses.buyer);
   const preparedRecipient = await settlementField(page, "Recipient");
   const preparedIntent = await settlementField(page, "Intent ID");
@@ -53,7 +63,7 @@ test("unrelated actor dispatches an immutable rejected refund with conserved acc
   await app.selectRole(page, "outsider");
   await app.connect(page, "outsider");
   await writeAndConfirm(page, "Execute prepared settlement", "DISPATCHED_FINALIZED");
-  await expect(page.getByText("DISPATCHED_FINALIZED", { exact: true })).toBeVisible();
+  await expect(settlementRegion(page).getByText("DISPATCHED FINALIZED", { exact: true })).toBeVisible();
   await expect(page.getByText("Recipient confirmation pending")).toBeVisible();
   expect(await settlementField(page, "Recipient")).toBe(preparedRecipient);
   expect(await settlementField(page, "Intent ID")).toBe(preparedIntent);
@@ -64,7 +74,7 @@ test("unrelated actor dispatches an immutable rejected refund with conserved acc
   expect(dispatched).toBe(dispatchedBefore + 50_000n);
   expect(total).toBe(reserved + pending + dispatched);
   await page.reload();
-  await expect(page.getByText("DISPATCHED_FINALIZED", { exact: true })).toBeVisible();
+  await expect(settlementRegion(page).getByText("DISPATCHED FINALIZED", { exact: true })).toBeVisible();
   expect((await readAccounting(page))[3]).toBe(dispatched);
 });
 
@@ -79,13 +89,11 @@ test("prepared hard-timeout refund remains executable without a review verdict a
   await app.selectRole(page, "outsider");
   await app.connect(page, "outsider");
   await expect(
-    settlementRegion(page).getByRole("button", {
-      name: "Execute prepared settlement",
-    }),
+    primaryAction(page, "Execute prepared settlement"),
   ).toBeEnabled();
   await writeAndConfirm(page, "Execute prepared settlement", "DISPATCHED_FINALIZED");
 
-  await expect(settlementRegion(page)).toContainText("DISPATCHED_FINALIZED");
+  await expect(settlementRegion(page)).toContainText("DISPATCHED FINALIZED");
   await expect(settlementRegion(page)).toContainText(app.addresses.buyer);
   const [total, reserved, pending, dispatched] = await readAccounting(page);
   expect(reserved).toBe(0n);
@@ -93,20 +101,18 @@ test("prepared hard-timeout refund remains executable without a review verdict a
   expect(dispatched).toBe(dispatchedBefore + 50_000n);
   expect(total).toBe(reserved + pending + dispatched);
   await expect(
-    settlementRegion(page).getByRole("button", {
-      name: "Execute prepared settlement",
-    }),
+    primaryAction(page, "Settlement finalized"),
   ).toBeDisabled();
 });
 
 test("request-more-info supports a vendor cure epoch", async ({ page, accessSeal: app }) => {
   const caseId = await createFundedCase(page, app);
-  const incomplete = await submitRelease(page, app, caseId, { supporting: ["HTML_BUNDLE"] });
-  await review(page, app, incomplete, "APPROVED", { expectValidatorCallbacks: false });
+  const incomplete = await submitRelease(page, app, caseId);
+  await review(page, app, incomplete, "REQUEST_MORE_INFO");
   await expect(reviewDecision(page).getByText("REQUEST MORE INFO", { exact: true })).toBeVisible();
   await app.selectRole(page, "vendor");
   await app.connect(page, "vendor");
-  await writeAndConfirm(page, "Vendor: start cure", "EVIDENCE_OPEN", async () =>
+  await writeAndConfirm(page, "Start bounded cure", "EVIDENCE_OPEN", async () =>
     page.getByText(/Epoch 1/).isVisible(),
   );
   const cure = await submitRelease(page, app, caseId, { epoch: 1 });
@@ -114,16 +120,19 @@ test("request-more-info supports a vendor cure epoch", async ({ page, accessSeal
   await expect(reviewDecision(page).getByText("APPROVED", { exact: true })).toBeVisible();
 });
 
-test("unavailable evidence overrides an approved LLM candidate and authorizes no payout", async ({ page, accessSeal: app }) => {
+test("post-seal unavailable screenshot rejects review atomically and authorizes no payout", async ({ page, accessSeal: app }) => {
   const caseId = await createFundedCase(page, app);
   const release = await submitRelease(page, app, caseId);
   const dispatchedBefore = (await readAccounting(page))[3];
-  await review(page, app, release, "APPROVED", { unavailableManifest: true });
-  await expect(reviewDecision(page).getByText("UNRESOLVED", { exact: true })).toBeVisible();
-  await expect(page.getByText("No payout or refund is authorized.")).toBeVisible();
   await expect(
-    settlementRegion(page).getByRole("button", { name: "Prepare settlement" }),
-  ).toBeDisabled();
+    review(page, app, release, "APPROVED", { unavailableScreenshot: true }),
+  ).rejects.toThrow(/review screenshot returned an unavailable response/i);
+  await expectCurrentStage(page, "EVIDENCE_SEALED");
+  await expect(reviewDecision(page).getByText("Verdict withheld", { exact: true })).toBeVisible();
+  await expect(
+    primaryAction(page, "Request intelligent review"),
+  ).toBeVisible();
+  await expect(primaryAction(page, "Prepare settlement")).toHaveCount(0);
   expect((await readAccounting(page))[3]).toBe(dispatchedBefore);
 });
 
@@ -163,4 +172,58 @@ test("refresh removes parseable stale and wrong-calldata review provenance", asy
   await expect(page.getByRole("button", { name: "Reconciling…" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Refresh readback" })).toBeVisible();
   expect(await page.evaluate((key) => localStorage.getItem(key), bindingKey)).toBeNull();
+});
+
+test("close-evidence recovery fails closed on readback and rechecks the original receipt without resending", async ({ page, accessSeal: app }) => {
+  const caseId = await createFundedCase(page, app);
+  await submitRelease(page, app, caseId);
+  await app.selectRole(page, "buyer");
+  await app.connect(page, "buyer");
+  await page.evaluate(() =>
+    (window as unknown as {
+      __accessSealWallet: { takeWalletRequestMethods(): string[] };
+    }).__accessSealWallet.takeWalletRequestMethods(),
+  );
+
+  let receiptObserved = false;
+  let failedReadbacks = 0;
+  const routeHandler = async (route: Route) => {
+    const payload = route.request().postDataJSON() as { method?: string };
+    if (payload.method === "eth_getTransactionByHash") receiptObserved = true;
+    if (receiptObserved && payload.method === "gen_call") {
+      failedReadbacks += 1;
+      await route.abort("failed");
+      return;
+    }
+    await route.continue();
+  };
+  await page.route("http://127.0.0.1:4000/api", routeHandler);
+  await page
+    .getByRole("region", { name: "Case summary" })
+    .getByRole("button", { name: "Close evidence & enable review" })
+    .click();
+  await expect(page.getByRole("button", { name: "Retry transaction status" })).toBeVisible();
+  expect(failedReadbacks).toBeGreaterThan(0);
+  await expectCurrentStage(page, "EVIDENCE_OPEN");
+  const firstAttemptMethods = await page.evaluate(() =>
+    (window as unknown as {
+      __accessSealWallet: { takeWalletRequestMethods(): string[] };
+    }).__accessSealWallet.takeWalletRequestMethods(),
+  );
+  expect(firstAttemptMethods.filter((method) => method === "eth_sendTransaction")).toHaveLength(1);
+
+  await page.unroute("http://127.0.0.1:4000/api", routeHandler);
+  await page.getByRole("button", { name: "Retry transaction status" }).click();
+  await expectCurrentStage(page, "EVIDENCE_SEALED");
+  const recoveryMethods = await page.evaluate(() =>
+    (window as unknown as {
+      __accessSealWallet: { takeWalletRequestMethods(): string[] };
+    }).__accessSealWallet.takeWalletRequestMethods(),
+  );
+  expect(recoveryMethods).not.toContain("eth_sendTransaction");
+  await expect(
+    page
+      .getByRole("region", { name: "Intelligent review" })
+      .getByText("Exact context and case binding verified", { exact: true }),
+  ).toBeVisible();
 });

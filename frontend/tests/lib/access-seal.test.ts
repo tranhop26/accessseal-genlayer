@@ -904,6 +904,28 @@ describe("AccessSeal contract adapter", () => {
     await expect(client.readReview("case-1", 0)).resolves.toEqual(review);
   });
 
+  it("parses the exact V4 bounded-context review schema and preserves its context binding", async () => {
+    const review = {
+      schemaVersion: "accessseal-review/2",
+      verdict: "APPROVED",
+      releaseDigest: `sha256:${"a".repeat(64)}`,
+      profileHash: digest,
+      materialBlockers: [],
+      missingEvidence: [],
+      evidenceRefs: [`sha256:${"b".repeat(64)}`],
+      contextHash: `sha256:${"c".repeat(64)}`,
+      rationaleHash: `sha256:${"d".repeat(64)}`,
+    };
+    const client = new AccessSealClient(
+      {
+        readContract: vi.fn().mockResolvedValue(JSON.stringify(review)),
+      } as never,
+      address,
+    );
+
+    await expect(client.readReview("case-1", 0)).resolves.toEqual(review);
+  });
+
   it("accepts the unchanged eight-field V2 final review readback", async () => {
     const v2Review = {
       schemaVersion: "accessseal-review/1",

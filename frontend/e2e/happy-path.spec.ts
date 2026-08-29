@@ -1,5 +1,37 @@
 import { test, expect } from "./fixtures/wallet";
-import { createFundedCase, review, submitRelease, writeAndConfirm } from "./fixtures/workflow";
+import {
+  createFundedCase,
+  expectCurrentStage,
+  review,
+  submitRelease,
+  writeAndConfirm,
+} from "./fixtures/workflow";
+
+async function beginTransactionPhaseCapture(page: import("@playwright/test").Page) {
+  await page.evaluate(() => {
+    const observed: string[] = [];
+    const capture = () => {
+      for (const status of document.querySelectorAll('[role="status"][aria-live="polite"]')) {
+        const value = status.textContent?.replace(/\s+/g, " ").trim();
+        if (value && observed.at(-1) !== value) observed.push(value);
+      }
+    };
+    capture();
+    const observer = new MutationObserver(capture);
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    Object.assign(window, { __accessSealPhaseCapture: { observed, observer } });
+  });
+}
+
+async function finishTransactionPhaseCapture(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    const capture = (window as unknown as {
+      __accessSealPhaseCapture: { observed: string[]; observer: MutationObserver };
+    }).__accessSealPhaseCapture;
+    capture.observer.disconnect();
+    return capture.observed;
+  });
+}
 
 test("buyer, vendor and third party complete a real approved GLSim workflow", async ({ page, accessSeal: app }) => {
   const configResponse = await page.request.get(
@@ -16,30 +48,81 @@ test("buyer, vendor and third party complete a real approved GLSim workflow", as
   });
   const caseId = await createFundedCase(page, app, {
     proveFailedFundCannotAdvance: true,
+    gateAuthoritativeReadback: true,
   });
-  const release = await submitRelease(page, app, caseId);
-  await review(page, app, release, "APPROVED");
+  await expectCurrentStage(page, "FUNDED");
+  const release = await submitRelease(page, app, caseId, {
+    gateAuthoritativeReadback: true,
+  });
+  await expectCurrentStage(page, "EVIDENCE_OPEN");
+
+  await app.selectRole(page, "buyer");
+  await app.connect(page, "buyer");
+  await app.holdNextTransaction(page);
+  await page
+    .getByRole("region", { name: "Case summary" })
+    .getByRole("button", { name: "Close evidence & enable review" })
+    .click();
+  await expect(page.getByRole("dialog", { name: "Confirm evidence seal" })).toBeVisible();
+  await expectCurrentStage(page, "EVIDENCE_OPEN");
+  await app.releaseHeldTransaction(page);
+  await expectCurrentStage(page, "EVIDENCE_SEALED");
+  await expect(
+    page.getByRole("region", { name: "Intelligent review" }),
+  ).toContainText("Context ready");
+
+  await beginTransactionPhaseCapture(page);
+  await review(page, app, release, "APPROVED", {
+    gateAuthoritativeReadback: true,
+    holdWalletConfirmation: true,
+  });
+  const observedReviewPhases = (await finishTransactionPhaseCapture(page)).join(" | ");
+  for (const phase of [
+    "Waiting for wallet confirmation",
+    "Transaction submitted",
+    "Finalized execution succeeded",
+    "Readback confirmed",
+  ]) expect(observedReviewPhases).toContain(phase);
+  await expectCurrentStage(page, "DECIDED");
   await expect(
     page
-      .getByRole("region", { name: "Review decision" })
+      .getByRole("region", { name: "Intelligent review" })
       .getByText("APPROVED", { exact: true }),
   ).toBeVisible();
 
   await page.reload();
   await expect(
     page
-      .getByRole("region", { name: "Review decision" })
+      .getByRole("region", { name: "Intelligent review" })
       .getByText("APPROVED", { exact: true }),
   ).toBeVisible();
   await expect(page.getByText("FINALIZED", { exact: true })).toBeVisible();
   await app.selectRole(page, "outsider");
   await app.connect(page, "outsider");
   await writeAndConfirm(page, "Prepare settlement", "SETTLEMENT_PENDING", async () =>
-    page.getByText(/PAYOUT/).isVisible(),
+    page
+      .getByRole("region", { name: "Simulated escrow" })
+      .getByText("PAYOUT · 50000 wei", { exact: true })
+      .isVisible(),
+    { gateAuthoritativeReadback: true },
   );
-  await expect(page.getByText(/PAYOUT · 50000 wei/)).toBeVisible();
-  await writeAndConfirm(page, "Execute prepared settlement", "DISPATCHED_FINALIZED");
-  await expect(page.getByText("DISPATCHED_FINALIZED", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("region", { name: "Simulated escrow" })
+      .getByText("PAYOUT · 50000 wei", { exact: true }),
+  ).toBeVisible();
+  await writeAndConfirm(
+    page,
+    "Execute prepared settlement",
+    "DISPATCHED_FINALIZED",
+    async () => true,
+    { gateAuthoritativeReadback: true },
+  );
+  await expect(
+    page
+      .getByRole("region", { name: "Simulated escrow" })
+      .getByText("DISPATCHED FINALIZED", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("Recipient confirmation pending")).toBeVisible();
   await expect(page.getByText(/Child receipt or recipient balance has not yet been confirmed/)).toBeVisible();
 });

@@ -49,6 +49,7 @@ export type ReviewRecord = {
   materialBlockers: string[];
   missingEvidence: string[];
   evidenceRefs: string[];
+  contextHash?: `sha256:${string}`;
   rationaleHash: string;
 };
 export type ReviewFinality = {
@@ -176,6 +177,7 @@ const REVIEW_KEYS = [
   "schemaVersion",
   "verdict",
 ].sort();
+const BOUNDED_CONTEXT_REVIEW_KEYS = [...REVIEW_KEYS, "contextHash"].sort();
 const FINALITY_KEYS = ["attempt", "epoch", "proofId", "status"].sort();
 const SETTLEMENT_KEYS = [
   "amount",
@@ -317,7 +319,12 @@ function decodeGenVmUserError(value: unknown): string | undefined {
 }
 function parseReview(value: unknown): ReviewRecord {
   const r = object(value, "Review");
-  exact(r, REVIEW_KEYS, "Review");
+  const schemaVersion = text(r.schemaVersion, "Review schema");
+  if (schemaVersion === "accessseal-review/1")
+    exact(r, REVIEW_KEYS, "Review");
+  else if (schemaVersion === "accessseal-review/2")
+    exact(r, BOUNDED_CONTEXT_REVIEW_KEYS, "Review");
+  else throw new Error("Review schema version is invalid.");
   const verdict = text(r.verdict, "Review verdict") as ReviewRecord["verdict"];
   if (
     !["APPROVED", "REJECTED", "REQUEST_MORE_INFO", "UNRESOLVED"].includes(
@@ -325,9 +332,6 @@ function parseReview(value: unknown): ReviewRecord {
     )
   )
     throw new Error("Review verdict is invalid.");
-  const schemaVersion = text(r.schemaVersion, "Review schema");
-  if (schemaVersion !== "accessseal-review/1")
-    throw new Error("Review schema version is invalid.");
   return {
     schemaVersion,
     verdict,
@@ -336,6 +340,9 @@ function parseReview(value: unknown): ReviewRecord {
     materialBlockers: stringArray(r.materialBlockers, "Blockers"),
     missingEvidence: stringArray(r.missingEvidence, "Missing evidence"),
     evidenceRefs: stringArray(r.evidenceRefs, "Evidence refs"),
+    ...(schemaVersion === "accessseal-review/2"
+      ? { contextHash: text(r.contextHash, "Review context hash", SHA) as `sha256:${string}` }
+      : {}),
     rationaleHash: text(r.rationaleHash, "Review rationale hash", SHA),
   };
 }

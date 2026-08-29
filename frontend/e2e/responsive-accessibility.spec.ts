@@ -1,7 +1,17 @@
 import AxeBuilder from "@axe-core/playwright";
 import { test, expect, type AccessSealRuntime } from "./fixtures/wallet";
-import { expectCurrentStage } from "./fixtures/workflow";
+import {
+  createFundedCase,
+  expectCurrentStage,
+  submitRelease,
+} from "./fixtures/workflow";
 import type { Page, Route } from "@playwright/test";
+
+function durationInMilliseconds(value: string) {
+  if (value.endsWith("ms")) return Number.parseFloat(value);
+  if (value.endsWith("s")) return Number.parseFloat(value) * 1_000;
+  return Number.POSITIVE_INFINITY;
+}
 
 async function expectVisibleFocus(page: Page, name: string | RegExp) {
   const focused = page.locator(":focus");
@@ -20,7 +30,22 @@ async function assertHeadingOrder(page: Page) {
 }
 
 async function assertPageAccessibility(page: Page) {
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  const horizontalOverflow = await page.evaluate(() => {
+    const viewportWidth = document.documentElement.clientWidth;
+    return Array.from(document.body.querySelectorAll<HTMLElement>("*"))
+      .filter((element) => {
+        const rectangle = element.getBoundingClientRect();
+        return rectangle.width > 0 && rectangle.right > viewportWidth + 1;
+      })
+      .slice(0, 10)
+      .map((element) => ({
+        className: element.className,
+        right: Math.round(element.getBoundingClientRect().right),
+        tagName: element.tagName,
+        text: element.textContent?.trim().slice(0, 80),
+      }));
+  });
+  expect(horizontalOverflow).toEqual([]);
   await assertHeadingOrder(page);
   const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
   expect(results.violations.filter((item) => item.impact === "serious" || item.impact === "critical")).toEqual([]);
@@ -94,7 +119,7 @@ test("changes wallet account and invalidates the stale case preview", async ({ p
 
 test("audits landing, empty dashboard, review, and readback errors at desktop and mobile sizes", async ({ page, accessSeal: app }) => {
   for (const viewport of [
-    { name: "desktop", width: 1440, height: 900 },
+    { name: "desktop", width: 1440, height: 1000 },
     { name: "mobile", width: 390, height: 844 },
   ]) {
     await page.setViewportSize(viewport);
@@ -120,7 +145,7 @@ test("audits landing, empty dashboard, review, and readback errors at desktop an
 });
 
 test("keeps the responsive workspace shell, structured dashboard, and case detail semantic", async ({ page, accessSeal: app }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(`${app.baseURL}/cases/new`);
   await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
   await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
@@ -132,7 +157,7 @@ test("keeps the responsive workspace shell, structured dashboard, and case detai
   await expect(page.getByRole("columnheader", { name: "Case ID" })).toBeVisible();
   await assertPageAccessibility(page);
 
-  await page.setViewportSize({ width: 1000, height: 900 });
+  await page.setViewportSize({ width: 834, height: 1112 });
   await expect(page.getByRole("navigation", { name: "Workspace shortcuts" })).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -144,9 +169,11 @@ test("keeps the responsive workspace shell, structured dashboard, and case detai
   await assertPageAccessibility(page);
 
   await page.goto(`${app.baseURL}/cases/${caseId}`);
-  await expect(page.getByRole("navigation", { name: "Case sections" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Mobile workspace" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Evidence workspace" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Intelligent review" })).toBeVisible();
   await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
-  const priorityAction = page.getByText("Priority action", { exact: true }).locator("..");
+  const priorityAction = page.getByText("Authoritative action", { exact: true }).locator("..");
   await expect(priorityAction).toBeVisible();
   expect(await priorityAction.evaluate((element) => element.closest("dl"))).toBeNull();
   await assertHeadingOrder(page);
@@ -155,7 +182,7 @@ test("keeps the responsive workspace shell, structured dashboard, and case detai
 
 test("audits the real pending transaction state at desktop and mobile sizes", async ({ page, accessSeal: app }) => {
   for (const viewport of [
-    { width: 1440, height: 900 },
+    { width: 1440, height: 1000 },
     { width: 390, height: 844 },
   ]) {
     await page.setViewportSize(viewport);
@@ -191,9 +218,12 @@ test("audits the real pending transaction state at desktop and mobile sizes", as
     await page.route(rpcUrl, routeHandler);
     try {
       await acceptTerms.click();
-      await expect(page.getByRole("status")).toHaveAttribute("data-tone", "pending");
-      await expect(page.getByRole("status")).toContainText("Transaction submitted");
-      await expect(page.getByText(/waiting for validator acceptance/i)).toBeVisible();
+      const transactionStatus = page.locator(
+        'section[role="status"][aria-live="polite"]',
+      );
+      await expect(transactionStatus).toHaveAttribute("data-tone", "pending");
+      await expect(transactionStatus).toContainText("Transaction submitted");
+      await expect(transactionStatus).toContainText(/waiting for validator consensus/i);
       await assertPageAccessibility(page);
     } finally {
       releaseReceipt();
@@ -205,14 +235,30 @@ test("audits the real pending transaction state at desktop and mobile sizes", as
 });
 
 for (const viewport of [
-  { name: "desktop", width: 1440, height: 900 },
-  { name: "tablet", width: 1000, height: 900 },
+  { name: "desktop", width: 1440, height: 1000 },
+  { name: "tablet", width: 834, height: 1112 },
   { name: "mobile", width: 390, height: 844 },
 ]) {
   test(`${viewport.name} completes a write by keyboard and keeps populated state accessible`, async ({ page, accessSeal: app }) => {
     await page.setViewportSize(viewport);
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto(`${app.baseURL}/cases/new`);
+    const reducedMotion = await page.evaluate(() => {
+      const style = getComputedStyle(document.body);
+      return {
+        matches: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+        animationDuration: style.animationDuration,
+        transitionDuration: style.transitionDuration,
+      };
+    });
+    expect(reducedMotion.matches).toBe(true);
+    for (const duration of [
+      reducedMotion.animationDuration,
+      reducedMotion.transitionDuration,
+    ]) {
+      expect(durationInMilliseconds(duration)).toBeGreaterThan(0);
+      expect(durationInMilliseconds(duration)).toBeLessThanOrEqual(0.01);
+    }
     await expect(page.getByRole("banner")).toBeVisible();
     await expect(page.getByRole("navigation", {
       name: viewport.name === "desktop"
@@ -269,3 +315,128 @@ for (const viewport of [
     await assertPageAccessibility(page);
   });
 }
+
+test("lays out the populated command center at the three required viewports without duplicate controls", async ({ page, accessSeal: app }) => {
+  const caseId = await createFundedCase(page, app);
+  await submitRelease(page, app, caseId);
+
+  const evidence = page.getByRole("region", { name: "Evidence workspace" });
+  const review = page.getByRole("region", { name: "Intelligent review" });
+  const primary = page
+    .getByRole("region", { name: "Case summary" })
+    .getByRole("button", { name: "Close evidence & enable review" });
+
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
+  const desktopEvidence = await evidence.boundingBox();
+  const desktopReview = await review.boundingBox();
+  expect(desktopEvidence).not.toBeNull();
+  expect(desktopReview).not.toBeNull();
+  expect(Math.abs(desktopEvidence!.y - desktopReview!.y)).toBeLessThan(4);
+  expect(desktopReview!.x).toBeGreaterThan(desktopEvidence!.x + desktopEvidence!.width);
+  await expect(primary).toHaveCount(1);
+  await assertPageAccessibility(page);
+
+  await page.setViewportSize({ width: 834, height: 1112 });
+  await expect(page.getByRole("navigation", { name: "Workspace shortcuts" })).toBeVisible();
+  const tabletEvidence = await evidence.boundingBox();
+  const tabletReview = await review.boundingBox();
+  expect(tabletEvidence).not.toBeNull();
+  expect(tabletReview).not.toBeNull();
+  expect(tabletReview!.y).toBeGreaterThanOrEqual(tabletEvidence!.y + tabletEvidence!.height);
+  await expect(primary).toHaveCount(1);
+  await assertPageAccessibility(page);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("navigation", { name: "Mobile workspace" })).toBeVisible();
+  await expect(primary).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Change wallet" })).toHaveCount(1);
+  const firstEvidence = evidence.getByRole("article").first();
+  const accordion = firstEvidence.locator("summary");
+  await expect(accordion).toHaveAccessibleName(/evidence details/i);
+  await accordion.click();
+  await expect(firstEvidence.getByText("Exact envelope hash", { exact: true })).toBeVisible();
+  for (const code of await firstEvidence.locator("code").all())
+    expect(await code.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+  const actionBar = primary.locator("..");
+  await expect(actionBar).toHaveCSS("position", "sticky");
+  expect(parseFloat(await actionBar.evaluate((node) => getComputedStyle(node).paddingBottom))).toBeGreaterThanOrEqual(16);
+  expect(await actionBar.evaluate((node) => {
+    const containsMatchingSafeAreaRule = (rules: CSSRuleList): boolean =>
+      Array.from(rules).some((rule) => {
+        if (rule instanceof CSSStyleRule)
+          return node.matches(rule.selectorText) &&
+            rule.style.position === "sticky" &&
+            rule.style.paddingBottom.includes("env(safe-area-inset-bottom)");
+        return "cssRules" in rule &&
+          containsMatchingSafeAreaRule((rule as CSSGroupingRule).cssRules);
+      });
+    return Array.from(document.styleSheets).some((sheet) => {
+      try {
+        return containsMatchingSafeAreaRule(sheet.cssRules);
+      } catch {
+        return false;
+      }
+    });
+  })).toBe(true);
+  for (const control of [
+    primary,
+    page.getByRole("button", { name: "Change wallet" }),
+    accordion,
+    page.getByRole("navigation", { name: "Mobile workspace" }).getByRole("link").first(),
+  ]) {
+    const box = await control.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+  }
+  await assertPageAccessibility(page);
+});
+
+test("contains and dismisses keyboard focus in the close-evidence wallet prompt while preserving authoritative state", async ({ page, accessSeal: app }) => {
+  const caseId = await createFundedCase(page, app);
+  await submitRelease(page, app, caseId);
+  await app.selectRole(page, "buyer");
+  await app.connect(page, "buyer");
+  await app.holdNextTransaction(page);
+
+  await page
+    .getByRole("region", { name: "Case summary" })
+    .getByRole("button", { name: "Close evidence & enable review" })
+    .click();
+  const prompt = page.getByRole("dialog", { name: "Confirm evidence seal" });
+  await expect(prompt).toBeVisible();
+  await expectCurrentStage(page, "EVIDENCE_OPEN");
+  await expect(prompt.getByRole("button", { name: "Dismiss wallet prompt" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(prompt.getByRole("button", { name: "Dismiss wallet prompt" })).toBeFocused();
+  await expect(page.locator('[role="status"][aria-live="polite"]').filter({ hasText: "Waiting for wallet confirmation" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(prompt).toBeHidden();
+  await expect(page.getByRole("main")).toBeFocused();
+  await app.releaseHeldTransaction(page);
+  await expectCurrentStage(page, "EVIDENCE_SEALED");
+});
+
+test("closes the wallet prompt and restores focus when wallet confirmation succeeds", async ({ page, accessSeal: app }) => {
+  const caseId = await createFundedCase(page, app);
+  await submitRelease(page, app, caseId);
+  await app.selectRole(page, "buyer");
+  await app.connect(page, "buyer");
+  await app.holdNextTransaction(page);
+
+  await page
+    .getByRole("region", { name: "Case summary" })
+    .getByRole("button", { name: "Close evidence & enable review" })
+    .click();
+  const prompt = page.getByRole("dialog", { name: "Confirm evidence seal" });
+  await expect(prompt.getByRole("button", { name: "Dismiss wallet prompt" })).toBeFocused();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as {
+      __accessSealWallet: { getState(): { inFlight: number } };
+    }).__accessSealWallet.getState().inFlight,
+  )).toBe(1);
+  await app.releaseHeldTransaction(page);
+  await expect(prompt).toBeHidden();
+  await expect(page.getByRole("main")).toBeFocused();
+  await expectCurrentStage(page, "EVIDENCE_SEALED");
+});

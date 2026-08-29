@@ -75,33 +75,40 @@ export function EvidenceWorkspace({
             const preview = safePreview(item);
             return (
               <article className={styles.evidenceWorkspaceItem} id={`evidence-${envelopeHash}`} key={`${item.payloadSha256}-${index}`}>
-                <header>
-                  <div>
-                    <span className={styles.evidenceTypeLabel}>{title(item.evidenceType)}</span>
-                    <h3>{item.mediaType}</h3>
+                <details className={styles.evidenceDetails}>
+                  <summary
+                    aria-label={`${title(item.evidenceType)} evidence details`}
+                    className={styles.evidenceSummary}
+                  >
+                    <span>
+                      <span className={styles.evidenceTypeLabel}>{title(item.evidenceType)}</span>
+                      <span className={styles.evidenceMediaType}>{item.mediaType}</span>
+                    </span>
+                    <span className={fresh ? styles.semanticSuccess : styles.semanticDanger}>
+                      <span aria-hidden="true">{fresh ? "✓" : "!"}</span>
+                      {caseRecord.evidenceSealed ? "Sealed · " : "Open · "}
+                      {fresh ? "Fresh" : "Expired"}
+                    </span>
+                  </summary>
+                  <div className={styles.evidenceDetailsBody}>
+                    {preview && <div className={styles.safePreview}>{preview}</div>}
+                    {!preview && (
+                      <p className={styles.metadataOnly}>Metadata only — this media type or origin is not eligible for an embedded preview.</p>
+                    )}
+                    <dl className={styles.evidenceMetadata}>
+                      <div><dt>Exact envelope hash</dt><dd><code>{envelopeHash}</code></dd></div>
+                      <div><dt>Exact payload hash</dt><dd><code>{item.payloadSha256}</code></dd></div>
+                      <div><dt>Media type</dt><dd>{item.mediaType}</dd></div>
+                      <div><dt>Size</dt><dd>Not provided by envelope</dd></div>
+                      <div><dt>Issuer</dt><dd><code>{item.issuer}</code></dd></div>
+                      <div><dt>Observed</dt><dd><time dateTime={new Date(item.observedAt * 1000).toISOString()}>{new Date(item.observedAt * 1000).toISOString()}</time></dd></div>
+                      <div><dt>Submitted</dt><dd><time dateTime={new Date(item.submittedAt * 1000).toISOString()}>{new Date(item.submittedAt * 1000).toISOString()}</time></dd></div>
+                      <div><dt>Expires</dt><dd><time dateTime={new Date(item.expiresAt * 1000).toISOString()}>{new Date(item.expiresAt * 1000).toISOString()}</time></dd></div>
+                      <div><dt>Origin</dt><dd>{item.subjectOrigin}</dd></div>
+                      <div><dt>Manifest relationship</dt><dd>{item.evidenceType === "RELEASE_MANIFEST" ? "Root manifest for this release digest" : `Bound to ${item.releaseDigest}`}</dd></div>
+                    </dl>
                   </div>
-                  <span className={fresh ? styles.semanticSuccess : styles.semanticDanger}>
-                    <span aria-hidden="true">{fresh ? "✓" : "!"}</span>
-                    {caseRecord.evidenceSealed ? "Sealed · " : "Open · "}
-                    {fresh ? "Fresh" : "Expired"}
-                  </span>
-                </header>
-                {preview && <div className={styles.safePreview}>{preview}</div>}
-                {!preview && (
-                  <p className={styles.metadataOnly}>Metadata only — this media type or origin is not eligible for an embedded preview.</p>
-                )}
-                <dl className={styles.evidenceMetadata}>
-                  <div><dt>Exact envelope hash</dt><dd><code>{envelopeHash}</code></dd></div>
-                  <div><dt>Exact payload hash</dt><dd><code>{item.payloadSha256}</code></dd></div>
-                  <div><dt>Media type</dt><dd>{item.mediaType}</dd></div>
-                  <div><dt>Size</dt><dd>Not provided by envelope</dd></div>
-                  <div><dt>Issuer</dt><dd><code>{item.issuer}</code></dd></div>
-                  <div><dt>Observed</dt><dd><time dateTime={new Date(item.observedAt * 1000).toISOString()}>{new Date(item.observedAt * 1000).toISOString()}</time></dd></div>
-                  <div><dt>Submitted</dt><dd><time dateTime={new Date(item.submittedAt * 1000).toISOString()}>{new Date(item.submittedAt * 1000).toISOString()}</time></dd></div>
-                  <div><dt>Expires</dt><dd><time dateTime={new Date(item.expiresAt * 1000).toISOString()}>{new Date(item.expiresAt * 1000).toISOString()}</time></dd></div>
-                  <div><dt>Origin</dt><dd>{item.subjectOrigin}</dd></div>
-                  <div><dt>Manifest relationship</dt><dd>{item.evidenceType === "RELEASE_MANIFEST" ? "Root manifest for this release digest" : `Bound to ${item.releaseDigest}`}</dd></div>
-                </dl>
+                </details>
               </article>
             );
           })}
