@@ -4,7 +4,12 @@ import { useRouter } from "next/navigation";
 import { CaseComposer, type CaseDraft } from "@/components/case-composer";
 import { StatusPanel } from "@/components/status-panel";
 import { useWallet } from "@/providers/wallet-provider";
-import { trackTransaction, type TransactionState } from "@/lib/transactions";
+import {
+  classifyTransactionFailure,
+  trackTransaction,
+  waitingForWallet,
+  type TransactionState,
+} from "@/lib/transactions";
 import { finalizeCreatedCase } from "@/lib/case-cache";
 import { InlineNotice } from "@/components/ui/panel";
 import styles from "../cases-page.module.css";
@@ -32,6 +37,7 @@ export default function NewCasePage() {
       return;
     }
     setError("");
+    setTx(waitingForWallet());
     try {
       const hash = await wallet.contract.createCase({
         salt: draft.salt,
@@ -58,11 +64,13 @@ export default function NewCasePage() {
             draft.termsHash,
             hash,
           );
+          return true;
         },
       );
-      if (result.phase === "FINALIZED_SUCCESS")
+      if (result.phase === "READBACK_CONFIRMED")
         router.push(`/cases/${encodeURIComponent(draft.caseId)}`);
     } catch (cause) {
+      setTx(classifyTransactionFailure(cause));
       setError(
         cause instanceof Error ? cause.message : "Wallet transaction failed.",
       );

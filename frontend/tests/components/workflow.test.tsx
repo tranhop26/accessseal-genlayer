@@ -32,9 +32,15 @@ const envelope: EvidenceEnvelopeV1 = {
 
 describe("evidence-to-settlement truth", () => {
   it.each([
+    ["WAITING_FOR_WALLET", "Waiting for wallet"],
+    ["SUBMITTED", "Submitted"],
+    ["CONSENSUS_PENDING", "Consensus pending"],
+    ["PROTOCOL_FINALIZED", "Protocol finalized"],
+    ["EXECUTION_SUCCESS", "Execution success"],
+    ["READBACK_CONFIRMED", "Readback confirmed"],
     ["PENDING", "Submitted"],
-    ["ACCEPTED", "Accepted"],
-    ["RECONCILING", "Finalized"],
+    ["ACCEPTED", "Consensus pending"],
+    ["RECONCILING", "Protocol finalized"],
     ["FINALIZED_SUCCESS", "Readback confirmed"],
   ] as const)(
     "maps %s to the exact visible transaction phase %s",

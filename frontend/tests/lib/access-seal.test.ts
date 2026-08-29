@@ -57,7 +57,89 @@ const legacyV2CaseJson = (overrides: Record<string, unknown> = {}) => {
   return JSON.stringify(value);
 };
 
+async function sha256(value: string): Promise<`sha256:${string}`> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return `sha256:${[...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+async function v4ReviewContext(caseId = `0x${"d".repeat(64)}`) {
+  const contextJson = JSON.stringify({
+    schemaVersion: "accessseal-review-context/1",
+    binding: {
+      chainId: 61999,
+      contractAddress: address,
+      caseId,
+      epoch: 0,
+      profileHash: digest,
+      releaseDigest: `sha256:${"a".repeat(64)}`,
+      subjectOrigin: "https://product.example",
+    },
+    evidence: [],
+    dom: { pages: [] },
+    scanner: { tool: "scanner", scans: [] },
+    criticalFlows: { flowsHash: digest, flows: [], materialBlockers: {} },
+    screenshot: {
+      uri: "https://product.example/screenshot.png",
+      sha256: `sha256:${"b".repeat(64)}`,
+      mediaType: "image/png",
+      byteLength: 8,
+    },
+    observedAt: 1,
+    expiresAt: 2,
+  });
+  return {
+    caseId,
+    epoch: 0,
+    schemaVersion: "accessseal-review-context/1",
+    ready: true,
+    contextJson,
+    contextHash: await sha256(contextJson),
+    imageUri: "https://product.example/screenshot.png",
+    imageSha256: `sha256:${"b".repeat(64)}`,
+  };
+}
+
 describe("AccessSeal contract adapter", () => {
+  it("accepts an exact bound V4 review context", async () => {
+    const context = await v4ReviewContext();
+    const readContract = vi.fn(async ({ functionName }: { functionName: string }) =>
+      functionName === "get_case" ? caseJson({
+        reviewContextReady: true,
+        reviewContextHash: context.contextHash,
+      }) : JSON.stringify(context),
+    );
+    const client = new AccessSealClient({ readContract } as never, address);
+
+    const result = await client.readReviewContext(`0x${"d".repeat(64)}`, 0);
+
+    expect(result.ready).toBe(true);
+    expect(result.schemaVersion).toBe("accessseal-review-context/1");
+    expect(result.contextHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(new TextEncoder().encode(result.contextJson).byteLength).toBeLessThanOrEqual(16_384);
+  });
+
+  it("rejects a ready context whose parsed binding disagrees", async () => {
+    const context = await v4ReviewContext();
+    const tampered = JSON.parse(context.contextJson) as Record<string, unknown>;
+    (tampered.binding as Record<string, unknown>).caseId = `0x${"e".repeat(64)}`;
+    const contextJson = JSON.stringify(tampered);
+    const readContract = vi.fn(async ({ functionName }: { functionName: string }) =>
+      functionName === "get_case" ? caseJson({
+        reviewContextReady: true,
+        reviewContextHash: await sha256(contextJson),
+      }) : JSON.stringify({ ...context, contextJson, contextHash: await sha256(contextJson) }),
+    );
+    const client = new AccessSealClient({ readContract } as never, address);
+
+    await expect(client.readReviewContext(`0x${"d".repeat(64)}`, 0)).rejects.toThrow(
+      "Review context binding is invalid.",
+    );
+  });
   it("requires an exact epoch-bound pending seal record and rejects legacy unbound records", () => {
     const binding = {
       action: "close_evidence" as const,
@@ -413,7 +495,7 @@ describe("AccessSeal contract adapter", () => {
     ).resolves.toBe(false);
   });
 
-  it("uses seven consensus rotations only for intelligent review", async () => {
+  it("uses the normal consensus default for intelligent review", async () => {
     const connect = vi.fn();
     const writeContract = vi.fn().mockResolvedValue(`0x${"d".repeat(64)}`);
     const client = new AccessSealClient(
@@ -435,9 +517,8 @@ describe("AccessSeal contract adapter", () => {
       functionName: "request_review",
       args: ["case-1"],
       value: 0n,
-      consensusMaxRotations: 7,
     });
-    expect(writeContract.mock.calls[0]?.[0]).not.toHaveProperty(
+    expect(writeContract.mock.calls[1]?.[0]).not.toHaveProperty(
       "consensusMaxRotations",
     );
   });

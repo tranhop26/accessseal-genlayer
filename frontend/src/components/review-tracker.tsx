@@ -16,7 +16,7 @@ export function ReviewTracker({
   retryAvailableAt?: number;
 }) {
   const final =
-    finality.status === "FINALIZED" && transactionPhase === "FINALIZED_SUCCESS";
+    finality.status === "FINALIZED" && transactionPhase === "READBACK_CONFIRMED";
   return (
     <section className={styles.card} aria-labelledby="review-title">
       <div className={styles.sectionHeading}>

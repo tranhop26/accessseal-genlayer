@@ -12,6 +12,8 @@ import { useWallet } from "@/providers/wallet-provider";
 import {
   reconcileCase,
   trackTransaction,
+  classifyTransactionFailure,
+  waitingForWallet,
   type PendingAction,
   type ReconciledCase,
   type TransactionState,
@@ -220,7 +222,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           current?.hash === pendingHash
             ? {
                 hash: pendingHash,
-                phase: "FINALIZED_SUCCESS",
+                phase: "READBACK_CONFIRMED",
                 message:
                   "Finalized execution and sealed authoritative readback confirmed.",
               }
@@ -369,7 +371,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         wallet.sdk as never,
         hash,
         (nextState) => {
-          if (nextState.phase === "RECONCILING") startedReconciliation = true;
+          if (nextState.phase === "EXECUTION_SUCCESS") startedReconciliation = true;
           setTx(nextState);
         },
         async () => {
@@ -390,6 +392,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           )
             return false;
           if (action === "close_evidence") clearPendingSeal(hash);
+          return true;
         },
         action,
       );
@@ -408,7 +411,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     }
     const current = reconciled.value;
     if (
-      result.phase === "FINALIZED_SUCCESS" &&
+      result.phase === "READBACK_CONFIRMED" &&
       rememberReview &&
       current?.review &&
       current.reviewFinality &&
@@ -431,10 +434,18 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     }
     if (
       action === "close_evidence" &&
-      ["EXECUTION_ERROR", "REJECTED"].includes(result.phase)
+      [
+        "WALLET_REJECTED",
+        "WRONG_ROLE",
+        "RPC_ERROR",
+        "VALIDATORS_TIMEOUT",
+        "DETERMINISTIC_VIOLATION",
+        "EXECUTION_ERROR",
+        "READBACK_MISMATCH",
+      ].includes(result.phase)
     )
       clearPendingSeal(hash);
-    if (result.phase === "FINALIZED_SUCCESS") await refresh();
+    if (result.phase === "READBACK_CONFIRMED") await refresh();
     return result;
   }
   async function resumePendingSeal(hash: Hash) {
@@ -474,6 +485,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       return;
     }
     setError("");
+    setTx(waitingForWallet());
     if (action) setWalletConfirmation(action);
     writeLock.current = true;
     setWriteBusy(true);
@@ -483,6 +495,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       monitoredSealHashRef.current = action === "close_evidence" ? hash : null;
       await monitorTransaction(hash, rememberReview, action);
     } catch (cause) {
+      setTx(classifyTransactionFailure(cause));
       setError(
         cause instanceof Error ? cause.message : "Transaction was rejected.",
       );
@@ -1324,8 +1337,8 @@ export function CaseDetail({ caseId }: { caseId: string }) {
               finality={data.reviewFinality}
               transactionPhase={
                 data.reviewFinality.status === "FINALIZED"
-                  ? "FINALIZED_SUCCESS"
-                  : "ACCEPTED"
+                  ? "READBACK_CONFIRMED"
+                  : "CONSENSUS_PENDING"
               }
               cureDeadline={undefined}
               retryAvailableAt={

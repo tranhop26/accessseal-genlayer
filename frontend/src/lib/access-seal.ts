@@ -22,12 +22,24 @@ export type CaseRecord = {
   maxUnresolvedRetries: number;
   profileHash: string;
   readAt: number | null;
+  reviewContextHash?: `sha256:${string}` | "";
+  reviewContextReady?: boolean;
   reserved: bigint;
   salt: string;
   subjectOrigin: string;
   termsHash: string;
   vendor: string;
   vendorAccepted: boolean;
+};
+export type ReviewContextRecord = {
+  caseId: string;
+  epoch: number;
+  schemaVersion: "accessseal-review-context/1";
+  ready: boolean;
+  contextJson: string;
+  contextHash: `sha256:${string}`;
+  imageUri: string;
+  imageSha256: `sha256:${string}`;
 };
 export type ReviewRecord = {
   schemaVersion: string;
@@ -138,6 +150,21 @@ const V3_CASE_KEYS = [
   "evidenceSealedAt",
   "evidenceSealedBy",
   "readAt",
+].sort();
+const V4_CASE_KEYS = [
+  ...V3_CASE_KEYS,
+  "reviewContextHash",
+  "reviewContextReady",
+].sort();
+const REVIEW_CONTEXT_KEYS = [
+  "caseId",
+  "contextHash",
+  "contextJson",
+  "epoch",
+  "imageSha256",
+  "imageUri",
+  "ready",
+  "schemaVersion",
 ].sort();
 const REVIEW_KEYS = [
   "evidenceRefs",
@@ -313,6 +340,18 @@ function parseReview(value: unknown): ReviewRecord {
   };
 }
 
+async function browserSha256(value: string): Promise<`sha256:${string}`> {
+  if (!globalThis.crypto?.subtle)
+    throw new Error("Browser SHA-256 is unavailable for review context verification.");
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return `sha256:${[...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 export class AccessSealClient {
   constructor(
     private readonly sdk: SdkClient,
@@ -349,7 +388,8 @@ export class AccessSealClient {
   }
   async readCase(caseId: string): Promise<CaseRecord> {
     const r = object(await this.raw("get_case", [caseId], "Case"), "Case");
-    const hasV3Clock = hasExactKeys(r, V3_CASE_KEYS);
+    const hasV4ReviewContext = hasExactKeys(r, V4_CASE_KEYS);
+    const hasV3Clock = hasV4ReviewContext || hasExactKeys(r, V3_CASE_KEYS);
     const isLegacyV2 = hasExactKeys(r, LEGACY_V2_CASE_KEYS);
     if (!hasV3Clock && !isLegacyV2) exact(r, V3_CASE_KEYS, "Case");
     const result: CaseRecord = {
@@ -377,6 +417,10 @@ export class AccessSealClient {
       maxUnresolvedRetries: count(r.maxUnresolvedRetries, "Retry budget"),
       profileHash: text(r.profileHash, "Profile hash", HASH),
       readAt: hasV3Clock ? count(r.readAt, "Contract read clock") : null,
+      reviewContextHash: hasV4ReviewContext
+        ? (text(r.reviewContextHash, "Review context hash", /^(|sha256:[0-9a-f]{64})$/) as CaseRecord["reviewContextHash"])
+        : "",
+      reviewContextReady: hasV4ReviewContext ? (r.reviewContextReady as boolean) : false,
       reserved: amount(r.reserved, "Reserved"),
       salt: text(r.salt, "Salt"),
       subjectOrigin: text(r.subjectOrigin, "Origin"),
@@ -399,6 +443,10 @@ export class AccessSealClient {
     if (
       typeof r.vendorAccepted !== "boolean" ||
       (hasV3Clock && typeof r.evidenceSealed !== "boolean") ||
+      (hasV4ReviewContext && typeof r.reviewContextReady !== "boolean") ||
+      (hasV4ReviewContext &&
+        (result.reviewContextReady !== SHA.test(result.reviewContextHash ?? "") ||
+          (!result.reviewContextReady && result.reviewContextHash !== ""))) ||
       (hasV3Clock &&
         (result.createdAt === null ||
           result.evidenceCutoff === null ||
@@ -421,6 +469,95 @@ export class AccessSealClient {
       result.contractAddress !== this.address.toLowerCase()
     )
       throw new Error("Case evidence seal readback binding is invalid.");
+    return result;
+  }
+  async readReviewContext(
+    caseId: string,
+    epoch: number,
+  ): Promise<ReviewContextRecord> {
+    const caseRecord = await this.readCase(caseId);
+    const r = object(
+      await this.raw("get_review_context", [caseId, epoch], "Review context"),
+      "Review context",
+    );
+    exact(r, REVIEW_CONTEXT_KEYS, "Review context");
+    const contextJson = text(r.contextJson, "Review context JSON");
+    const result: ReviewContextRecord = {
+      caseId: text(r.caseId, "Review context case ID", HASH),
+      epoch: count(r.epoch, "Review context epoch"),
+      schemaVersion: text(
+        r.schemaVersion,
+        "Review context schema",
+      ) as ReviewContextRecord["schemaVersion"],
+      ready: r.ready as boolean,
+      contextJson,
+      contextHash: text(r.contextHash, "Review context hash", SHA) as ReviewContextRecord["contextHash"],
+      imageUri: text(r.imageUri, "Review context image URI"),
+      imageSha256: text(r.imageSha256, "Review context image hash", SHA) as ReviewContextRecord["imageSha256"],
+    };
+    if (
+      typeof r.ready !== "boolean" ||
+      result.schemaVersion !== "accessseal-review-context/1" ||
+      !result.ready ||
+      result.caseId !== caseId ||
+      result.epoch !== epoch ||
+      !caseRecord.reviewContextReady ||
+      (caseRecord.reviewContextHash ?? "") !== result.contextHash ||
+      new TextEncoder().encode(contextJson).byteLength > 16_384 ||
+      (await browserSha256(contextJson)) !== result.contextHash
+    )
+      throw new Error("Review context binding is invalid.");
+    const context = object(parseJson(contextJson, "Review context"), "Review context");
+    exact(
+      context,
+      [
+        "binding",
+        "criticalFlows",
+        "dom",
+        "evidence",
+        "expiresAt",
+        "observedAt",
+        "scanner",
+        "schemaVersion",
+        "screenshot",
+      ].sort(),
+      "Review context",
+    );
+    const binding = object(context.binding, "Review context binding");
+    const screenshot = object(context.screenshot, "Review context screenshot");
+    exact(
+      binding,
+      [
+        "chainId",
+        "contractAddress",
+        "caseId",
+        "epoch",
+        "profileHash",
+        "releaseDigest",
+        "subjectOrigin",
+      ].sort(),
+      "Review context binding",
+    );
+    exact(
+      screenshot,
+      ["byteLength", "mediaType", "sha256", "uri"],
+      "Review context screenshot",
+    );
+    if (
+      context.schemaVersion !== result.schemaVersion ||
+      binding.caseId !== caseId ||
+      binding.epoch !== epoch ||
+      binding.chainId !== caseRecord.chainId ||
+      binding.contractAddress !== caseRecord.contractAddress ||
+      binding.profileHash !== caseRecord.profileHash ||
+      binding.subjectOrigin !== caseRecord.subjectOrigin ||
+      !SHA.test(text(binding.releaseDigest, "Review context release digest")) ||
+      text(screenshot.mediaType, "Review context image type") !== "image/png" ||
+      count(screenshot.byteLength, "Review context image size") === 0 ||
+      screenshot.uri !== result.imageUri ||
+      screenshot.sha256 !== result.imageSha256
+    )
+      throw new Error("Review context binding is invalid.");
     return result;
   }
   async readReview(caseId: string, epoch: number) {
@@ -600,9 +737,7 @@ export class AccessSealClient {
     return this.write("close_evidence", [caseId]);
   }
   requestReview(caseId: string) {
-    return this.write("request_review", [caseId], 0n, {
-      consensusMaxRotations: 7,
-    });
+    return this.write("request_review", [caseId]);
   }
   startCure(caseId: string) {
     return this.write("start_cure", [caseId]);

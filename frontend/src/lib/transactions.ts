@@ -9,6 +9,14 @@ import type {
 import { matchesExactUserError } from "./access-seal";
 
 export type TransactionPhase =
+  | "WAITING_FOR_WALLET"
+  | "SUBMITTED"
+  | "CONSENSUS_PENDING"
+  | "PROTOCOL_FINALIZED"
+  | "EXECUTION_SUCCESS"
+  | "READBACK_CONFIRMED"
+  | TransactionFailureKind
+  // V3 UI history remains renderable, but new tracking never emits these values.
   | "PENDING"
   | "ACCEPTED"
   | "RECONCILING"
@@ -16,9 +24,17 @@ export type TransactionPhase =
   | "UNDETERMINED"
   | "EXECUTION_ERROR"
   | "REJECTED";
+export type TransactionFailureKind =
+  | "WALLET_REJECTED"
+  | "WRONG_ROLE"
+  | "RPC_ERROR"
+  | "VALIDATORS_TIMEOUT"
+  | "DETERMINISTIC_VIOLATION"
+  | "EXECUTION_ERROR"
+  | "READBACK_MISMATCH";
 export type TransactionState = {
   phase: TransactionPhase;
-  hash: `0x${string}`;
+  hash: `0x${string}` | null;
   message: string;
 };
 export type PendingAction = "close_evidence";
@@ -39,38 +55,70 @@ function normalizedStatus(receipt: Receipt): string {
   return String(receipt.statusName ?? receipt.status_name ?? receipt.status ?? "");
 }
 function state(
-  hash: `0x${string}`,
+  hash: `0x${string}` | null,
   phase: TransactionPhase,
   message: string,
 ): TransactionState {
   return { hash, phase, message };
+}
+export function waitingForWallet(): TransactionState {
+  return state(null, "WAITING_FOR_WALLET", "Waiting for wallet confirmation. No transaction has been submitted.");
+}
+function failureFor(
+  hash: `0x${string}` | null,
+  kind: TransactionFailureKind,
+): TransactionState {
+  const messages: Record<TransactionFailureKind, string> = {
+    WALLET_REJECTED: "Wallet confirmation was rejected. No transaction was sent.",
+    WRONG_ROLE: "The connected wallet is not authorized for this action.",
+    RPC_ERROR: "Transaction status could not be read from the RPC.",
+    VALIDATORS_TIMEOUT: "Validators reported an undetermined transaction status.",
+    DETERMINISTIC_VIOLATION: "Validators rejected the transaction deterministically.",
+    EXECUTION_ERROR: "The transaction finalized with an execution error.",
+    READBACK_MISMATCH: "Authoritative contract readback did not confirm this action.",
+  };
+  return state(hash, kind, messages[kind]);
+}
+export function classifyTransactionFailure(
+  error: unknown,
+  hash: `0x${string}` | null = null,
+): TransactionState {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (code === 4001) return failureFor(hash, "WALLET_REJECTED");
+    if (code === "WRONG_ROLE") return failureFor(hash, "WRONG_ROLE");
+  }
+  return failureFor(hash, "RPC_ERROR");
 }
 
 export async function trackTransaction(
   client: ReceiptClient,
   hash: `0x${string}`,
   onState: (value: TransactionState) => void,
-  reconcile?: (action?: PendingAction) => Promise<void | false>,
+  reconcile?: (action?: PendingAction) => Promise<boolean>,
   action?: PendingAction,
 ): Promise<TransactionState> {
-  onState(
-    state(
-      hash,
-      "PENDING",
-      "Transaction submitted; waiting for validator acceptance.",
-    ),
-  );
-  const accepted = await client.waitForTransactionReceipt({
-    hash,
-    status: "ACCEPTED",
-  });
+  onState(state(hash, "SUBMITTED", "Transaction submitted; waiting for validator consensus."));
+  let accepted: Receipt;
+  try {
+    accepted = await client.waitForTransactionReceipt({ hash, status: "ACCEPTED" });
+  } catch (error) {
+    const result = classifyTransactionFailure(error, hash);
+    onState(result);
+    return result;
+  }
   const acceptedStatus = normalizedStatus(accepted);
   if (acceptedStatus === "UNDETERMINED") {
     const result = state(
       hash,
-      "UNDETERMINED",
-      "Validators did not determine this transaction. No success is claimed.",
+      "VALIDATORS_TIMEOUT",
+      "Validators reported an undetermined transaction status.",
     );
+    onState(result);
+    return result;
+  }
+  if (acceptedStatus === "WRONG_ROLE") {
+    const result = failureFor(hash, "WRONG_ROLE");
     onState(result);
     return result;
   }
@@ -78,65 +126,58 @@ export async function trackTransaction(
     const result = state(
       hash,
       "EXECUTION_ERROR",
-      "The accepted transaction execution failed; contract state did not advance.",
+      "The transaction finalized with an execution error.",
     );
     onState(result);
     return result;
   }
   if (acceptedStatus !== "ACCEPTED" && acceptedStatus !== "FINALIZED") {
-    const result = state(
-      hash,
-      "REJECTED",
-      `Transaction stopped at ${acceptedStatus || "an unknown state"}.`,
-    );
+    const result = failureFor(hash, "DETERMINISTIC_VIOLATION");
     onState(result);
     return result;
   }
-  onState(
-    state(
-      hash,
-      "ACCEPTED",
-      "Accepted by validators. It remains appealable and is not final.",
-    ),
-  );
-  const finalized =
-    acceptedStatus === "FINALIZED"
-      ? accepted
-      : await client.waitForTransactionReceipt({ hash, status: "FINALIZED" });
+  onState(state(hash, "CONSENSUS_PENDING", "Validators accepted the transaction; protocol finality is pending."));
+  let finalized: Receipt;
+  try {
+    finalized = acceptedStatus === "FINALIZED" ? accepted : await client.waitForTransactionReceipt({ hash, status: "FINALIZED" });
+  } catch (error) {
+    const result = classifyTransactionFailure(error, hash);
+    onState(result);
+    return result;
+  }
   if (normalizedStatus(finalized) === "UNDETERMINED") {
     const result = state(
       hash,
-      "UNDETERMINED",
-      "Finality was undetermined. No success is claimed.",
+      "VALIDATORS_TIMEOUT",
+      "Validators reported an undetermined finality status.",
     );
     onState(result);
     return result;
   }
-  if (
-    normalizedStatus(finalized) !== "FINALIZED" ||
-    finalized.txExecutionResultName !== "FINISHED_WITH_RETURN"
-  ) {
-    const result = state(
-      hash,
-      "EXECUTION_ERROR",
-      "The transaction did not finalize with successful execution.",
-    );
+  if (normalizedStatus(finalized) !== "FINALIZED") {
+    const result = failureFor(hash, "DETERMINISTIC_VIOLATION");
     onState(result);
     return result;
   }
-  const reconciling = state(
-    hash,
-    "RECONCILING",
-    "Execution finalized; verifying authoritative contract readback.",
-  );
-  onState(reconciling);
-  if (!reconcile) return reconciling;
-  if ((await reconcile(action)) === false) return reconciling;
-  const result = state(
-    hash,
-    "FINALIZED_SUCCESS",
-    "Finalized execution and authoritative readback confirmed.",
-  );
+  onState(state(hash, "PROTOCOL_FINALIZED", "Protocol finality was observed."));
+  if (finalized.txExecutionResultName !== "FINISHED_WITH_RETURN") {
+    const result = failureFor(hash, "EXECUTION_ERROR");
+    onState(result);
+    return result;
+  }
+  onState(state(hash, "EXECUTION_SUCCESS", "Finalized execution succeeded; verifying contract readback."));
+  try {
+    if (!reconcile || (await reconcile(action)) !== true) {
+      const result = failureFor(hash, "READBACK_MISMATCH");
+      onState(result);
+      return result;
+    }
+  } catch {
+    const result = failureFor(hash, "RPC_ERROR");
+    onState(result);
+    return result;
+  }
+  const result = state(hash, "READBACK_CONFIRMED", "Finalized execution and authoritative readback confirmed.");
   onState(result);
   return result;
 }

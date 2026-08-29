@@ -1,7 +1,82 @@
 import { describe, expect, it, vi } from "vitest";
-import { trackTransaction, reconcileCase } from "@/lib/transactions";
+import {
+  classifyTransactionFailure,
+  reconcileCase,
+  trackTransaction,
+  waitingForWallet,
+} from "@/lib/transactions";
 
 describe("transaction truth", () => {
+  it("classifies a wallet rejection before any submission", () => {
+    expect(waitingForWallet()).toMatchObject({
+      phase: "WAITING_FOR_WALLET",
+      hash: null,
+    });
+    expect(classifyTransactionFailure({ code: 4001 })).toMatchObject({
+      phase: "WALLET_REJECTED",
+      hash: null,
+    });
+  });
+  it("emits only observed V4 phases and confirms only successful readback", async () => {
+    const events: string[] = [];
+    const result = await trackTransaction(
+      {
+        waitForTransactionReceipt: vi
+          .fn()
+          .mockResolvedValueOnce({ statusName: "ACCEPTED" })
+          .mockResolvedValueOnce({
+            statusName: "FINALIZED",
+            txExecutionResultName: "FINISHED_WITH_RETURN",
+          }),
+      },
+      `0x${"1".repeat(64)}`,
+      (event) => events.push(event.phase),
+      async () => true,
+    );
+
+    expect(events).toEqual([
+      "SUBMITTED",
+      "CONSENSUS_PENDING",
+      "PROTOCOL_FINALIZED",
+      "EXECUTION_SUCCESS",
+      "READBACK_CONFIRMED",
+    ]);
+    expect(result.phase).toBe("READBACK_CONFIRMED");
+  });
+
+  it.each([
+    [{ statusName: "UNDETERMINED" }, "VALIDATORS_TIMEOUT"],
+    [{ statusName: "REJECTED" }, "DETERMINISTIC_VIOLATION"],
+    [{ statusName: "FINALIZED", txExecutionResultName: "FINISHED_WITH_ERROR" }, "EXECUTION_ERROR"],
+  ] as const)("classifies terminal receipt failure %s", async (receipt, expected) => {
+    const events: string[] = [];
+    const result = await trackTransaction(
+      { waitForTransactionReceipt: vi.fn().mockResolvedValue(receipt) } as never,
+      `0x${"2".repeat(64)}`,
+      (event) => events.push(event.phase),
+      async () => true,
+    );
+    expect(result.phase).toBe(expected);
+    expect(events).not.toContain("READBACK_CONFIRMED");
+  });
+
+  it("classifies a false action-specific readback as a mismatch", async () => {
+    const events: string[] = [];
+    const result = await trackTransaction(
+      {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+      `0x${"3".repeat(64)}`,
+      (event) => events.push(event.phase),
+      async () => false,
+      "close_evidence",
+    );
+    expect(result.phase).toBe("READBACK_MISMATCH");
+    expect(events).not.toContain("READBACK_CONFIRMED");
+  });
   it.each(["DRAFT", "FUNDED", "EVIDENCE_OPEN"])(
     "recognizes pinned genlayer-js absent-view wrappers while reconciling %s",
     async (lifecycle) => {
@@ -119,7 +194,7 @@ describe("transaction truth", () => {
       ),
     ).rejects.toThrow("gen_call failed: RPC offline");
   });
-  it("reports accepted separately and waits for finalized execution success", async () => {
+  it("does not confirm readback when a reconciler returns no verdict", async () => {
     const updates: string[] = [];
     const waitForTransactionReceipt = vi
       .fn()
@@ -135,9 +210,16 @@ describe("transaction truth", () => {
       { waitForTransactionReceipt },
       `0x${"a".repeat(64)}`,
       (state) => updates.push(state.phase),
+      async () => undefined as never,
     );
-    expect(updates).toEqual(["PENDING", "ACCEPTED", "RECONCILING"]);
-    expect(result.phase).toBe("RECONCILING");
+    expect(updates).toEqual([
+      "SUBMITTED",
+      "CONSENSUS_PENDING",
+      "PROTOCOL_FINALIZED",
+      "EXECUTION_SUCCESS",
+      "READBACK_MISMATCH",
+    ]);
+    expect(result.phase).toBe("READBACK_MISMATCH");
   });
 
   it("accepts the pinned GenLayerJS simplified snake-case finality field", async () => {
@@ -151,15 +233,16 @@ describe("transaction truth", () => {
       } as never,
       `0x${"d".repeat(64)}`,
       (value) => updates.push(value.phase),
-      async () => undefined,
+      async () => true,
     );
     expect(updates).toEqual([
-      "PENDING",
-      "ACCEPTED",
-      "RECONCILING",
-      "FINALIZED_SUCCESS",
+      "SUBMITTED",
+      "CONSENSUS_PENDING",
+      "PROTOCOL_FINALIZED",
+      "EXECUTION_SUCCESS",
+      "READBACK_CONFIRMED",
     ]);
-    expect(result.phase).toBe("FINALIZED_SUCCESS");
+    expect(result.phase).toBe("READBACK_CONFIRMED");
   });
 
   it("does not claim green success when authoritative reconciliation fails", async () => {
@@ -178,8 +261,14 @@ describe("transaction truth", () => {
           throw new Error("RPC readback unavailable");
         },
       ),
-    ).rejects.toThrow(/readback unavailable/i);
-    expect(updates).toEqual(["PENDING", "ACCEPTED", "RECONCILING"]);
+    ).resolves.toMatchObject({ phase: "RPC_ERROR" });
+    expect(updates).toEqual([
+      "SUBMITTED",
+      "CONSENSUS_PENDING",
+      "PROTOCOL_FINALIZED",
+      "EXECUTION_SUCCESS",
+      "RPC_ERROR",
+    ]);
   });
 
   it("keeps a close-evidence transaction reconciling until the sealed readback is authoritative", async () => {
@@ -201,8 +290,14 @@ describe("transaction truth", () => {
     );
 
     expect(reconcile).toHaveBeenCalledWith("close_evidence");
-    expect(updates).toEqual(["PENDING", "ACCEPTED", "RECONCILING"]);
-    expect(result.phase).toBe("RECONCILING");
+    expect(updates).toEqual([
+      "SUBMITTED",
+      "CONSENSUS_PENDING",
+      "PROTOCOL_FINALIZED",
+      "EXECUTION_SUCCESS",
+      "READBACK_MISMATCH",
+    ]);
+    expect(result.phase).toBe("READBACK_MISMATCH");
   });
 
   it("never maps undetermined or failed execution to success", async () => {
@@ -216,7 +311,7 @@ describe("transaction truth", () => {
       `0x${"b".repeat(64)}`,
       () => undefined,
     );
-    expect(undetermined.phase).toBe("UNDETERMINED");
+    expect(undetermined.phase).toBe("VALIDATORS_TIMEOUT");
     const failed = await trackTransaction(
       {
         waitForTransactionReceipt: vi.fn().mockResolvedValueOnce({
