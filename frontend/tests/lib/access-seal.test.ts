@@ -15,6 +15,10 @@ const address = "0x1234567890abcdef1234567890abcdef12345678" as const;
 const buyer = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const vendor = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const digest = `0x${"c".repeat(64)}`;
+type TestCalldataValue =
+  | string
+  | TestCalldataValue[]
+  | Map<string, TestCalldataValue>;
 const caseJson = (overrides: Record<string, unknown> = {}) =>
   JSON.stringify({
     buyer,
@@ -598,7 +602,7 @@ describe("AccessSeal contract adapter", () => {
     ).resolves.toBe(false);
   });
 
-  it("proves only an exact pinned SDK close_evidence transaction", async () => {
+  it("accepts the exact Studio/localnet close_evidence response shape", async () => {
     const txId = `0x${"c".repeat(64)}` as const;
     const caseId = `0x${"d".repeat(64)}`;
     const expected = {
@@ -620,58 +624,179 @@ describe("AccessSeal contract adapter", () => {
       },
     };
     const receiptBytes = abi.calldata.encode(
-      new Map([
+      new Map<string, TestCalldataValue>([
         ["contextJson", JSON.stringify(receiptContext)],
       ]),
     );
     const receiptBase64 = btoa(String.fromCharCode(...receiptBytes));
-    const actualTransaction = {
-      from_address: buyer,
-      to_address: address,
-      txDataDecoded: {
-        type: "call",
-        callData: new Map<string, unknown>([
-          ["method", "close_evidence"],
-          ["args", [caseId]],
-        ]),
+    const callBytes = abi.calldata.encode(
+      new Map<string, TestCalldataValue>([
+        ["method", "close_evidence"],
+        ["args", [caseId]],
+        ["kwargs", new Map()],
+      ]),
+    );
+    const studioTransaction = {
+      hash: txId,
+      sender: buyer,
+      recipient: address,
+      data: {
+        calldata: {
+          raw: Array.from(callBytes),
+          base64: btoa(String.fromCharCode(...callBytes)),
+          readable: abi.calldata.toString(abi.calldata.decode(callBytes)),
+        },
       },
       consensus_data: {
         leader_receipt: [{ calldata: { base64: receiptBase64 } }],
       },
     };
-    const getTransaction = vi.fn().mockResolvedValue(actualTransaction);
+    const getTransaction = vi.fn().mockResolvedValue(studioTransaction);
     const client = new AccessSealClient({ getTransaction } as never, address);
 
     await expect(
       client.verifyCloseEvidenceTransaction(txId, expected),
     ).resolves.toBe(true);
+  });
+
+  it("fails closed for the realistic Bradbury shape because it cannot prove chain and epoch", async () => {
+    const txId = `0x${"c".repeat(64)}` as const;
+    const caseId = `0x${"d".repeat(64)}`;
+    const client = new AccessSealClient(
+      {
+        getTransaction: vi.fn().mockResolvedValue({
+          txId,
+          from_address: buyer,
+          to_address: address,
+          txDataDecoded: {
+            type: "call",
+            callData: new Map<string, unknown>([
+              ["method", "close_evidence"],
+              ["args", [caseId]],
+              ["kwargs", new Map()],
+            ]),
+          },
+        }),
+      } as never,
+      address,
+    );
+
+    await expect(
+      client.verifyCloseEvidenceTransaction(txId, {
+        account: buyer as `0x${string}`,
+        caseId,
+        chainId: 61999,
+        contract: address,
+        epoch: 0,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects missing, conflicting, mixed, and fabricated recovery proof aliases", async () => {
+    const txId = `0x${"c".repeat(64)}` as const;
+    const caseId = `0x${"d".repeat(64)}`;
+    const expected = {
+      account: buyer as `0x${string}`,
+      caseId,
+      chainId: 61999,
+      contract: address,
+      epoch: 0,
+    };
+    const receiptContext = {
+      binding: {
+        caseId,
+        chainId: 61999,
+        contractAddress: address,
+        epoch: 0,
+        profileHash: digest,
+        releaseDigest: `sha256:${"a".repeat(64)}`,
+        subjectOrigin: "https://product.example",
+      },
+    };
+    const receiptBytes = abi.calldata.encode(
+      new Map([["contextJson", JSON.stringify(receiptContext)]]),
+    );
+    const callBytes = abi.calldata.encode(
+      new Map<string, TestCalldataValue>([
+        ["method", "close_evidence"],
+        ["args", [caseId]],
+        ["kwargs", new Map()],
+      ]),
+    );
+    const studioTransaction = {
+      hash: txId,
+      sender: buyer,
+      recipient: address,
+      data: { calldata: { raw: Array.from(callBytes) } },
+      consensus_data: {
+        leader_receipt: [
+          { calldata: { base64: btoa(String.fromCharCode(...receiptBytes)) } },
+        ],
+      },
+    };
+    const bradburyCall = {
+      type: "call",
+      callData: new Map<string, unknown>([
+        ["method", "close_evidence"],
+        ["args", [caseId]],
+        ["kwargs", new Map()],
+      ]),
+    };
+    const wrongCallBytes = abi.calldata.encode(
+      new Map<string, TestCalldataValue>([
+        ["method", "request_review"],
+        ["args", [caseId]],
+        ["kwargs", new Map()],
+      ]),
+    );
+    const getTransaction = vi.fn();
+    const client = new AccessSealClient({ getTransaction } as never, address);
 
     for (const transaction of [
+      { ...studioTransaction, hash: undefined },
+      { ...studioTransaction, hash: `0x${"e".repeat(64)}` },
+      { ...studioTransaction, txId: `0x${"e".repeat(64)}` },
+      { ...studioTransaction, sender: undefined },
+      { ...studioTransaction, sender: `0x${"e".repeat(40)}`, from_address: buyer },
+      { ...studioTransaction, recipient: undefined },
+      { ...studioTransaction, recipient: address, to_address: `0x${"e".repeat(40)}` },
       {
-        ...actualTransaction,
-        txDataDecoded: {
-          ...actualTransaction.txDataDecoded,
-          callData: new Map<string, unknown>([
-            ["method", "request_review"],
-            ["args", [caseId]],
-          ]),
+        ...studioTransaction,
+        txDataDecoded: bradburyCall,
+      },
+      {
+        txId,
+        from_address: buyer,
+        to_address: address,
+        txDataDecoded: bradburyCall,
+        consensus_data: studioTransaction.consensus_data,
+      },
+      {
+        ...studioTransaction,
+        data: { calldata: { raw: Array.from(wrongCallBytes) } },
+      },
+      {
+        ...studioTransaction,
+        data: {
+          calldata: {
+            raw: Array.from(callBytes),
+            base64: btoa(String.fromCharCode(...wrongCallBytes)),
+          },
         },
       },
       {
-        ...actualTransaction,
-        txDataDecoded: {
-          ...actualTransaction.txDataDecoded,
-          callData: new Map<string, unknown>([
-            ["method", "close_evidence"],
-            ["args", [`0x${"e".repeat(64)}`]],
-          ]),
+        ...studioTransaction,
+        data: {
+          calldata: {
+            raw: Array.from(callBytes),
+            readable: "request_review(...)"
+          },
         },
       },
-      { ...actualTransaction, to_address: `0x${"f".repeat(40)}` },
-      { ...actualTransaction, from_address: `0x${"f".repeat(40)}` },
-      { ...actualTransaction, txDataDecoded: undefined },
+      { ...studioTransaction, data: undefined },
+      { ...studioTransaction, consensus_data: undefined },
       {
-        ...actualTransaction,
+        ...studioTransaction,
         consensus_data: {
           leader_receipt: [
             {

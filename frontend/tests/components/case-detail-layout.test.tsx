@@ -23,6 +23,10 @@ const REQUIRED_EVIDENCE_TYPES: EvidenceType[] = [
   "CRITICAL_FLOW_TRACE",
 ];
 const PENDING_CLOSE_EVIDENCE_PREFIX = "accessseal.pending-close-evidence.v1:";
+type TestCalldataValue =
+  | string
+  | TestCalldataValue[]
+  | Map<string, TestCalldataValue>;
 
 const mediaTypes: Record<EvidenceType, string> = {
   RELEASE_MANIFEST: "application/json",
@@ -60,6 +64,7 @@ function persistPendingSeal(
 }
 
 function actualCloseEvidenceTransaction(
+  hash: Hash,
   caseId = CASE_ID,
   contract = `0x${"4".repeat(40)}`,
   sender = BUYER,
@@ -79,16 +84,18 @@ function actualCloseEvidenceTransaction(
   const receiptBytes = abi.calldata.encode(
     new Map([["contextJson", receiptContext]]),
   );
+  const callBytes = abi.calldata.encode(
+    new Map<string, TestCalldataValue>([
+      ["method", "close_evidence"],
+      ["args", [caseId]],
+      ["kwargs", new Map()],
+    ]),
+  );
   return {
-    from_address: sender,
-    to_address: contract,
-    txDataDecoded: {
-      type: "call",
-      callData: new Map<string, unknown>([
-        ["method", "close_evidence"],
-        ["args", [caseId]],
-      ]),
-    },
+    hash,
+    sender,
+    recipient: contract,
+    data: { calldata: { raw: Array.from(callBytes) } },
     consensus_data: {
       leader_receipt: [
         { calldata: { base64: btoa(String.fromCharCode(...receiptBytes)) } },
@@ -955,7 +962,7 @@ describe("case detail document layout", () => {
         contractAddress: `0x${"4".repeat(40)}`,
         explorerBaseUrl: "https://studio.genlayer.com",
       },
-      recoveryTransaction: actualCloseEvidenceTransaction(),
+      recoveryTransaction: actualCloseEvidenceTransaction(hash),
       sdk: {
         waitForTransactionReceipt: vi.fn().mockResolvedValue({
           statusName: "FINALIZED",
@@ -989,7 +996,7 @@ describe("case detail document layout", () => {
         contractAddress: `0x${"4".repeat(40)}`,
         explorerBaseUrl: null,
       },
-      recoveryTransaction: actualCloseEvidenceTransaction(),
+      recoveryTransaction: actualCloseEvidenceTransaction(hash),
       sdk: {
         waitForTransactionReceipt: vi.fn().mockResolvedValue({
           statusName: "FINALIZED",

@@ -352,6 +352,151 @@ async function browserSha256(value: string): Promise<`sha256:${string}`> {
     .join("")}`;
 }
 
+type CloseEvidenceCall = {
+  source: "studio" | "bradbury";
+  method: unknown;
+  args: unknown;
+  kwargs: unknown;
+};
+
+function consistentTransactionAlias(
+  transaction: Record<string, unknown>,
+  keys: string[],
+  pattern: RegExp,
+): string | null {
+  const values = keys
+    .map((key) => transaction[key])
+    .filter((value) => value !== undefined);
+  if (
+    values.length === 0 ||
+    values.some(
+      (value) =>
+        typeof value !== "string" || !pattern.test(value.toLowerCase()),
+    )
+  )
+    return null;
+  const normalized = values.map((value) => String(value).toLowerCase());
+  return new Set(normalized).size === 1 ? normalized[0]! : null;
+}
+
+function byteArray(value: unknown): Uint8Array | null {
+  if (
+    !Array.isArray(value) ||
+    value.some(
+      (item) =>
+        !Number.isInteger(item) || Number(item) < 0 || Number(item) > 255,
+    )
+  )
+    return null;
+  return Uint8Array.from(value as number[]);
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function decodeBase64(value: unknown): Uint8Array | null {
+  if (typeof value !== "string" || typeof globalThis.atob !== "function")
+    return null;
+  try {
+    const decoded = globalThis.atob(value);
+    return Uint8Array.from(decoded, (char) => char.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCloseEvidenceCall(
+  value: unknown,
+  source: CloseEvidenceCall["source"],
+): CloseEvidenceCall | null {
+  if (value instanceof Map) {
+    if (
+      value.size !== 3 ||
+      !value.has("method") ||
+      !value.has("args") ||
+      !value.has("kwargs")
+    )
+      return null;
+    return {
+      source,
+      method: value.get("method"),
+      args: value.get("args"),
+      kwargs: value.get("kwargs"),
+    };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!hasExactKeys(record, ["args", "kwargs", "method"])) return null;
+  return {
+    source,
+    method: record.method,
+    args: record.args,
+    kwargs: record.kwargs,
+  };
+}
+
+function hasNoKeywordArguments(value: unknown): boolean {
+  if (value instanceof Map) return value.size === 0;
+  return (
+    !!value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+  );
+}
+
+function decodeCloseEvidenceCall(
+  transaction: Record<string, unknown>,
+): CloseEvidenceCall | null {
+  // genlayer-js@1.1.8 returns Studio/localnet input at data.calldata.raw,
+  // while Bradbury returns txDataDecoded without leader receipt calldata.
+  const hasStudio = transaction.data !== undefined;
+  const hasBradbury = transaction.txDataDecoded !== undefined;
+  if (hasStudio === hasBradbury || transaction.tx_data_decoded !== undefined)
+    return null;
+
+  if (hasStudio) {
+    if (!transaction.data || typeof transaction.data !== "object") return null;
+    const calldata = (transaction.data as { calldata?: unknown }).calldata;
+    if (!calldata || typeof calldata !== "object" || Array.isArray(calldata))
+      return null;
+    const aliases = calldata as {
+      base64?: unknown;
+      raw?: unknown;
+      readable?: unknown;
+    };
+    const raw = byteArray(aliases.raw);
+    if (!raw) return null;
+    if (aliases.base64 !== undefined) {
+      const base64 = decodeBase64(aliases.base64);
+      if (!base64 || !sameBytes(raw, base64)) return null;
+    }
+    try {
+      const decoded = abi.calldata.decode(raw);
+      if (
+        aliases.readable !== undefined &&
+        (typeof aliases.readable !== "string" ||
+          aliases.readable !== abi.calldata.toString(decoded))
+      )
+        return null;
+      return normalizeCloseEvidenceCall(decoded, "studio");
+    } catch {
+      return null;
+    }
+  }
+
+  const decoded = transaction.txDataDecoded;
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded))
+    return null;
+  const record = decoded as { type?: unknown; callData?: unknown };
+  if (record.type !== "call") return null;
+  return normalizeCloseEvidenceCall(record.callData, "bradbury");
+}
+
 function decodedCloseEvidenceReceiptMatches(
   transaction: Record<string, unknown>,
   expected: {
@@ -367,7 +512,8 @@ function decodedCloseEvidenceReceiptMatches(
   const leaders = (consensus as { leader_receipt?: unknown }).leader_receipt;
   if (!Array.isArray(leaders) || typeof globalThis.atob !== "function")
     return false;
-  return leaders.some((leader) => {
+  if (leaders.length === 0) return false;
+  return leaders.every((leader) => {
     if (!leader || typeof leader !== "object" || Array.isArray(leader)) return false;
     const calldata = (leader as { calldata?: unknown }).calldata;
     const base64 =
@@ -376,10 +522,9 @@ function decodedCloseEvidenceReceiptMatches(
         : calldata && typeof calldata === "object" && !Array.isArray(calldata)
           ? (calldata as { base64?: unknown }).base64
           : undefined;
-    if (typeof base64 !== "string") return false;
+    const bytes = decodeBase64(base64);
+    if (!bytes) return false;
     try {
-      const binary = globalThis.atob(base64);
-      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
       const result = abi.calldata.decode(bytes);
       if (!(result instanceof Map)) return false;
       const contextJson = result.get("contextJson");
@@ -402,7 +547,8 @@ function decodedCloseEvidenceReceiptMatches(
       return (
         binding.caseId === expected.caseId &&
         count(binding.chainId, "Receipt review context chain ID") === expected.chainId &&
-        binding.contractAddress === expected.contract &&
+        typeof binding.contractAddress === "string" &&
+        binding.contractAddress.toLowerCase() === expected.contract.toLowerCase() &&
         count(binding.epoch, "Receipt review context epoch") === expected.epoch
       );
     } catch {
@@ -888,28 +1034,35 @@ export class AccessSealClient {
         await this.sdk.getTransaction({ hash: txId }),
         "Transaction",
       );
-      const recipient = String(tx.to_address ?? tx.recipient ?? "").toLowerCase();
-      const sender = String(tx.from_address ?? tx.sender ?? "").toLowerCase();
-      const decoded = tx.txDataDecoded as
-        { type?: unknown; callData?: unknown } | undefined;
-      const call = decoded?.callData;
-      const method =
-        call instanceof Map
-          ? call.get("method")
-          : (call as Record<string, unknown> | undefined)?.method;
-      const args =
-        call instanceof Map
-          ? call.get("args")
-          : (call as Record<string, unknown> | undefined)?.args;
+      const returnedHash = consistentTransactionAlias(
+        tx,
+        ["hash", "txId"],
+        HASH,
+      );
+      const recipient = consistentTransactionAlias(
+        tx,
+        ["recipient", "to_address"],
+        ADDRESS,
+      );
+      const sender = consistentTransactionAlias(
+        tx,
+        ["sender", "from_address"],
+        ADDRESS,
+      );
+      const call = decodeCloseEvidenceCall(tx);
       return (
+        returnedHash === txId.toLowerCase() &&
         recipient === this.address.toLowerCase() &&
         recipient === expected.contract.toLowerCase() &&
         sender === expected.account.toLowerCase() &&
-        decoded?.type === "call" &&
-        method === "close_evidence" &&
-        Array.isArray(args) &&
-        args.length === 1 &&
-        args[0] === expected.caseId &&
+        // Bradbury proves the call but not its epoch/chain receipt binding, so
+        // already-sealed recovery is intentionally limited to Studio/localnet.
+        call?.source === "studio" &&
+        call.method === "close_evidence" &&
+        Array.isArray(call.args) &&
+        call.args.length === 1 &&
+        call.args[0] === expected.caseId &&
+        hasNoKeywordArguments(call.kwargs) &&
         decodedCloseEvidenceReceiptMatches(tx, expected)
       );
     } catch {
