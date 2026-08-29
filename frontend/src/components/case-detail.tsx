@@ -382,6 +382,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     rememberReview: boolean,
     action?: PendingAction,
     before?: ActionReadback,
+    recoveredPersistedCloseEvidence = false,
   ) {
     const reconciled: { value: ReconciledCase | null } = { value: null };
     let result: TransactionState;
@@ -436,12 +437,13 @@ export function CaseDetail({ caseId }: { caseId: string }) {
             !actionReadbackConfirmed(
               action,
               before,
-              actionReadback(
-                reconciled.value,
-                readbackEvidence,
-                readbackAppealRound,
-              ),
-            )
+            actionReadback(
+              reconciled.value,
+              readbackEvidence,
+              readbackAppealRound,
+            ),
+            { recoveredPersistedCloseEvidence },
+          )
           )
             return false;
           if (
@@ -508,11 +510,13 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     setError("");
     try {
       if (!data) return;
+      if (!isPendingSealForCurrentEpoch(hash, data.case)) return;
       await monitorTransaction(
         hash,
         false,
         "close_evidence",
         actionReadback(data, evidence, eligibility.round),
+        true,
       );
     } catch (cause) {
       setError(

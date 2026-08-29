@@ -552,7 +552,6 @@ describe("case detail document layout", () => {
       .mockResolvedValueOnce(exact.case)
       .mockResolvedValue(after.case);
     const user = userEvent.setup();
-
     render(<CaseDetail caseId={CASE_ID} />);
 
     expect(
@@ -622,7 +621,6 @@ describe("case detail document layout", () => {
       sdk: { waitForTransactionReceipt },
     });
     const user = userEvent.setup();
-
     render(<CaseDetail caseId={CASE_ID} />);
     await user.click(
       await screen.findByRole("button", {
@@ -852,13 +850,12 @@ describe("case detail document layout", () => {
     );
   });
 
-  it("reuses a restored finalized seal hash for readback retry without a duplicate send", async () => {
+  it("confirms and clears a restored finalized seal hash without a duplicate send", async () => {
     const hash = `0x${"c".repeat(64)}` as Hash;
-    const opened = evidenceOpenReadback();
     const sealed = evidenceOpenReadback(true);
     const closeEvidence = vi.fn();
     persistPendingSeal(hash);
-    const reader = mockWallet(opened, {
+    mockWallet(sealed, {
       contract: { closeEvidence },
       evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
       sdk: {
@@ -868,7 +865,38 @@ describe("case detail document layout", () => {
         }),
       },
     });
-    const user = userEvent.setup();
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback confirmed",
+      }),
+    ).toBeVisible();
+    expect(closeEvidence).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "Close evidence & enable review" }),
+    ).not.toBeInTheDocument();
+    expect(closeEvidence).not.toHaveBeenCalled();
+    expect(
+      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+    ).toBeNull();
+  });
+
+  it("keeps a persisted seal hash recoverable when its authoritative state is not sealed", async () => {
+    const hash = `0x${"e".repeat(64)}` as Hash;
+    const closeEvidence = vi.fn();
+    persistPendingSeal(hash);
+    mockWallet(evidenceOpenReadback(), {
+      contract: { closeEvidence },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
 
     render(<CaseDetail caseId={CASE_ID} />);
 
@@ -878,22 +906,7 @@ describe("case detail document layout", () => {
       }),
     ).toBeVisible();
     expect(closeEvidence).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole("button", { name: "Close evidence & enable review" }),
-    ).toBeDisabled();
-
-    reader.readCase.mockResolvedValue(sealed.case);
-    await user.click(screen.getByRole("button", { name: "Refresh readback" }));
-
-    expect(
-      await screen.findByRole("heading", {
-        name: "Transaction readback confirmed",
-      }),
-    ).toBeVisible();
-    expect(closeEvidence).not.toHaveBeenCalled();
-    expect(
-      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
-    ).toBeNull();
+    expect(localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`)).not.toBeNull();
   });
 
   it("does not let a late pre-seal refresh overwrite a newer sealed readback", async () => {

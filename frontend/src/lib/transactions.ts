@@ -61,6 +61,9 @@ type Receipt = {
   executionError?: unknown;
   data?: { error?: unknown; executionError?: unknown };
   messages?: unknown[];
+  consensus_data?: {
+    leader_receipt?: Array<{ genvm_result?: unknown }>;
+  };
 };
 type ReceiptClient = {
   waitForTransactionReceipt(args: {
@@ -78,7 +81,9 @@ const VALIDATOR_TIMEOUT_STATUSES = new Set([
   "CANCELED",
   "UNDETERMINED",
 ]);
-const DETERMINISTIC_RESULT_NAMES = new Set(["DISAGREE", "MAJORITY_DISAGREE"]);
+// These are the pinned genlayer-js result-name literals.  Consensus disagreement
+// is not itself the SDK's deterministic-execution result.
+const DETERMINISTIC_RESULT_NAMES = new Set(["DETERMINISTIC_VIOLATION"]);
 const ACCESS_SEAL_ROLE_ERRORS = [
   "only the vendor can accept terms",
   "only the buyer can fund",
@@ -108,14 +113,28 @@ function isKnownRoleFailure(value: unknown): boolean {
     matchesExactRoleError(value, expected),
   );
 }
+function exactGenVmUserErrorMessage(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const result = value as { stderr?: unknown; kind?: unknown; message?: unknown };
+  if (result.kind === "UserError" && typeof result.message === "string")
+    return result.message;
+  if (typeof result.stderr !== "string") return;
+  const match = /^UserError\(message='([^']+)'\)$/.exec(result.stderr);
+  return match?.[1];
+}
 function receiptRoleFailure(receipt: Receipt): boolean {
-  return [
+  const conventionalFailures = [
     receipt.error,
     receipt.executionError,
     receipt.data?.error,
     receipt.data?.executionError,
     ...(receipt.messages ?? []),
-  ].some(isKnownRoleFailure);
+  ];
+  if (conventionalFailures.some(isKnownRoleFailure)) return true;
+  return (receipt.consensus_data?.leader_receipt ?? []).some((leader) => {
+    const message = exactGenVmUserErrorMessage(leader.genvm_result);
+    return message !== undefined && ACCESS_SEAL_ROLE_ERRORS.includes(message as never);
+  });
 }
 function state(
   hash: `0x${string}` | null,
@@ -287,6 +306,7 @@ export function actionReadbackConfirmed(
   action: PendingAction | undefined,
   before: ActionReadback,
   after: ActionReadback,
+  options: { recoveredPersistedCloseEvidence?: boolean } = {},
 ): boolean {
   switch (action) {
     case "accept_terms":
@@ -306,7 +326,10 @@ export function actionReadbackConfirmed(
         after.evidence.envelopes.length > (before.evidence?.envelopes.length ?? 0)
       );
     case "close_evidence":
-      return !before.case.evidenceSealed && after.case.evidenceSealed;
+      return (
+        after.case.evidenceSealed &&
+        (!before.case.evidenceSealed || options.recoveredPersistedCloseEvidence === true)
+      );
     case "request_review":
       return (
         before.review === null &&

@@ -131,6 +131,16 @@ describe("transaction truth", () => {
     expect(actionReadbackConfirmed(action, before as never, before as never)).toBe(false);
   });
 
+  it("permits an already-sealed close readback only for persisted recovery", () => {
+    const sealed = readback({ lifecycle: "EVIDENCE_SEALED", evidenceSealed: true });
+    expect(actionReadbackConfirmed("close_evidence", sealed as never, sealed as never)).toBe(false);
+    expect(
+      actionReadbackConfirmed("close_evidence", sealed as never, sealed as never, {
+        recoveredPersistedCloseEvidence: true,
+      }),
+    ).toBe(true);
+  });
+
   it("uses real pinned SDK receipt names instead of a fictional rejected status", async () => {
     for (const statusName of [
       "VALIDATORS_TIMEOUT",
@@ -151,7 +161,7 @@ describe("transaction truth", () => {
         {
           waitForTransactionReceipt: vi.fn().mockResolvedValue({
             statusName: "FINALIZED",
-            resultName: "DISAGREE",
+            resultName: "DETERMINISTIC_VIOLATION",
             txExecutionResultName: "FINISHED_WITH_RETURN",
           }),
         } as never,
@@ -159,6 +169,23 @@ describe("transaction truth", () => {
         () => undefined,
       ),
     ).resolves.toMatchObject({ phase: "DETERMINISTIC_VIOLATION" });
+
+    for (const resultName of ["DISAGREE", "MAJORITY_DISAGREE", "NO_MAJORITY"]) {
+      await expect(
+        trackTransaction(
+          {
+            waitForTransactionReceipt: vi.fn().mockResolvedValue({
+              statusName: "FINALIZED",
+              resultName,
+              txExecutionResultName: "FINISHED_WITH_RETURN",
+            }),
+          } as never,
+          `0x${"6".repeat(64)}`,
+          () => undefined,
+          async () => true,
+        ),
+      ).resolves.toMatchObject({ phase: "READBACK_CONFIRMED" });
+    }
   });
 
   it("classifies only exact AccessSeal buyer and vendor role errors", () => {
@@ -217,7 +244,7 @@ describe("transaction truth", () => {
 
   it.each([
     [{ statusName: "UNDETERMINED" }, "VALIDATORS_TIMEOUT"],
-    [{ statusName: "FINALIZED", resultName: "DISAGREE" }, "DETERMINISTIC_VIOLATION"],
+    [{ statusName: "FINALIZED", resultName: "DETERMINISTIC_VIOLATION" }, "DETERMINISTIC_VIOLATION"],
     [{ statusName: "FINALIZED", txExecutionResultName: "FINISHED_WITH_ERROR" }, "EXECUTION_ERROR"],
   ] as const)("classifies terminal receipt failure %s", async (receipt, expected) => {
     const events: string[] = [];
@@ -229,6 +256,54 @@ describe("transaction truth", () => {
     );
     expect(result.phase).toBe(expected);
     expect(events).not.toContain("READBACK_CONFIRMED");
+  });
+
+  it("classifies an exact nested simplified SDK UserError role failure", async () => {
+    const result = await trackTransaction(
+      {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_ERROR",
+          consensus_data: {
+            leader_receipt: [
+              {
+                genvm_result: {
+                  stderr: "UserError(message='only the buyer can close evidence')",
+                },
+              },
+            ],
+          },
+        }),
+      } as never,
+      `0x${"7".repeat(64)}`,
+      () => undefined,
+      async () => true,
+    );
+    expect(result.phase).toBe("WRONG_ROLE");
+  });
+
+  it("does not broaden nested simplified SDK role errors", async () => {
+    const result = await trackTransaction(
+      {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_ERROR",
+          consensus_data: {
+            leader_receipt: [
+              {
+                genvm_result: {
+                  stderr: "UserError(message='only the buyer can close evidence now')",
+                },
+              },
+            ],
+          },
+        }),
+      } as never,
+      `0x${"8".repeat(64)}`,
+      () => undefined,
+      async () => true,
+    );
+    expect(result.phase).toBe("EXECUTION_ERROR");
   });
 
   it("classifies a false action-specific readback as a mismatch", async () => {
