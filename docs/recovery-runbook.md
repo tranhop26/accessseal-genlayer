@@ -1,100 +1,43 @@
-# AccessSeal recovery runbook
+# AccessSeal V4 recovery runbook
 
-Use this runbook when the UI and wallet do not show an unambiguous finalized result. Never infer success from a button click, optimistic state, or an `ACCEPTED` transaction.
+Use this runbook whenever a wallet or UI result is not unambiguously finalized. A click, pending receipt, or optimistic UI is never proof. Do not record a secret, mnemonic, private key, or token while investigating.
 
-## First response for every incident
+## Always begin with authoritative readback
 
-1. Record the network, contract address, case ID, wallet address/role, transaction hash if available, and the action attempted. Do not record secrets.
-2. Confirm the wallet is connected to the configured exact network.
-3. Query the transaction until it is final or the client reports an explicit undetermined/error state.
-4. Read `get_case`, `get_review`/`get_review_finality`, `get_settlement`, and `get_accounting` at `latest-final` as applicable.
-5. Treat contract readback as authoritative. Refresh/reconcile the UI before taking another write action.
-6. Verify conservation: `totalDeposits = reserved + pendingDispatch + dispatchedPayouts + dispatchedRefunds`.
+1. Record network, contract address, case ID, role, attempted method, and transaction hash if one actually exists.
+2. Wait for final transaction status and successful execution. If status is unknown, label it undetermined; do not resubmit automatically.
+3. At `latest-final`, read `get_case`, `get_evidence`, `get_review_context`, `get_review`, `get_review_attempt`, `get_review_finality`, `get_settlement`, and `get_accounting` as applicable.
+4. Reconcile the UI to those reads. Verify `totalDeposits = reserved + pendingDispatch + dispatchedPayouts + dispatchedRefunds`.
 
-## Early evidence seal and immediate review
+The UI must never advance before this readback and never auto-sign or auto-resubmit a wallet transaction.
 
-- Only the buyer may call `close_evidence(caseId)`. Before doing so, read `get_case` and `get_evidence(caseId, epoch)` at `latest-final`.
-- The current epoch must be `EVIDENCE_OPEN`, before the hard deadline, and contain exactly the six fresh required types: `RELEASE_MANIFEST`, `HTML_BUNDLE`, `SCREENSHOT`, `DOM_FACTS`, `SCANNER_REPORT`, and `CRITICAL_FLOW_TRACE`. Every envelope must still be unexpired.
-- A finalized successful seal must read back as `lifecycle=EVIDENCE_SEALED`, `evidenceSealed=true`, a nonzero `evidenceSealedAt`, and `evidenceSealedBy` equal to the buyer. Also retain the `epoch`, `evidenceDeadline`, and `hardDeadline` readback values.
-- After that authoritative readback, an eligible reviewer may request review immediately. A seal is not an approval, protocol or review finality, payout/refund finality, or settlement; wait for the separate review and finality/readback steps.
-- Treat `only the buyer can close evidence`, `evidence is not open`, `case hard deadline has expired`, `evidence profile is incomplete`, and `evidence profile contains expired evidence` as failed seal attempts. Do not infer a seal from the submitted transaction alone.
-- If no early seal is available, use the cutoff fallback: wait until the evidence cutoff has passed, then request review if the hard deadline has not expired. Before then, `request_review` fails with `review is not eligible before the evidence cutoff`.
+## Evidence close and review
 
-## Pending, accepted, or undetermined transaction
+- `close_evidence(caseId)` is buyer-only. Before signing, confirm the current epoch is `EVIDENCE_OPEN`, has exactly the six mandatory types, and all envelopes remain fresh.
+- After a finalized successful close, require `get_case` to show `lifecycle: EVIDENCE_SEALED`, `evidenceSealed: true`, a nonzero `evidenceSealedAt`, and the buyer as `evidenceSealedBy`. Require `get_review_context` to return `ready: true` and a context hash that equals `get_case.reviewContextHash`.
+- Verify the context JSON SHA-256, the independent binding fields (`chainId`, `contractAddress`, `caseId`, `epoch`, `profileHash`, `releaseDigest`, `subjectOrigin`), and screenshot URI/hash before requesting review. The canonical context cannot exceed 16,384 UTF-8 bytes; the manifest-bound PNG cannot exceed 16,384 raw bytes.
+- `request_review` is permissionless after the authoritative sealed/context-ready readback. It cannot repair missing or invalid evidence. If it fails, retain the actual error and current readback; do not invent a verdict or transaction.
 
-- `PENDING` and `ACCEPTED` are not final. Do not submit a dependent action or assume value moved.
-- If polling times out, label the result `UNDETERMINED`; retain the transaction hash and reconcile later.
-- After `FINALIZED`, require successful execution and then read the exact contract state. A finalized failed execution did not perform the requested transition.
-- If the wallet lost its local transaction binding, import the case ID and inspect authoritative state. Do not fabricate a transaction hash.
+## Review outcomes
 
-## Review and protocol appeal
+- For an accepted review transaction, wait for `get_review_finality` status `FINALIZED`, then read `get_review` and `get_review_attempt` for the exact case, epoch, and attempt.
+- `APPROVED` authorizes `prepare_payout` only after that finality readback. `REJECTED` authorizes `prepare_refund` only after it. `REQUEST_MORE_INFO` and `UNRESOLVED` never authorize a payout.
+- `REQUEST_MORE_INFO`: only the vendor can call `start_cure`; it creates a new epoch/replay domain. Submit a new complete V4 evidence set. Never copy old envelopes/nonces into the cure epoch.
+- `UNRESOLVED`: anyone may call `retry_review` after the cooldown with a unique retry ID and remaining budget. After exhaustion, `expire_unresolved` prepares the buyer refund path. Never reinterpret unresolved evidence as rejection or approval.
+- `timeout_refund` is permissionless only when the contract says the hard deadline is eligible. If it fails, keep the readback and wait; do not infer eligibility from a local clock.
 
-- Do not prepare settlement while the originating review transaction is accepted/appealable or an appeal is active.
-- Protocol appeal calls require the original review transaction ID. The contract stores attempt proof/finality records but does **not** store the transaction hash or appeal transaction history.
-- The frontend stores a structured local binding containing chain, network, contract, case, epoch, release/proof, and decoded method arguments. It removes stale or mismatched bindings and disables appeal when provenance cannot be proven.
-- If the correct review transaction ID cannot be recovered from the wallet/explorer, fail closed. Do not use an unrelated transaction.
-- After the appeal reaches finality, re-read the case, current review, finality, settlement, and accounting before enabling settlement.
+## Prepared or dispatched settlement
 
-## `REQUEST_MORE_INFO`
+- Before `execute_settlement`, read the exact prepared settlement ID, recipient, amount, epoch, reason, review proof, and `PREPARED` status from `get_settlement`.
+- If dispatch fails before external emission, the same immutable `PREPARED` intent remains retryable. Re-read it and accounting; do not create a new intent or change recipient/amount.
+- At `DISPATCHED_FINALIZED`, do not retry dispatch. The contract cannot correlate a child transfer success/failure. Prove recipient delivery separately with an official linked finalized/successful child transaction or exact recipient balance delta; otherwise retain “Recipient confirmation pending.”
 
-- Only the vendor may start the single bounded cure.
-- Cure increments the epoch and creates a new evidence/replay domain. Never reuse old epoch envelopes or nonces.
-- Submit a complete new manifest and mandatory artifacts, then request a new review.
-- Historical attempt evidence remains available through `get_review_attempt`.
+## Frozen deployment defect
 
-## `UNRESOLVED`
+V4 is `INTENTIONALLY_FROZEN`. Stop new cases on an affected deployment, publish only non-secret facts, and use its encoded cure/retry/timeout/refund/settlement paths. V4 cannot be patched in place.
 
-- No settlement is eligible and no value may move.
-- Anyone may retry after the fixed cooldown while retry budget remains and no active finality is pending. Use a unique retry ID.
-- If the retry budget/recovery period is exhausted, use `expire_unresolved` to prepare the deterministic buyer refund path.
-- If sources are unstable, preserve the failure evidence; do not reinterpret it as rejection or approval.
+Any replacement is a new V4-or-later deployment at a new address. V1–V3 state does not migrate into V4, and V4 state does not migrate automatically into a replacement: never copy case IDs, evidence, nonces, review proofs, settlement IDs, custody, or balances. Users explicitly opt into a new case after independently verified deployment readback.
 
-## Hard timeout
+## Local boundary
 
-- `timeout_refund` is permissionless only after the contract's hard deadline and only when no active review/finality blocks it.
-- The contract does not expose case `createdAt`. The frontend therefore cannot independently calculate eligibility and intentionally fails closed; submit only when authoritative contract rules allow it.
-- A successful timeout action prepares an immutable buyer refund intent. Read it back before dispatch.
-- A replay after the first timeout transition must fail without changing the settlement or accounting.
-
-## Deterministic failure before dispatch emission
-
-- If `execute_settlement` fails before the external message is emitted, authoritative settlement remains the same `PREPARED` intent.
-- Re-read recipient, amount, settlement ID, status, and accounting. If all are unchanged and the cause is corrected, anyone may retry the exact same intent.
-- Never prepare a second intent and never alter recipient/amount. Reserve must not be debited twice.
-
-## `DISPATCHED_FINALIZED` but recipient unconfirmed
-
-- Do **not** retry `execute_settlement`: the contract terminal state prevents double dispatch.
-- This state proves the finalized parent emitted a finality-only EOA transfer. It does not prove the child transaction succeeded or the recipient balance changed.
-- Use an authoritative GenLayer client to bind the parent `execute_settlement(caseId, settlementId)` transaction to its exact external message and triggered child transaction. Require parent and child `FINALIZED`/successful status, correct contract/recipient/amount, or independently prove the exact recipient balance delta.
-- If the network cannot expose a linked child or balance delta, keep the UI at “Recipient confirmation pending” and omit the final payout/refund proof row.
-- GenVM v0.2.16 gives the contract no correlated child success/failure callback. There is no safe automatic child-failure retry. Escalate operationally and document the unresolved delivery; do not claim settlement receipt.
-
-## Frozen-contract defect or migration
-
-AccessSeal is `INTENTIONALLY_FROZEN`. There is no administrator, upgrade key, code replacement, verdict override, or rescue redirection.
-
-1. Stop creating/funding new cases on the affected deployment.
-2. Publish the exact affected network, address, source/schema hashes, and limitation without exposing secrets.
-3. Allow existing cases to use only their encoded cure/retry/timeout/refund/settlement paths.
-4. Build and review V3 as a new contract with a new address and manifest.
-5. Require each user to opt into a new V3 case. Do not claim automatic storage/balance migration from V2.
-6. Update the frontend only after exact V3 source/schema/deployment readback is proven.
-
-### Frozen V2 to V3 recovery boundary
-
-- The V2 address is immutable. Do not describe the V2 deployment as fixed, patched, upgraded, or repaired in place.
-- A V2 case whose final review is `UNRESOLVED` may keep its remaining final retry available, or exhaust that retry under the encoded rules. After the recovery budget is exhausted, `expire_unresolved` prepares the deterministic buyer-refund path; it does not repair the review or move the case to V3.
-- V3 is a separately deployed contract at a new address with a new evidence replay domain. New V3 evidence must be opened, bound, and reviewed under the V3 address/domain.
-- Never copy V2 contract state, case IDs, proof IDs, settlement IDs, evidence nonces, or settlement records into V3. A user who opts in creates a new V3 case and receives only the recovery paths encoded by each deployment.
-
-## Bradbury deployment rejected before wallet confirmation
-
-- Read the Studio/browser RPC error before retrying. `BlockPubdataLimitReached` means the deployment payload exceeds the chain's block pubdata boundary; changing gas, wallet, or CLI does not bypass it.
-- Run `npm run contract:check` and confirm the tracked artifact is at most 48,000 UTF-8 bytes. Never manually shorten the artifact or remove contract rules.
-- Require GenVM lint, exact readable/artifact schema parity, and the complete direct suite against the artifact before one new deployment attempt.
-- If Bradbury rejects a verified in-budget artifact, stop. Record the observed size/error and revisit packaging; do not repeatedly submit transactions or weaken the trust model.
-
-## Local GLSim boundary
-
-GLSim 0.29.2 can prove five-validator consensus, parent transaction finality, contract state, accounting, and replay rejection. It cannot execute/prove the pure EOA child delivery and may leave the simulator's terminal dispatch state visible after the missing host operation. Any address and transaction under `work/evidence` or `work/deployments/localnet.json` is local, ephemeral, and not Studionet/testnet evidence.
+Localnet and Bradbury GEN are simulated testnet value. GLSim can prove V4 contract transitions, consensus, and accounting, but it cannot prove external EOA child delivery. Local addresses and transaction hashes under `work/` are ephemeral and are not live deployment, payment, or recipient-receipt evidence.

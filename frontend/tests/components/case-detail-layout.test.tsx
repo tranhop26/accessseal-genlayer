@@ -1,12 +1,18 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { abi } from "genlayer-js";
 import { CaseDetail } from "@/components/case-detail";
 import { StatusPanel } from "@/components/status-panel";
+import { EvidenceWorkspace } from "@/components/cases/evidence-workspace";
 import { useWallet } from "@/providers/wallet-provider";
 import type { ReconciledCase } from "@/lib/transactions";
 import type { EvidenceEnvelopeV1, EvidenceType } from "@/lib/evidence";
-import type { EvidenceRecord, Hash } from "@/lib/access-seal";
+import { AccessSealClient, type EvidenceRecord, type Hash } from "@/lib/access-seal";
+import {
+  deriveCaseWorkspaceModel,
+  type CaseWorkspaceModelInput,
+} from "@/components/cases/case-dashboard-model";
 
 vi.mock("@/providers/wallet-provider", () => ({ useWallet: vi.fn() }));
 
@@ -22,6 +28,10 @@ const REQUIRED_EVIDENCE_TYPES: EvidenceType[] = [
   "CRITICAL_FLOW_TRACE",
 ];
 const PENDING_CLOSE_EVIDENCE_PREFIX = "accessseal.pending-close-evidence.v1:";
+type TestCalldataValue =
+  | string
+  | TestCalldataValue[]
+  | Map<string, TestCalldataValue>;
 
 const mediaTypes: Record<EvidenceType, string> = {
   RELEASE_MANIFEST: "application/json",
@@ -56,6 +66,47 @@ function persistPendingSeal(
       hash,
     }),
   );
+}
+
+function actualCloseEvidenceTransaction(
+  hash: Hash,
+  caseId = CASE_ID,
+  contract = `0x${"4".repeat(40)}`,
+  sender = BUYER,
+  epoch = 0,
+) {
+  const receiptContext = JSON.stringify({
+    binding: {
+      chainId: 61999,
+      contractAddress: contract,
+      caseId,
+      epoch,
+      profileHash: `0x${"6".repeat(64)}`,
+      releaseDigest: `sha256:${"8".repeat(64)}`,
+      subjectOrigin: "https://audit.example",
+    },
+  });
+  const receiptBytes = abi.calldata.encode(
+    new Map([["contextJson", receiptContext]]),
+  );
+  const callBytes = abi.calldata.encode(
+    new Map<string, TestCalldataValue>([
+      ["method", "close_evidence"],
+      ["args", [caseId]],
+      ["kwargs", new Map()],
+    ]),
+  );
+  return {
+    hash,
+    sender,
+    recipient: contract,
+    data: { calldata: { raw: Array.from(callBytes) } },
+    consensus_data: {
+      leader_receipt: [
+        { calldata: { base64: btoa(String.fromCharCode(...receiptBytes)) } },
+      ],
+    },
+  };
 }
 
 function finalizedReadback(): ReconciledCase {
@@ -171,6 +222,21 @@ function evidenceReadback(types: EvidenceType[], epoch = 0): EvidenceRecord {
   };
 }
 
+function previewEvidence(
+  payloadUri: string,
+  mediaType: string,
+  subjectOrigin = "https://audit.example",
+): EvidenceRecord {
+  const record = evidenceReadback(["SCREENSHOT"]);
+  record.envelopes[0] = {
+    ...record.envelopes[0]!,
+    mediaType,
+    payloadUri,
+    subjectOrigin,
+  };
+  return record;
+}
+
 function evidenceOpenReadback(sealed = false, epoch = 0): ReconciledCase {
   const readback = finalizedReadback();
   readback.case.lifecycle = sealed ? "EVIDENCE_SEALED" : "EVIDENCE_OPEN";
@@ -192,6 +258,18 @@ function mockWallet(
     contract?: Record<string, unknown> | null;
     evidence?: EvidenceRecord | null;
     sdk?: Record<string, unknown> | null;
+    config?: Record<string, unknown> | null;
+    recoveryTransaction?: unknown;
+    reviewContext?: {
+      caseId: string;
+      epoch: number;
+      schemaVersion: "accessseal-review-context/1";
+      ready: boolean;
+      contextJson: string;
+      contextHash: `sha256:${string}`;
+      imageUri: string;
+      imageSha256: `sha256:${string}`;
+    } | null;
   } = {},
 ) {
   const readContract = {
@@ -208,6 +286,9 @@ function mockWallet(
     readEvidence: options.evidence
       ? vi.fn().mockResolvedValue(options.evidence)
       : vi.fn().mockRejectedValue(new Error("evidence epoch does not exist")),
+    readReviewContext: options.reviewContext
+      ? vi.fn().mockResolvedValue(options.reviewContext)
+      : vi.fn().mockRejectedValue(new Error("review context does not exist")),
     appealEligibility: vi.fn().mockResolvedValue({
       available: false,
       reason:
@@ -217,6 +298,19 @@ function mockWallet(
       roundData: null,
     }),
     verifyReviewTransaction: vi.fn().mockResolvedValue(false),
+    verifyCloseEvidenceTransaction: (
+      hash: Hash,
+      input: { account: `0x${string}`; caseId: string },
+    ) =>
+      new AccessSealClient(
+        {
+          getTransaction: vi
+            .fn()
+            .mockResolvedValue(options.recoveryTransaction),
+        } as never,
+        (options.config?.contractAddress as `0x${string}` | undefined) ??
+          (`0x${"4".repeat(40)}` as `0x${string}`),
+      ).verifyCloseEvidenceTransaction(hash, input as never),
   };
   vi.mocked(useWallet).mockReturnValue({
     status: "connected",
@@ -225,7 +319,7 @@ function mockWallet(
     contract: options.contract ?? null,
     readContract,
     sdk: options.sdk ?? null,
-    config: null,
+    config: options.config ?? null,
     connect: vi.fn(),
     changeAccount: options.changeAccount ?? vi.fn(),
     disconnect: vi.fn(),
@@ -233,76 +327,306 @@ function mockWallet(
   return readContract;
 }
 
+function readyReviewContext() {
+  const contextHash = `sha256:${"a".repeat(64)}` as const;
+  return {
+    caseId: CASE_ID,
+    epoch: 0,
+    schemaVersion: "accessseal-review-context/1" as const,
+    ready: true,
+    contextJson: JSON.stringify({ rubric: "accessseal-static/1" }),
+    contextHash,
+    imageUri: "https://audit.example/release.png",
+    imageSha256: `sha256:${"b".repeat(64)}` as const,
+  };
+}
+
+describe("case workspace model", () => {
+  function sealedWorkspaceInput(): CaseWorkspaceModelInput {
+    const reconciledCase = evidenceOpenReadback(true);
+    const reviewContext = readyReviewContext();
+    reconciledCase.case.reviewContextReady = true;
+    reconciledCase.case.reviewContextHash = reviewContext.contextHash;
+    return {
+      reconciledCase,
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      reviewContext,
+      actorAddress: BUYER,
+      walletStatus: "connected" as const,
+      hasSigner: true,
+      transaction: null,
+      now: 1_701_232_001,
+      retryEligible: false,
+      evidenceSubmissionReady: true,
+      sealRecoveryPending: false,
+    };
+  }
+
+  it("offers one enabled review action from sealed authoritative context", () => {
+    const model = deriveCaseWorkspaceModel(sealedWorkspaceInput());
+
+    expect(model.primaryAction).toEqual({
+      id: "REQUEST_REVIEW",
+      label: "Request intelligent review",
+      enabled: true,
+      requiresWallet: true,
+    });
+    expect(model.stages.map((stage) => stage.state)).toEqual([
+      "complete",
+      "complete",
+      "complete",
+      "current",
+      "upcoming",
+    ]);
+    expect(model.roleWarning).toBeNull();
+    expect([model.primaryAction].filter((action) => action.enabled)).toHaveLength(1);
+  });
+
+  it("keeps the lifecycle action visible but disabled for the wrong role", () => {
+    const input = sealedWorkspaceInput();
+    input.reconciledCase.case.lifecycle = "DRAFT";
+    input.reconciledCase.case.vendorAccepted = false;
+    input.reconciledCase.case.evidenceSealed = false;
+    input.reconciledCase.case.evidenceSealedAt = 0;
+    input.actorAddress = BUYER;
+
+    const model = deriveCaseWorkspaceModel(input);
+
+    expect(model.primaryAction.id).toBe("ACCEPT_TERMS");
+    expect(model.primaryAction.enabled).toBe(false);
+    expect(model.primaryActionReason).toMatch(/vendor wallet/i);
+    expect(model.roleWarning).toMatch(/buyer wallet.*vendor/i);
+  });
+
+  it("explains why evidence submission is disabled before canonical validation", () => {
+    const input = sealedWorkspaceInput();
+    input.reconciledCase.case.lifecycle = "FUNDED";
+    input.reconciledCase.case.evidenceSealed = false;
+    input.reconciledCase.case.evidenceSealedAt = 0;
+    input.actorAddress = VENDOR;
+    input.evidenceSubmissionReady = false;
+
+    const model = deriveCaseWorkspaceModel(input);
+
+    expect(model.primaryAction.id).toBe("SUBMIT_EVIDENCE");
+    expect(model.primaryAction.enabled).toBe(false);
+    expect(model.primaryActionReason).toMatch(/canonical preview/i);
+  });
+
+  it("does not request review until the exact context readback is ready", () => {
+    const input = sealedWorkspaceInput();
+    input.reviewContext = null;
+
+    const model = deriveCaseWorkspaceModel(input);
+
+    expect(model.primaryAction.id).toBe("REQUEST_REVIEW");
+    expect(model.primaryAction.enabled).toBe(false);
+    expect(model.primaryActionReason).toMatch(/review context/i);
+    expect(model.verdictTone).toBe("neutral");
+  });
+
+  it("offers an eligible retry after a finalized unresolved review", () => {
+    const input = sealedWorkspaceInput();
+    const unresolved = finalizedReadback();
+    unresolved.review!.verdict = "UNRESOLVED";
+    unresolved.reviewAttempt!.review.verdict = "UNRESOLVED";
+    input.reconciledCase = unresolved;
+    input.retryEligible = true;
+
+    const model = deriveCaseWorkspaceModel(input);
+
+    expect(model.primaryAction).toEqual({
+      id: "RETRY_REVIEW",
+      label: "Retry intelligent review",
+      enabled: true,
+      requiresWallet: true,
+    });
+    expect(model.verdictTone).toBe("warning");
+  });
+
+  it("marks finalized dispatch complete and exposes only immutable activity", () => {
+    const input = sealedWorkspaceInput();
+    const settled = finalizedReadback();
+    settled.case.lifecycle = "DISPATCHED_FINALIZED";
+    settled.settlement = {
+      amount: 100n,
+      caseId: CASE_ID,
+      epoch: 0,
+      executor: BUYER,
+      kind: "PAYOUT",
+      reason: "APPROVED",
+      recipient: VENDOR,
+      reviewProofId: "proof-1",
+      settlementId: "settlement-1",
+      status: "DISPATCHED_FINALIZED",
+    };
+    input.reconciledCase = settled;
+
+    const model = deriveCaseWorkspaceModel(input);
+
+    expect(model.primaryAction.id).toBe("SETTLED");
+    expect(model.primaryAction.enabled).toBe(false);
+    expect(model.stages.map((stage) => stage.state)).toEqual([
+      "complete",
+      "complete",
+      "complete",
+      "complete",
+      "complete",
+    ]);
+    expect(model.activityRows.some((row) => row.proof === "settlement-1")).toBe(true);
+  });
+});
+
+describe("evidence preview boundary", () => {
+  it("embeds only same-origin HTTPS image and sandboxed text previews", () => {
+    const caseRecord = evidenceOpenReadback().case;
+    const image = render(
+      <EvidenceWorkspace
+        caseRecord={caseRecord}
+        evidence={previewEvidence(
+          "https://audit.example/evidence.png",
+          "image/png",
+        )}
+        now={1_000}
+      />,
+    );
+
+    expect(image.getByRole("img", { name: /screenshot evidence preview/i })).toHaveAttribute(
+      "src",
+      "https://audit.example/evidence.png",
+    );
+    image.unmount();
+
+    const text = render(
+      <EvidenceWorkspace
+        caseRecord={{ ...caseRecord, subjectOrigin: "https://audit.example:8443" }}
+        evidence={previewEvidence(
+          "https://audit.example:8443/evidence.txt",
+          "text/plain",
+          "https://audit.example:8443",
+        )}
+        now={1_000}
+      />,
+    );
+    const frame = text.getByTitle(/screenshot evidence preview/i);
+    expect(frame).toHaveAttribute("src", "https://audit.example:8443/evidence.txt");
+    expect(frame).toHaveAttribute("sandbox", "");
+  });
+
+  it.each([
+    ["HTTP scheme", "http://audit.example/evidence.png", "https://audit.example"],
+    ["port mismatch", "https://audit.example:8443/evidence.png", "https://audit.example"],
+    ["data URL", "data:image/png;base64,AAAA", "https://audit.example"],
+    ["blob URL", "blob:https://audit.example/evidence-id", "https://audit.example"],
+    ["malformed URL", "not a url", "https://audit.example"],
+    ["relative URL", "/evidence.png", "https://audit.example"],
+  ])("keeps an unsafe %s metadata-only", (_label, payloadUri, subjectOrigin) => {
+    const { container } = render(
+      <EvidenceWorkspace
+        caseRecord={evidenceOpenReadback().case}
+        evidence={previewEvidence(payloadUri, "image/png", subjectOrigin)}
+        now={1_000}
+      />,
+    );
+
+    expect(container.querySelector("img, iframe")).not.toBeInTheDocument();
+    expect(screen.getByText(/metadata only/i)).toBeInTheDocument();
+  });
+});
+
 describe("case detail document layout", () => {
   beforeEach(() => {
     localStorage.clear();
     window.history.replaceState({}, "", "/");
   });
 
-  it("renders one invoice summary and four visible workflow sections", async () => {
+  it("renders the V4 evidence command center from authoritative sealed readback", async () => {
+    const readback = evidenceOpenReadback(true);
+    const reviewContext = readyReviewContext();
+    readback.case.reviewContextReady = true;
+    readback.case.reviewContextHash = reviewContext.contextHash;
+    mockWallet(readback, {
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      reviewContext,
+      contract: { requestReview: vi.fn() },
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    for (const heading of [
+      "Evidence workspace",
+      "Intelligent review",
+      "Simulated escrow",
+      "Immutable activity",
+    ])
+      expect(
+        await screen.findByRole("heading", { name: heading }),
+      ).toBeVisible();
+    for (const label of [
+      "Release manifest",
+      "HTML bundle",
+      "Screenshot",
+      "DOM facts",
+      "Scanner report",
+      "Critical flow trace",
+    ])
+      expect(screen.getAllByText(label).length).toBeGreaterThan(0);
+    expect(screen.getByText("Active wallet role")).toBeVisible();
+    expect(screen.getByText("Active wallet role").parentElement).toHaveTextContent(
+      "Buyer",
+    );
+  });
+
+  it("never exposes an approved verdict before finalized review readback", async () => {
+    const pending = finalizedReadback();
+    pending.reviewFinality!.status = "PENDING_PROTOCOL_FINALITY";
+    pending.reviewAttempt!.status = "PENDING_PROTOCOL_FINALITY";
+    mockWallet(pending);
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    await screen.findByRole("heading", { name: "Case summary" });
+    expect(screen.queryByText("APPROVED")).not.toBeInTheDocument();
+    expect(screen.queryByText("Approved")).not.toBeInTheDocument();
+  });
+
+  it("renders the command center in the approved operational order", async () => {
     mockWallet(finalizedReadback());
     render(<CaseDetail caseId={CASE_ID} />);
 
-    expect(
-      await screen.findByRole("heading", { name: /case summary/i }),
-    ).toBeVisible();
-    expect(
-      screen.getByRole("navigation", { name: "Case sections" }),
-    ).toBeVisible();
-    for (const name of ["Terms", "Evidence", "AI decision", "Settlement"]) {
-      expect(screen.getByRole("link", { name })).toBeVisible();
-      expect(screen.getByRole("region", { name })).toBeVisible();
-    }
-    expect(screen.getByText("Submitted")).toBeVisible();
-    expect(screen.getByText("Readback confirmed")).toBeVisible();
+    const summary = await screen.findByRole("region", { name: "Case summary" });
+    const progression = screen.getByRole("region", { name: "Case progression" });
+    const evidencePanel = screen.getByRole("region", { name: "Evidence workspace" });
+    const reviewPanel = screen.getByRole("region", { name: "Intelligent review" });
+    const accounting = screen.getByRole("region", { name: "Simulated escrow" });
+    const activity = screen.getByRole("region", { name: "Immutable activity" });
+
+    expect(summary.compareDocumentPosition(progression) & Node.DOCUMENT_POSITION_CONTAINED_BY).toBeTruthy();
+    expect(evidencePanel.compareDocumentPosition(reviewPanel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(reviewPanel.compareDocumentPosition(accounting) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(accounting.compareDocumentPosition(activity) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("moves keyboard focus to each case section after its hash link activates", async () => {
-    mockWallet(finalizedReadback());
+  it("places the single authoritative action immediately after the keyboard-focusable stepper", async () => {
+    const readback = evidenceOpenReadback(true);
+    const reviewContext = readyReviewContext();
+    readback.case.reviewContextReady = true;
+    readback.case.reviewContextHash = reviewContext.contextHash;
+    mockWallet(readback, {
+      contract: { requestReview: vi.fn() },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      reviewContext,
+    });
     const user = userEvent.setup();
     render(<CaseDetail caseId={CASE_ID} />);
 
-    const lifecycle = await screen.findByRole("list", {
-      name: "Case lifecycle",
-    });
-    const navigation = screen.getByRole("navigation", {
-      name: "Case sections",
-    });
-    const escapeControl = within(
-      screen.getByRole("region", { name: "Settlement" }),
-    ).getByRole("button", { name: "Prepare settlement" });
-    const sections = [
-      ["Terms", "terms"],
-      ["Evidence", "evidence"],
-      ["AI decision", "decision"],
-      ["Settlement", "settlement"],
-    ] as const;
-
-    lifecycle.focus();
-    for (const [name] of sections) {
-      await user.tab();
-      expect(within(navigation).getByRole("link", { name })).toHaveFocus();
-    }
+    const stepper = await screen.findByRole("list", { name: "Case lifecycle" });
+    stepper.focus();
     await user.tab();
-    expect(escapeControl).toHaveFocus();
 
-    for (const [index, [name, id]] of sections.entries()) {
-      lifecycle.focus();
-      for (let step = 0; step <= index; step++) await user.tab();
-
-      const link = within(navigation).getByRole("link", { name });
-      expect(link).toHaveAttribute("href", `#${id}`);
-      expect(link).toHaveFocus();
-
-      await user.keyboard("{Enter}");
-
-      const target = screen.getByRole("region", { name });
-      await waitFor(() => expect(window.location.hash).toBe(`#${id}`));
-      await waitFor(() => expect(target).toHaveFocus());
-
-      await user.tab();
-      expect(escapeControl).toHaveFocus();
-    }
+    expect(
+      screen.getByRole("button", { name: "Request intelligent review" }),
+    ).toHaveFocus();
   });
 
   it("keeps the initial readback error under a page H1", async () => {
@@ -336,7 +660,7 @@ describe("case detail document layout", () => {
     const status = screen.getByRole("status");
     expect(status).toHaveAttribute("data-tone", "warning");
     expect(status).not.toHaveAttribute("data-tone", "success");
-    expect(screen.getByText("Accepted")).toHaveAttribute(
+    expect(screen.getByText("Consensus pending")).toHaveAttribute(
       "aria-current",
       "step",
     );
@@ -364,7 +688,9 @@ describe("case detail document layout", () => {
       dispatchedPayouts: 0n,
       dispatchedRefunds: 0n,
     };
-    mockWallet(readback);
+    mockWallet(readback, {
+      contract: { executeSettlement: vi.fn() },
+    });
 
     render(<CaseDetail caseId={CASE_ID} />);
 
@@ -400,31 +726,29 @@ describe("case detail document layout", () => {
     );
     expect(
       screen.getAllByText(/six exact current-epoch evidence types/i),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
-  it("hides the seal action for a wrong wallet and lets the user change wallets", async () => {
-    const changeAccount = vi.fn().mockResolvedValue(undefined);
+  it("disables the seal action for a wrong wallet without duplicating the header wallet control", async () => {
     mockWallet(evidenceOpenReadback(), {
       address: VENDOR,
-      changeAccount,
       evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
     });
-    const user = userEvent.setup();
 
     render(<CaseDetail caseId={CASE_ID} />);
 
-    await screen.findByText("Evidence trail");
+    await screen.findByRole("heading", { name: "Evidence workspace" });
     expect(
-      screen.queryByRole("button", {
+      screen.getByRole("button", {
         name: "Close evidence & enable review",
       }),
-    ).not.toBeInTheDocument();
+    ).toBeDisabled();
     expect(
-      screen.getByText(/connect the buyer wallet to close evidence/i),
+      screen.getAllByText(/vendor wallet.*buyer wallet/i)[0],
     ).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Change wallet" }));
-    expect(changeAccount).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("button", { name: "Change wallet" }),
+    ).not.toBeInTheDocument();
   });
 
   it("enables the seal action only for the complete authoritative current epoch", async () => {
@@ -496,89 +820,14 @@ describe("case detail document layout", () => {
       "SCREENSHOT",
     );
     expect(screen.getByText(/expired evidence types/i)).toHaveTextContent(
-      /cannot be replaced in this epoch.*wait for cutoff review.*bounded cure\/new epoch.*timeout recovery/i,
+      /remain immutable in this epoch.*bounded recovery.*contract lifecycle/i,
     );
     expect(screen.getByText(/expired evidence types/i)).not.toHaveTextContent(
       /replace them with fresh current-epoch evidence/i,
     );
   });
 
-  it.each([
-    ["before", 2_999, false, /1 second until the evidence cutoff/i],
-    ["at", 3_000, false, /cutoff reached.*confirming.*finalized contract time/i],
-    ["after", 3_001, true, /finalized contract time confirms.*cutoff has passed/i],
-  ] as const)(
-    "uses the authoritative contract clock %s the unsealed cutoff",
-    async (_position, readAt, enabled, statusCopy) => {
-      const readback = evidenceOpenReadback();
-      readback.case.createdAt = 1_000;
-      readback.case.evidenceCutoff = 3_000;
-      readback.case.readAt = readAt;
-      readback.case.hardDeadline = 4_000;
-      mockWallet(readback, {
-        contract: { requestReview: vi.fn() },
-        evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
-      });
-
-      render(<CaseDetail caseId={CASE_ID} />);
-
-      const buttons = await screen.findAllByRole("button", {
-        name: "Request intelligent review",
-      });
-      for (const button of buttons) {
-        if (enabled) expect(button).toBeEnabled();
-        else expect(button).toBeDisabled();
-      }
-      expect(screen.getByText(statusCopy)).toBeVisible();
-    },
-  );
-
-  it("keeps review disabled at the exact cutoff and enables only after a refreshed contract clock passes it", async () => {
-    const before = evidenceOpenReadback();
-    before.case.createdAt = 1_000;
-    before.case.evidenceCutoff = 3_000;
-    before.case.readAt = 2_999;
-    before.case.hardDeadline = 4_000;
-    const exact = structuredClone(before);
-    exact.case.readAt = 3_000;
-    const after = structuredClone(before);
-    after.case.readAt = 3_001;
-    const reader = mockWallet(before, {
-      contract: { requestReview: vi.fn() },
-      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
-    });
-    reader.readCase
-      .mockResolvedValueOnce(before.case)
-      .mockResolvedValueOnce(exact.case)
-      .mockResolvedValue(after.case);
-    const user = userEvent.setup();
-
-    render(<CaseDetail caseId={CASE_ID} />);
-
-    expect(
-      (await screen.findAllByRole("button", {
-        name: "Request intelligent review",
-      }))[0],
-    ).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Refresh readback" }));
-    await waitFor(() =>
-      expect(
-        screen.getAllByRole("button", {
-          name: "Request intelligent review",
-        })[0],
-      ).toBeDisabled(),
-    );
-    await user.click(screen.getByRole("button", { name: "Refresh readback" }));
-    await waitFor(() =>
-      expect(
-        screen.getAllByRole("button", {
-          name: "Request intelligent review",
-        })[0],
-      ).toBeEnabled(),
-    );
-  });
-
-  it("keeps both sealed and fallback review disabled at the exact hard deadline", async () => {
+  it("keeps sealed review disabled at the exact hard deadline", async () => {
     const sealed = evidenceOpenReadback(true);
     sealed.case.createdAt = 1_000;
     sealed.case.evidenceCutoff = 3_000;
@@ -596,7 +845,7 @@ describe("case detail document layout", () => {
     }))
       expect(button).toBeDisabled();
     expect(
-      screen.getByText(/hard deadline has expired.*timeout recovery may apply/i),
+      screen.getByText(/contract clock has reached the hard deadline/i),
     ).toBeVisible();
   });
 
@@ -622,7 +871,6 @@ describe("case detail document layout", () => {
       sdk: { waitForTransactionReceipt },
     });
     const user = userEvent.setup();
-
     render(<CaseDetail caseId={CASE_ID} />);
     await user.click(
       await screen.findByRole("button", {
@@ -658,7 +906,7 @@ describe("case detail document layout", () => {
       statusName: "ACCEPTED",
       txExecutionResultName: "FINISHED_WITH_RETURN",
     });
-    expect(await screen.findByText(/accepted by validators/i)).toBeVisible();
+    expect(await screen.findByText(/validators accepted the transaction/i)).toBeVisible();
   });
 
   it("restores a bound persisted seal hash through submitted and consensus states without sending again", async () => {
@@ -694,7 +942,7 @@ describe("case detail document layout", () => {
         txExecutionResultName: "FINISHED_WITH_RETURN",
       });
     });
-    expect(await screen.findByText(/accepted by validators/i)).toBeVisible();
+    expect(await screen.findByText(/validators accepted the transaction/i)).toBeVisible();
     expect(closeEvidence).not.toHaveBeenCalled();
   });
 
@@ -721,7 +969,7 @@ describe("case detail document layout", () => {
     render(<CaseDetail caseId={CASE_ID} />);
 
     expect(
-      await screen.findByRole("heading", { name: "Transaction undetermined" }),
+      await screen.findByRole("heading", { name: "Transaction validators timeout" }),
     ).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Retry transaction status" }),
@@ -774,7 +1022,9 @@ describe("case detail document layout", () => {
     expect(
       await screen.findByRole("button", { name: "Retry transaction status" }),
     ).toBeEnabled();
-    expect(screen.getByText(/receipt rpc unavailable/i)).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Transaction rpc error" }),
+    ).toBeVisible();
     expect(closeEvidence).toHaveBeenCalledTimes(1);
     expect(
       JSON.parse(
@@ -850,15 +1100,21 @@ describe("case detail document layout", () => {
     );
   });
 
-  it("reuses a restored finalized seal hash for readback retry without a duplicate send", async () => {
+  it("does not confirm an arbitrary persisted finalized-success hash for an already sealed case", async () => {
     const hash = `0x${"c".repeat(64)}` as Hash;
-    const opened = evidenceOpenReadback();
     const sealed = evidenceOpenReadback(true);
     const closeEvidence = vi.fn();
     persistPendingSeal(hash);
-    const reader = mockWallet(opened, {
+    mockWallet(sealed, {
       contract: { closeEvidence },
       evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      config: {
+        network: "studionet",
+        chainId: 61999,
+        contractChainId: 1,
+        contractAddress: `0x${"4".repeat(40)}`,
+        explorerBaseUrl: "https://studio.genlayer.com",
+      },
       sdk: {
         waitForTransactionReceipt: vi.fn().mockResolvedValue({
           statusName: "FINALIZED",
@@ -866,20 +1122,45 @@ describe("case detail document layout", () => {
         }),
       },
     });
-    const user = userEvent.setup();
 
     render(<CaseDetail caseId={CASE_ID} />);
 
     expect(
-      await screen.findByText(/waiting for sealed evidence readback/i),
+      await screen.findByRole("heading", {
+        name: "Transaction readback mismatch",
+      }),
     ).toBeVisible();
     expect(closeEvidence).not.toHaveBeenCalled();
     expect(
-      screen.getByRole("button", { name: "Close evidence & enable review" }),
-    ).toBeDisabled();
+      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+    ).toContain(hash);
+  });
 
-    reader.readCase.mockResolvedValue(sealed.case);
-    await user.click(screen.getByRole("button", { name: "Refresh readback" }));
+  it("confirms a persisted sealed recovery only with configured-chain close evidence proof", async () => {
+    const hash = `0x${"c".repeat(64)}` as Hash;
+    const sealed = evidenceOpenReadback(true);
+    const closeEvidence = vi.fn();
+    persistPendingSeal(hash);
+    mockWallet(sealed, {
+      contract: { closeEvidence },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      config: {
+        network: "studionet",
+        chainId: 61999,
+        contractChainId: 1,
+        contractAddress: `0x${"4".repeat(40)}`,
+        explorerBaseUrl: "https://studio.genlayer.com",
+      },
+      recoveryTransaction: actualCloseEvidenceTransaction(hash),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
 
     expect(
       await screen.findByRole("heading", {
@@ -890,6 +1171,63 @@ describe("case detail document layout", () => {
     expect(
       localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
     ).toBeNull();
+  });
+
+  it("does not bypass a persisted sealed recovery on the wrong configured chain", async () => {
+    const hash = `0x${"d".repeat(64)}` as Hash;
+    persistPendingSeal(hash);
+    mockWallet(evidenceOpenReadback(true), {
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      config: {
+        network: "localnet",
+        chainId: 61127,
+        contractChainId: 1,
+        contractAddress: `0x${"4".repeat(40)}`,
+        explorerBaseUrl: null,
+      },
+      recoveryTransaction: actualCloseEvidenceTransaction(hash),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback mismatch",
+      }),
+    ).toBeVisible();
+    expect(localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`)).toContain(hash);
+  });
+
+  it("keeps a persisted seal hash recoverable when its authoritative state is not sealed", async () => {
+    const hash = `0x${"e".repeat(64)}` as Hash;
+    const closeEvidence = vi.fn();
+    persistPendingSeal(hash);
+    mockWallet(evidenceOpenReadback(), {
+      contract: { closeEvidence },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback mismatch",
+      }),
+    ).toBeVisible();
+    expect(closeEvidence).not.toHaveBeenCalled();
+    expect(localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`)).not.toBeNull();
   });
 
   it("does not let a late pre-seal refresh overwrite a newer sealed readback", async () => {
@@ -987,20 +1325,26 @@ describe("case detail document layout", () => {
     );
 
     expect(
-      await screen.findByText(/waiting for sealed evidence readback/i),
-    ).toBeVisible();
-    expect(
-      screen
-        .getByRole("heading", { name: "Transaction finalized" })
+      (await screen.findByRole("heading", {
+        name: "Transaction readback mismatch",
+      }))
         .closest("[role='status']"),
-    ).not.toHaveAttribute("data-tone", "success");
+    ).toHaveAttribute("data-tone", "danger");
     expect(
       screen.getByRole("button", { name: "Close evidence & enable review" }),
     ).toBeDisabled();
     expect(
+      screen.getByRole("button", { name: "Retry transaction status" }),
+    ).toBeEnabled();
+    expect(
+      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+    ).toContain(`0x${"b".repeat(64)}`);
+    expect(
       screen.getByRole("button", { name: "Refresh readback" }),
     ).toBeEnabled();
-    expect(screen.getByText(/fallback review path/i)).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Close evidence & enable review" }),
+    ).toBeDisabled();
     await act(async () => {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     });
@@ -1072,12 +1416,16 @@ describe("case detail document layout", () => {
         name: "Close evidence & enable review",
       }),
     );
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Finalized seal readback offline",
-    );
+    expect(
+      await screen.findByRole("heading", { name: "Transaction rpc error" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Retry transaction status" }),
+    ).toBeEnabled();
 
-    await user.click(screen.getByRole("button", { name: "Retry readback" }));
-    await waitFor(() => expect(reader.readCase).toHaveBeenCalledTimes(3));
+    await user.click(
+      screen.getByRole("button", { name: "Retry transaction status" }),
+    );
     expect(closeEvidence).toHaveBeenCalledTimes(1);
     expect(
       await screen.findByRole("heading", {
@@ -1089,13 +1437,19 @@ describe("case detail document layout", () => {
   it("reconstructs a sealed readback without local state and enables immediate review", async () => {
     localStorage.clear();
     mockWallet(evidenceOpenReadback(true), {
+      contract: { requestReview: vi.fn() },
       evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
     });
 
     render(<CaseDetail caseId={CASE_ID} />);
 
     expect(await screen.findByText("Evidence sealed")).toBeVisible();
-    expect(screen.getByText("evidence sealed").closest("li")).toHaveAttribute(
+    const lifecycle = screen.getByRole("list", { name: "Case lifecycle" });
+    expect(within(lifecycle).getByText("Evidence sealed").closest("li")).toHaveAttribute(
+      "data-state",
+      "complete",
+    );
+    expect(within(lifecycle).getByText("AI review").closest("li")).toHaveAttribute(
       "aria-current",
       "step",
     );
@@ -1188,7 +1542,9 @@ describe("case detail document layout", () => {
     expect(button).toBeEnabled();
 
     await user.click(button);
-    expect(await screen.findByText(/execution error/i)).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "Transaction execution error" }),
+    ).toBeVisible();
     expect(button).toBeEnabled();
   });
 });

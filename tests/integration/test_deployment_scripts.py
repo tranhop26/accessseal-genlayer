@@ -3,12 +3,17 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from shutil import rmtree
 
 def test_real_genlayerjs_local_deploy_source_schema_and_accounting_readback(
     glsim_server,
 ):
     proof_path = Path("work/evidence/task7-local-deployment.json")
     proof_path.unlink(missing_ok=True)
+    # A localnet address is deterministic for the fixture key and fresh GLSim
+    # seed.  Clear only ignored test output so a prior interrupted run cannot
+    # masquerade as a production manifest collision.
+    rmtree(Path("work/deployments/localnet/v4"), ignore_errors=True)
     completed = subprocess.run(
         ["node", "--import", "tsx", "tests/scripts/local-deployment-proof.ts"],
         check=False,
@@ -20,7 +25,7 @@ def test_real_genlayerjs_local_deploy_source_schema_and_accounting_readback(
     proof = json.loads(proof_path.read_text(encoding="utf-8"))
     manifests = [
         (path, json.loads(path.read_text(encoding="utf-8")))
-        for path in Path("work/deployments/localnet/v3").glob("*/*.json")
+        for path in Path("work/deployments/localnet/v4").glob("*/*.json")
     ]
     matching_manifests = [
         (path, manifest)
@@ -30,9 +35,9 @@ def test_real_genlayerjs_local_deploy_source_schema_and_accounting_readback(
     assert len(matching_manifests) == 1
     manifest_path, manifest = matching_manifests[0]
     assert manifest_path.parent.name == manifest["deploymentArtifactSha256"]
-    assert manifest_path.parent.parent.name == "v3"
+    assert manifest_path.parent.parent.name == "v4"
     assert manifest_path.name == f'{manifest["contractAddress"]}.json'
-    assert manifest["contractVersion"] == "V3"
+    assert manifest["contractVersion"] == "V4"
     assert proof["schemaVersion"] == "accessseal-local-deployment-proof/1"
     assert proof["network"] == "localnet"
     assert proof["chainId"] == 61127

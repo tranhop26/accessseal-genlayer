@@ -3,7 +3,7 @@ from hashlib import sha256
 
 import pytest
 
-from test_adjudication import open_reviewable_case
+from test_adjudication import open_reviewable_case, semantic_only_candidate
 
 
 PROFILE_HASH = "0x" + "11" * 32
@@ -1252,10 +1252,15 @@ def test_open_requires_release_manifest_and_bounded_nonce(
 
 
 def test_buyer_seals_exact_complete_fresh_evidence_profile_before_cutoff(
-    contract, direct_vm, buyer, vendor
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
 ):
-    case_id = funded_case(contract, direct_vm, buyer, vendor)
-    open_complete_early_seal_profile(contract, case_id, vendor)
+    case_id, release = complete_v4_case(contract, buyer, vendor)
+    v4_web_routes(release)
 
     contract.as_(buyer).close_evidence(case_id)
 
@@ -1370,9 +1375,15 @@ def test_early_seal_rejects_manifestless_cure_epoch_without_mutation(
         direct_vm,
         buyer,
         vendor,
-        supporting_evidence=("HTML_BUNDLE",),
         salt="manifestless-cure-epoch",
     )
+    direct_vm._live_llm_handler = lambda _data: {
+        "ok": semantic_only_candidate(
+            "REQUEST_MORE_INFO",
+            missing=["SCREENSHOT"],
+            rationale="The sealed screenshot evidence needs clarification.",
+        )
+    }
     contract.request_review(case_id)
     finality = json.loads(contract.get_review_finality(case_id))
     self_address = Address(contract.get_case_json(case_id)["contractAddress"])
@@ -1426,10 +1437,15 @@ def test_close_evidence_rejects_hard_deadline_without_mutating_readback(
 
 
 def test_close_evidence_rejects_second_close_without_mutating_readback(
-    contract, direct_vm, buyer, vendor
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
 ):
-    case_id = funded_case(contract, direct_vm, buyer, vendor)
-    open_complete_early_seal_profile(contract, case_id, vendor)
+    case_id, release = complete_v4_case(contract, buyer, vendor)
+    v4_web_routes(release)
     contract.as_(buyer).close_evidence(case_id)
     before = case_evidence_and_accounting(contract, case_id)
 
@@ -1442,10 +1458,15 @@ def test_close_evidence_rejects_second_close_without_mutating_readback(
 
 
 def test_append_rejects_after_early_seal_without_mutating_readback(
-    contract, direct_vm, buyer, vendor
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
 ):
-    case_id = funded_case(contract, direct_vm, buyer, vendor)
-    open_complete_early_seal_profile(contract, case_id, vendor)
+    case_id, release = complete_v4_case(contract, buyer, vendor)
+    v4_web_routes(release)
     contract.as_(buyer).close_evidence(case_id)
     appended = envelope_for(
         contract,

@@ -652,7 +652,7 @@ describe("authoritative cases dashboard", () => {
       screen.getByRole("button", { name: "Read from contract" }),
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Enter a case ID in the form sha256: followed by 64 lowercase hexadecimal characters.",
+      "Enter a lowercase 0x or sha256: case ID followed by 64 hexadecimal characters.",
     );
     expect(localStorage.getItem("accessseal.case-ids.v1")).toBeNull();
 
@@ -672,6 +672,22 @@ describe("authoritative cases dashboard", () => {
     );
     expect(JSON.parse(localStorage.getItem("accessseal.case-ids.v1")!)).toEqual(
       [caseIds.funded],
+    );
+  });
+
+  it("retains a finalized lowercase 0x contract case ID for dashboard readback", async () => {
+    const contractCaseId = `0x${"e".repeat(64)}`;
+    localStorage.setItem(
+      "accessseal.case-ids.v1",
+      JSON.stringify([contractCaseId]),
+    );
+
+    render(<CasesDashboard />);
+
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("table")).getByText(contractCaseId),
+      ).toBeVisible(),
     );
   });
 });

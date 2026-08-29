@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { deflateSync } from "node:zlib";
 import test from "node:test";
+import * as schema from "../../scripts/live-evidence-schema.ts";
 import {
   LIVE_EVIDENCE_BINDING,
   PAYLOAD_SPECS,
@@ -7,7 +10,9 @@ import {
   buildReleaseManifest,
   canonicalJson,
   sha256,
+  validateLiveEvidenceBinding,
   validateLiveCapture,
+  verifyPayload,
   verifyEvidenceBundle,
   type EvidencePayloads,
   type LiveCapture,
@@ -126,6 +131,150 @@ function payloadsFromCapture(capture: LiveCapture = makeCapture()): EvidencePayl
   };
 }
 
+function pngBytes(byteLength: number): Buffer {
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(byteLength - 8, 0),
+  ]);
+}
+
+function crc32(bytes: Uint8Array): number {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let index = 0; index < 8; index += 1) value = (value >>> 1) ^ (-(value & 1) & 0xedb88320);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Uint8Array): Buffer {
+  const chunk = Buffer.alloc(12 + data.byteLength);
+  chunk.writeUInt32BE(data.byteLength, 0);
+  chunk.write(type, 4, "ascii");
+  Buffer.from(data).copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(chunk.subarray(4, 8 + data.byteLength)), 8 + data.byteLength);
+  return chunk;
+}
+
+function validPng(byteLength?: number): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(320, 0);
+  header.writeUInt32BE(180, 4);
+  header[8] = 8;
+  header[9] = 0;
+  const pixels = Buffer.alloc((320 + 1) * 180);
+  const base = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(pixels)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+  if (byteLength === undefined) return base;
+  return Buffer.concat([
+    base.subarray(0, -12),
+    pngChunk("tEXt", Buffer.alloc(byteLength - base.byteLength - 12, 0x61)),
+    base.subarray(-12),
+  ]);
+}
+
+function v4Options(screenshot: Uint8Array) {
+  const { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
+  return {
+    binding: {
+      caseId,
+      caseCreatedAt,
+      chainId,
+      contract,
+      epoch,
+      evidenceDeadlineSeconds,
+      flowsHash,
+      hardDeadlineSeconds,
+      profileVersion,
+      sourceCommit,
+      subjectOrigin,
+      vendor,
+      casePath: `/cases/${caseId}`,
+      auditedPageUrls: [`${subjectOrigin}/cases`, `${subjectOrigin}/cases/new`, `${subjectOrigin}/cases/${caseId}`],
+      criticalFlows: [
+        { id: "workspace-navigation", pageUrl: `${subjectOrigin}/cases`, checkpoints: ["skip-focused", "main-focused", "overview-navigation", "cases-navigation"] },
+        { id: "create-case-preview", pageUrl: `${subjectOrigin}/cases/new`, checkpoints: ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"] },
+        { id: "case-section-navigation", pageUrl: `${subjectOrigin}/cases/${caseId}`, checkpoints: ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"] },
+      ],
+      maxObservationAgeSeconds: 86_400,
+      maxEnvelopeLifetimeSeconds: 518_400,
+      replayDomain: "v4-candidate-replay",
+      profileHash: `0x${"0123456789abcdef".repeat(4)}`,
+      releaseId: "v4-candidate-20260828",
+    },
+    reviewImageSha256: `sha256:${sha256(screenshot)}`,
+  };
+}
+
+test("V4 semantic validation accepts only a capture bound to its distinct origin, case, flows, and timing", () => {
+  const screenshot = validPng();
+  const binding = {
+    ...v4Options(screenshot).binding,
+    caseId: "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    subjectOrigin: "https://v4-audited.example",
+    flowsHash: "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    caseCreatedAt: 1_900_000_000,
+    evidenceDeadlineSeconds: 7_200,
+    hardDeadlineSeconds: 14_400,
+    casePath: "/cases/0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    auditedPageUrls: [
+      "https://v4-audited.example/cases",
+      "https://v4-audited.example/cases/new",
+      "https://v4-audited.example/cases/0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    ],
+    criticalFlows: (v4Options(screenshot).binding.criticalFlows as Array<any>).map((flow, index) => ({
+      ...flow,
+      id: ["v4-workspace-run", "v4-create-run", "v4-case-run"][index],
+      pageUrl: [
+        "https://v4-audited.example/cases",
+        "https://v4-audited.example/cases/new",
+        "https://v4-audited.example/cases/0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      ][index],
+    })),
+  };
+  const payloads = payloadsFromCapture();
+  const domFacts = JSON.parse(Buffer.from(payloads.DOM_FACTS).toString("utf8")) as Record<string, unknown>;
+  const pages = domFacts.pages as Array<Record<string, unknown>>;
+  const urls = [
+    `${binding.subjectOrigin}/cases`,
+    `${binding.subjectOrigin}/cases/new`,
+    `${binding.subjectOrigin}/cases/${binding.caseId}`,
+  ];
+  domFacts.observedAt = binding.caseCreatedAt + 1;
+  domFacts.pages = pages.map((page, index) => ({ ...page, url: urls[index] }));
+  const scanner = JSON.parse(Buffer.from(payloads.SCANNER_REPORT).toString("utf8")) as Record<string, unknown>;
+  scanner.observedAt = binding.caseCreatedAt + 1;
+  scanner.scans = (scanner.scans as Array<Record<string, unknown>>).map((scan, index) => ({ ...scan, url: urls[index] }));
+  const trace = JSON.parse(Buffer.from(payloads.CRITICAL_FLOW_TRACE).toString("utf8")) as Record<string, unknown>;
+  trace.caseId = binding.caseId;
+  trace.flowsHash = binding.flowsHash;
+  trace.observedAt = binding.caseCreatedAt + 1;
+  trace.flows = (trace.flows as Array<Record<string, unknown>>).map((flow, flowIndex) => ({
+    ...flow,
+    id: ["v4-workspace-run", "v4-create-run", "v4-case-run"][flowIndex],
+    steps: (flow.steps as Array<Record<string, unknown>>).map((step) => ({ ...step, page: urls[flowIndex] })),
+  }));
+  const v4Payloads = {
+    ...payloads,
+    SCREENSHOT: screenshot,
+    DOM_FACTS: Buffer.from(canonicalJson(domFacts)),
+    SCANNER_REPORT: Buffer.from(canonicalJson(scanner)),
+    CRITICAL_FLOW_TRACE: Buffer.from(canonicalJson(trace)),
+  };
+  const options = {
+    binding,
+    reviewImageSha256: `sha256:${sha256(screenshot)}`,
+  };
+  assert.doesNotThrow(() => (schema as any).buildV4ReleaseManifest(v4Payloads, options));
+  assert.throws(() => (schema as any).buildV4ReleaseManifest({ ...v4Payloads, DOM_FACTS: payloads.DOM_FACTS }, options), /origin|URL/i);
+  assert.throws(() => (schema as any).buildV4ReleaseManifest({ ...v4Payloads, CRITICAL_FLOW_TRACE: payloads.CRITICAL_FLOW_TRACE }, options), /case|hash|flow/i);
+  assert.throws(() => (schema as any).buildV4ReleaseManifest({ ...payloads, SCREENSHOT: screenshot }, options), /origin|case|hash|flow/i);
+});
+
 test("canonicalJson sorts object keys recursively while preserving array order", () => {
   assert.equal(canonicalJson({ z: { b: 2, a: 1 }, a: [{ d: 4, c: 3 }, 0] }), '{"a":[{"c":3,"d":4},0],"z":{"a":1,"b":2}}');
 });
@@ -196,6 +345,76 @@ test("rejects individual and aggregate payload size overflow", () => {
     CRITICAL_FLOW_TRACE: Buffer.alloc(16_000, 0x61),
   };
   assert.throws(() => buildReleaseManifest(oversizedAggregate), /aggregate|total|size|bytes/i);
+});
+
+test("V4 accepts a structurally valid exact 16384-byte PNG and rejects 16385 bytes", () => {
+  const exact = validPng(16_384);
+  const overflow = validPng(16_385);
+  assert.equal(exact.byteLength, 16_384);
+  assert.equal(overflow.byteLength, 16_385);
+  assert.doesNotThrow(() => (schema as any).verifyV4Payload("SCREENSHOT", exact, v4Options(exact).binding));
+  assert.throws(
+    () => (schema as any).verifyV4Payload("SCREENSHOT", overflow, v4Options(overflow).binding),
+    /SCREENSHOT exceeds 16384 bytes/,
+  );
+});
+
+test("V4 production capture applies the configured screenshot limit to transient and staged outputs", () => {
+  const captureSource = readFileSync(new URL("../../frontend/e2e/live-evidence.capture.spec.ts", import.meta.url), "utf8");
+  assert.equal(schema.MAX_SCREENSHOT_BYTES, 16_384);
+  assert.match(captureSource, /statSync\(transientScreenshot\)\.size\)\.toBeLessThanOrEqual\(MAX_SCREENSHOT_BYTES\)/);
+  assert.match(captureSource, /statSync\(resolve\(stagingDirectory, "screenshot\.png"\)\)\.size\)\.toBeLessThanOrEqual\(MAX_SCREENSHOT_BYTES\)/);
+  assert.doesNotMatch(captureSource, /statSync\([^\n]+screenshot[^\n]+\)\.toBeLessThan\(MAX_SCREENSHOT_BYTES\)/);
+  assert.doesNotMatch(captureSource, /screenshot(?:\.png|Screenshot)?[^\n]*65_536/);
+});
+
+test("V4 rejects signature-only, truncated, and non-legible PNG screenshots", () => {
+  const actual = validPng();
+  for (const screenshot of [
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    actual.subarray(0, -1),
+  ]) {
+    assert.throws(() => (schema as any).verifyV4Payload("SCREENSHOT", screenshot, v4Options(screenshot).binding), /PNG|truncated|incomplete/i);
+  }
+});
+
+test("V4 rejects CRC-valid PNGs whose IDAT stream is empty or corrupt", () => {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(320, 0);
+  header.writeUInt32BE(180, 4);
+  header[8] = 8;
+  const emptyIdat = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk("IHDR", header), pngChunk("IDAT", Buffer.alloc(0)), pngChunk("IEND", Buffer.alloc(0))]);
+  const corruptIdat = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk("IHDR", header), pngChunk("IDAT", Buffer.from("not-deflate")), pngChunk("IEND", Buffer.alloc(0))]);
+  for (const screenshot of [emptyIdat, corruptIdat]) {
+    assert.throws(() => (schema as any).verifyV4Payload("SCREENSHOT", screenshot, v4Options(screenshot).binding), /IDAT|PNG|decode/i);
+  }
+});
+
+test("V4 manifest records the exact review-image path, hash, media type, and dimensions", () => {
+  const screenshot = validPng();
+  const payloads = { ...payloadsFromCapture(), SCREENSHOT: screenshot };
+  const built = (schema as any).buildV4ReleaseManifest(payloads, v4Options(screenshot));
+  assert.equal(built.manifest.schemaVersion, "accessseal-release-manifest/2");
+  assert.deepEqual(built.manifest.reviewImage, {
+    path: "/evidence/releases/v4-candidate-20260828/screenshot.png",
+    mediaType: "image/png",
+    sha256: `sha256:${sha256(screenshot)}`,
+    width: 320,
+    height: 180,
+  });
+  assert.doesNotThrow(() => (schema as any).verifyV4EvidenceBundle(built.bytes, payloads, v4Options(screenshot)));
+});
+
+test("rejects empty and repeated-hex V4 evidence binding identifiers", () => {
+  assert.doesNotThrow(() => validateLiveEvidenceBinding());
+  for (const binding of [
+    { ...LIVE_EVIDENCE_BINDING, caseId: "" },
+    { ...LIVE_EVIDENCE_BINDING, caseId: `0x${"a".repeat(64)}` },
+    { ...LIVE_EVIDENCE_BINDING, contract: `0x${"b".repeat(40)}` },
+    { ...LIVE_EVIDENCE_BINDING, sourceCommit: "c".repeat(40) },
+  ]) {
+    assert.throws(() => validateLiveEvidenceBinding(binding), /non-empty|canonical|repeated hexadecimal/i);
+  }
 });
 
 test("rejects an aggregate exactly at the exclusive 131072-byte boundary", () => {

@@ -17,6 +17,7 @@ import {
   type PublicConfig,
   type PublicNetwork,
 } from "@/lib/config";
+import type { TransactionFailureKind } from "@/lib/transactions";
 
 export function selectGenLayerChain(network: PublicNetwork) {
   if (network === "testnet_bradbury") return testnetBradbury;
@@ -76,7 +77,9 @@ type WalletContextValue = {
   sdk: ReturnType<typeof createClient> | null;
   config: PublicConfig | null;
   connect(): Promise<void>;
-  changeAccount(): Promise<void>;
+  changeAccount(): Promise<
+    Extract<TransactionFailureKind, "WALLET_REJECTED" | "RPC_ERROR"> | null
+  >;
   disconnect(): void;
 };
 const empty: WalletContextValue = {
@@ -88,7 +91,7 @@ const empty: WalletContextValue = {
   sdk: null,
   config: null,
   connect: async () => undefined,
-  changeAccount: async () => undefined,
+  changeAccount: async () => null,
   disconnect: () => undefined,
 };
 const WalletContext = createContext<WalletContextValue>(empty);
@@ -117,6 +120,16 @@ export function classifyWalletError(error: unknown): {
     status: "disconnected",
     message: "Wallet connection failed. Check the wallet and try again.",
   };
+}
+export function classifyWalletChangeFailure(
+  error: unknown,
+): Extract<TransactionFailureKind, "WALLET_REJECTED" | "RPC_ERROR"> {
+  return error &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === 4001
+    ? "WALLET_REJECTED"
+    : "RPC_ERROR";
 }
 
 export function WalletProvider({
@@ -176,7 +189,7 @@ export function WalletProvider({
       const provider = (window as unknown as { ethereum?: Provider }).ethereum;
       if (!provider) throw new Error("wallet provider unavailable");
       const account = await requestWalletAccount(provider, "change");
-      if (switchVersion.current !== version) return;
+      if (switchVersion.current !== version) return null;
       switchCandidate.current = account;
       const next = createClient({
         chain,
@@ -184,15 +197,16 @@ export function WalletProvider({
         provider: provider as never,
       });
       await next.connect(sdkNetworkName(config.network));
-      if (switchVersion.current !== version) return;
+      if (switchVersion.current !== version) return null;
       activeAddress.current = account;
       switching.current = false;
       switchCandidate.current = null;
       setSdk(next);
       setAddress(account);
       setStatus("connected");
+      return null;
     } catch (cause) {
-      if (switchVersion.current !== version) return;
+      if (switchVersion.current !== version) return null;
       activeAddress.current = previousAddress;
       switching.current = false;
       switchCandidate.current = null;
@@ -206,11 +220,12 @@ export function WalletProvider({
       ) {
         setStatus("connected");
         setError("Wallet change was cancelled. The previous wallet remains connected.");
-        return;
+        return "WALLET_REJECTED";
       }
       const classified = classifyWalletError(cause);
       setStatus(previousSdk && previousAddress ? "connected" : classified.status);
       setError(classified.message);
+      return classifyWalletChangeFailure(cause);
     }
   }, [address, chain, config.network, sdk]);
   const disconnect = useCallback(() => {

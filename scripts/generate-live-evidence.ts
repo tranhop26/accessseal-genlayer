@@ -7,11 +7,17 @@ import {
   PAYLOAD_SPECS,
   RELEASE_MANIFEST_PATH,
   buildReleaseManifest,
+  buildV4ReleaseManifest,
   sha256,
   verifyEvidenceBundle,
+  verifyV4EvidenceBundle,
+  v4PayloadSpecs,
+  v4ReleaseManifestPath,
   type EvidencePayloads,
   type EvidenceType,
   type ReleaseManifestV1,
+  type ReleaseManifestV4,
+  type V4EvidenceOptions,
 } from "./live-evidence-schema.ts";
 
 const CAPTURE_FILES: Readonly<Record<EvidenceType, string>> = Object.freeze({
@@ -22,6 +28,7 @@ const CAPTURE_FILES: Readonly<Record<EvidenceType, string>> = Object.freeze({
   CRITICAL_FLOW_TRACE: "critical-flow-trace.json",
 });
 type PlannedWrite = { path: string; bytes: Buffer };
+export type LiveEvidenceBundleOptions = { v4?: V4EvidenceOptions };
 
 async function stat(path: string) {
   try {
@@ -187,13 +194,19 @@ async function installMissingOutputs(publicRoot: string, writes: readonly Planne
   }
 }
 
-export async function generateLiveEvidenceBundle(inputDirectory: string, publicDirectory: string) {
+function releaseLayout(options: LiveEvidenceBundleOptions) {
+  if (options.v4 === undefined) return { specs: PAYLOAD_SPECS, manifestPath: RELEASE_MANIFEST_PATH, releaseId: LIVE_EVIDENCE_BINDING.releaseId, sourceCommit: LIVE_EVIDENCE_BINDING.sourceCommit };
+  return { specs: v4PayloadSpecs(options.v4.binding), manifestPath: v4ReleaseManifestPath(options.v4.binding), releaseId: options.v4.binding.releaseId, sourceCommit: options.v4.binding.sourceCommit };
+}
+
+export async function generateLiveEvidenceBundle(inputDirectory: string, publicDirectory: string, options: LiveEvidenceBundleOptions = {}) {
   const payloads = await readPayloads(inputDirectory);
-  const built = buildReleaseManifest(payloads);
+  const built = options.v4 === undefined ? buildReleaseManifest(payloads) : buildV4ReleaseManifest(payloads, options.v4);
+  const layout = releaseLayout(options);
   const publicRoot = await safePublicRoot(publicDirectory);
-  const payloadWrites = (Object.entries(PAYLOAD_SPECS) as Array<[EvidenceType, (typeof PAYLOAD_SPECS)[EvidenceType]]>)
+  const payloadWrites = (Object.entries(layout.specs) as Array<[EvidenceType, { path: string }]>)
     .map(([evidenceType, spec]) => ({ path: join(publicRoot, spec.path.slice(1)), bytes: Buffer.from(payloads[evidenceType]) }));
-  const manifestWrite = { path: join(publicRoot, RELEASE_MANIFEST_PATH.slice(1)), bytes: built.bytes };
+  const manifestWrite = { path: join(publicRoot, layout.manifestPath.slice(1)), bytes: built.bytes };
   const writes = [...payloadWrites, manifestWrite];
 
   await removeAbandonedStagingFiles(publicRoot, writes);
@@ -202,34 +215,33 @@ export async function generateLiveEvidenceBundle(inputDirectory: string, publicD
   await installMissingOutputs(publicRoot, [manifestWrite]);
 
   return {
-    releaseId: LIVE_EVIDENCE_BINDING.releaseId,
+    releaseId: layout.releaseId,
     releaseDigest: built.releaseDigest,
-    sourceCommit: LIVE_EVIDENCE_BINDING.sourceCommit,
+    sourceCommit: layout.sourceCommit,
     files: writes.map((write) => write.path),
   };
 }
 
 export type VerifiedPublicEvidence = {
-  manifest: ReleaseManifestV1;
+  manifest: ReleaseManifestV1 | ReleaseManifestV4;
   manifestBytes: Buffer;
   payloads: EvidencePayloads;
   releaseDigest: `sha256:${string}`;
 };
 
-export async function verifyPublicEvidence(publicDirectory: string): Promise<VerifiedPublicEvidence> {
+export async function verifyPublicEvidence(publicDirectory: string, options: LiveEvidenceBundleOptions = {}): Promise<VerifiedPublicEvidence> {
   const publicRoot = await safeExistingPublicRoot(publicDirectory);
-  const manifestPath = join(publicRoot, RELEASE_MANIFEST_PATH.slice(1));
+  const layout = releaseLayout(options);
+  const manifestPath = join(publicRoot, layout.manifestPath.slice(1));
   await assertSafeOutputPath(publicRoot, manifestPath);
   const payloads = {} as EvidencePayloads;
-  for (const [evidenceType, spec] of Object.entries(PAYLOAD_SPECS) as Array<
-    [EvidenceType, (typeof PAYLOAD_SPECS)[EvidenceType]]
-  >) {
+  for (const [evidenceType, spec] of Object.entries(layout.specs) as Array<[EvidenceType, { path: string }]>) {
     const payloadPath = join(publicRoot, spec.path.slice(1));
     await assertSafeOutputPath(publicRoot, payloadPath);
     payloads[evidenceType] = await readFile(payloadPath);
   }
   const manifestBytes = await readFile(manifestPath);
-  const manifest = verifyEvidenceBundle(manifestBytes, payloads);
+  const manifest = options.v4 === undefined ? verifyEvidenceBundle(manifestBytes, payloads) : verifyV4EvidenceBundle(manifestBytes, payloads, options.v4);
   return {
     manifest,
     manifestBytes,
@@ -245,13 +257,29 @@ function argument(name: string): string {
   return value;
 }
 
+async function v4OptionsFromArguments(): Promise<LiveEvidenceBundleOptions> {
+  const index = process.argv.indexOf("--v4-binding");
+  if (index < 0) return {};
+  const filename = process.argv[index + 1];
+  if (filename === undefined || filename.startsWith("--")) throw new Error("missing required argument --v4-binding");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(filename, "utf8"));
+  } catch {
+    throw new Error("V4 binding file must contain valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("V4 binding file must contain an object");
+  return { v4: parsed as V4EvidenceOptions };
+}
+
 async function main(): Promise<void> {
   const publicDirectory = argument("--public");
+  const options = await v4OptionsFromArguments();
   const verified = process.argv.includes("--verify")
-    ? await verifyPublicEvidence(publicDirectory)
+    ? await verifyPublicEvidence(publicDirectory, options)
     : undefined;
   const result = verified === undefined
-    ? await generateLiveEvidenceBundle(argument("--input"), publicDirectory)
+    ? await generateLiveEvidenceBundle(argument("--input"), publicDirectory, options)
     : { releaseDigest: verified.releaseDigest, fileCount: verified.manifest.files.length };
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }

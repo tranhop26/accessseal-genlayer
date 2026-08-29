@@ -120,6 +120,8 @@ def test_new_case_exposes_initial_evidence_seal_state(
         "profileHash",
         "reserved",
         "readAt",
+        "reviewContextHash",
+        "reviewContextReady",
         "salt",
         "subjectOrigin",
         "termsHash",
@@ -129,6 +131,8 @@ def test_new_case_exposes_initial_evidence_seal_state(
     assert case["evidenceSealed"] is False
     assert case["evidenceSealedAt"] == 0
     assert case["evidenceSealedBy"] == "0x0000000000000000000000000000000000000000"
+    assert case["reviewContextHash"] == ""
+    assert case["reviewContextReady"] is False
 
 
 def test_case_readback_exposes_exact_authoritative_cutoff_clock_without_changing_terms(

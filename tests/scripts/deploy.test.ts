@@ -75,6 +75,7 @@ after(async () => rm(fixtureRepoRoot, { recursive: true, force: true }));
 function manifest(overrides: Partial<DeploymentManifest> = {}): DeploymentManifest {
   return {
     schemaVersion: "accessseal-deployment-manifest/2",
+    contractVersion: "V4",
     network: "studionet",
     chainId: 61999,
     contractAddress: address,
@@ -90,20 +91,20 @@ function manifest(overrides: Partial<DeploymentManifest> = {}): DeploymentManife
   };
 }
 
-function v3ManifestPath(value: DeploymentManifest): string {
+function v4ManifestPath(value: DeploymentManifest): string {
   return deploymentManifestPath(fixtureRepoRoot, {
     network: value.network,
-    contractVersion: "V3",
+    contractVersion: "V4",
     contractAddress: value.contractAddress,
     deploymentArtifactSha256: value.deploymentArtifactSha256,
   });
 }
 
-async function removeFixtureV3Manifest(): Promise<void> {
-  await rm(v3ManifestPath(manifest()), { force: true });
+async function removeFixtureV4Manifest(): Promise<void> {
+  await rm(v4ManifestPath(manifest()), { force: true });
 }
 
-async function writeRetainedV3Manifest(
+async function writeRetainedV4Manifest(
   repoRoot: string,
   directoryHash: string,
   filenameAddress: string,
@@ -114,14 +115,38 @@ async function writeRetainedV3Manifest(
     "work",
     "deployments",
     "studionet",
-    "v3",
+    "v4",
     directoryHash,
   );
   await mkdir(directory, { recursive: true });
   await writeFile(
     join(directory, `${filenameAddress.toLowerCase()}.json`),
-    `${JSON.stringify({ ...value, contractVersion: "V3" })}\n`,
+    `${JSON.stringify({ ...value, contractVersion: "V4" })}\n`,
   );
+}
+
+async function createInvalidFrozenSchemaFixture(): Promise<string> {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-invalid-frozen-schema-"));
+  await mkdir(join(repoRoot, "contracts"), { recursive: true });
+  await mkdir(join(repoRoot, "scripts"), { recursive: true });
+  const readable = new TextDecoder().decode(source);
+  await writeFile(
+    join(repoRoot, "contracts", "access_seal.py"),
+    `${readable}\n\n    @gl.public.view\n    def owner(self) -> str:\n        return \"forbidden\"\n`,
+  );
+  await copyFile(
+    resolve("scripts/build_contract_artifact.py"),
+    join(repoRoot, "scripts", "build_contract_artifact.py"),
+  );
+  await writeFile(join(repoRoot, ".gitignore"), "work/\n");
+  execFileSync("python", ["scripts/build_contract_artifact.py", "--write"], { cwd: repoRoot });
+  execFileSync("git", ["init", "-q"], { cwd: repoRoot });
+  execFileSync("git", ["config", "core.autocrlf", "false"], { cwd: repoRoot });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: repoRoot });
+  execFileSync("git", ["config", "user.name", "AccessSeal Test"], { cwd: repoRoot });
+  execFileSync("git", ["add", "."], { cwd: repoRoot });
+  execFileSync("git", ["commit", "-qm", "invalid frozen schema fixture"], { cwd: repoRoot });
+  return repoRoot;
 }
 
 function stagingEntries(names: string[]): string[] {
@@ -151,7 +176,7 @@ function client(overrides: Partial<DeploymentClient> = {}): DeploymentClient {
 }
 
 test("deploys only the compact artifact and binds both tracked source hashes", async () => {
-  await removeFixtureV3Manifest();
+  await removeFixtureV4Manifest();
   let submittedCode: Uint8Array | undefined;
   const result = await deployAccessSeal(
     client({
@@ -178,6 +203,24 @@ test("deploys only the compact artifact and binds both tracked source hashes", a
       sourceSha256: sourceHash(artifactSource),
     },
   );
+});
+
+test("accepts an addressless accepted receipt before final deployment readback", async () => {
+  await removeFixtureV4Manifest();
+  const result = await deployAccessSeal(
+    client({
+      waitForTransactionReceipt: async ({ status }) => status === "ACCEPTED"
+        ? {
+            status_name: "ACCEPTED",
+            tx_execution_result_name: "FINISHED_WITH_RETURN",
+            hash: txHash,
+            data: { contract_address: null },
+          }
+        : officialReceipt(),
+    }),
+    { network: "studionet", repoRoot: fixtureRepoRoot },
+  );
+  assert.equal(result.contractAddress, address);
 });
 
 function officialReceipt(
@@ -215,7 +258,7 @@ test("rejects missing and placeholder deployment addresses", () => {
   }
 });
 
-test("accepts only canonical network names and keeps manifest paths contained", () => {
+test("V4 accepts only canonical network names and keeps manifest paths contained", () => {
   assert.equal(validateNetworkName("testnet_bradbury"), "testnet_bradbury");
   for (const value of ["../studionet", "STUDIONET", "testnet/bradbury", "bradbury"]) {
     assert.throws(() => validateNetworkName(value), /network/i);
@@ -223,7 +266,7 @@ test("accepts only canonical network names and keeps manifest paths contained", 
   assert.equal(
     deploymentManifestPath("C:\\repo", {
       network: "studionet",
-      contractVersion: "V3",
+      contractVersion: "V4",
       contractAddress: address,
       deploymentArtifactSha256: sourceHash(artifactSource),
     }),
@@ -232,15 +275,33 @@ test("accepts only canonical network names and keeps manifest paths contained", 
       "work",
       "deployments",
       "studionet",
-      "v3",
+      "v4",
       sourceHash(artifactSource),
       `${address}.json`,
     ),
   );
+  assert.throws(
+    () => deploymentManifestPath("C:\\repo", {
+      network: "studionet",
+      contractVersion: "V3" as "V4",
+      contractAddress: address,
+      deploymentArtifactSha256: sourceHash(artifactSource),
+    }),
+    /contract version/i,
+  );
+  assert.throws(
+    () => deploymentManifestPath("C:\\repo", {
+      network: "studionet",
+      contractVersion: "V4",
+      contractAddress: address,
+      deploymentArtifactSha256: "a".repeat(64),
+    }),
+    /artifact.*hash/i,
+  );
 });
 
-test("writes V3 beside the historical V2 network manifest without changing V2 bytes", async () => {
-  await removeFixtureV3Manifest();
+test("writes V4 beside the historical V2 network manifest without changing V2 bytes", async () => {
+  await removeFixtureV4Manifest();
   const legacyPath = join(fixtureRepoRoot, "work", "deployments", "studionet.json");
   const legacyBytes = '{"contractVersion":"V2","historical":true}\n';
   await mkdir(join(fixtureRepoRoot, "work", "deployments"), { recursive: true });
@@ -250,22 +311,22 @@ test("writes V3 beside the historical V2 network manifest without changing V2 by
     network: "studionet",
     repoRoot: fixtureRepoRoot,
   });
-  const v3Path = deploymentManifestPath(fixtureRepoRoot, {
+  const v4Path = deploymentManifestPath(fixtureRepoRoot, {
     network: result.network,
-    contractVersion: "V3",
+    contractVersion: "V4",
     contractAddress: result.contractAddress,
     deploymentArtifactSha256: result.deploymentArtifactSha256,
   });
 
   assert.equal(await readFile(legacyPath, "utf8"), legacyBytes);
-  assert.notEqual(v3Path, legacyPath);
-  assert.deepEqual(JSON.parse(await readFile(v3Path, "utf8")), result);
-  assert.equal((result as unknown as Record<string, unknown>).contractVersion, "V3");
+  assert.notEqual(v4Path, legacyPath);
+  assert.deepEqual(JSON.parse(await readFile(v4Path, "utf8")), result);
+  assert.equal((result as unknown as Record<string, unknown>).contractVersion, "V4");
 });
 
-test("does not overwrite a finalized V3 address manifest", async () => {
-  await removeFixtureV3Manifest();
-  const path = v3ManifestPath(manifest());
+test("does not overwrite a finalized V4 address manifest", async () => {
+  await removeFixtureV4Manifest();
+  const path = v4ManifestPath(manifest());
   await deployAccessSeal(client(), {
     network: "studionet",
     repoRoot: fixtureRepoRoot,
@@ -384,7 +445,7 @@ test("explicit V3 lookup rejects swapped address filenames", async () => {
   const otherAddress = "0x8765432109abcdef8765432109abcdef87654321";
   try {
     const value = manifest({ contractAddress: otherAddress });
-    await writeRetainedV3Manifest(
+    await writeRetainedV4Manifest(
       repoRoot,
       value.deploymentArtifactSha256,
       address,
@@ -405,7 +466,7 @@ test("explicit V3 lookup rejects an artifact hash inconsistent with its director
   try {
     const value = manifest();
     const otherHash = sourceHash(new TextEncoder().encode("different retained artifact"));
-    await writeRetainedV3Manifest(repoRoot, otherHash, address, value);
+    await writeRetainedV4Manifest(repoRoot, otherHash, address, value);
 
     await assert.rejects(
       readDeploymentManifest(repoRoot, "studionet", address),
@@ -425,13 +486,13 @@ test("explicit V3 lookup rejects ambiguous retained matches", async () => {
       deploymentArtifactSha256: secondHash,
       sourceSha256: secondHash,
     });
-    await writeRetainedV3Manifest(
+    await writeRetainedV4Manifest(
       repoRoot,
       first.deploymentArtifactSha256,
       address,
       first,
     );
-    await writeRetainedV3Manifest(repoRoot, secondHash, address, second);
+    await writeRetainedV4Manifest(repoRoot, secondHash, address, second);
 
     await assert.rejects(
       readDeploymentManifest(repoRoot, "studionet", address),
@@ -446,7 +507,7 @@ test("explicit V3 lookup accepts one physically contained matching manifest", as
   const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-lookup-"));
   try {
     const value = manifest();
-    await writeRetainedV3Manifest(
+    await writeRetainedV4Manifest(
       repoRoot,
       value.deploymentArtifactSha256,
       value.contractAddress,
@@ -468,9 +529,9 @@ test("V3 lookup holds a namespace lease until candidate validation returns", asy
     deploymentArtifactSha256: secondHash,
     sourceSha256: secondHash,
   });
-  const v3Root = join(repoRoot, "work", "deployments", "studionet", "v3");
+  const v3Root = join(repoRoot, "work", "deployments", "studionet", "v4");
   try {
-    await writeRetainedV3Manifest(
+    await writeRetainedV4Manifest(
       repoRoot,
       first.deploymentArtifactSha256,
       first.contractAddress,
@@ -499,7 +560,7 @@ test("V3 lookup holds a namespace lease until candidate validation returns", asy
       );
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
       assert.equal(lookupSettled, false);
-      await writeRetainedV3Manifest(repoRoot, secondHash, address, second);
+      await writeRetainedV4Manifest(repoRoot, secondHash, address, second);
     });
     const outcome = await lookupOutcome!;
     assert.match(String(outcome.error), /ambiguous|candidate/i);
@@ -514,11 +575,11 @@ test("V3 lookup preserves an unowned stale namespace lease and fails closed", {
 }, async () => {
   const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v3-stale-lease-"));
   const value = manifest();
-  const v3Root = join(repoRoot, "work", "deployments", "studionet", "v3");
+  const v3Root = join(repoRoot, "work", "deployments", "studionet", "v4");
   const leasePath = join(v3Root, ".accessseal-v3.namespace.lock");
   const staleBytes = "unowned stale lease must survive\n";
   try {
-    await writeRetainedV3Manifest(
+    await writeRetainedV4Manifest(
       repoRoot,
       value.deploymentArtifactSha256,
       value.contractAddress,
@@ -543,12 +604,12 @@ test("explicit V3 lookup rejects a requested manifest symbolic link", async () =
     "work",
     "deployments",
     "studionet",
-    "v3",
+    "v4",
     sourceHash(artifactSource),
   );
   try {
     await mkdir(directory, { recursive: true });
-    await writeFile(outside, `${JSON.stringify({ ...manifest(), contractVersion: "V3" })}\n`);
+    await writeFile(outside, `${JSON.stringify({ ...manifest(), contractVersion: "V4" })}\n`);
     const requestedPath = join(directory, `${address}.json`);
     try {
       await symlink(outside, requestedPath, "file");
@@ -574,7 +635,7 @@ test("preflights the V3 manifest destination before calling deployContract", asy
     "work",
     "deployments",
     "studionet",
-    "v3",
+    "v4",
     artifactHash,
   );
   await rm(versionDirectory, { recursive: true, force: true });
@@ -599,6 +660,44 @@ test("preflights the V3 manifest destination before calling deployContract", asy
   }
 });
 
+test("rejects an invalid frozen schema before submitting a deployment", async () => {
+  const repoRoot = await createInvalidFrozenSchemaFixture();
+  let deployCalls = 0;
+  try {
+    await assert.rejects(
+      deployAccessSeal(client({
+        deployContract: async () => {
+          deployCalls += 1;
+          return txHash;
+        },
+      }), { network: "studionet", repoRoot }),
+      /owner|frozen schema/i,
+    );
+    assert.equal(deployCalls, 0);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("V4 manifest lookup rejects a flat legacy manifest", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v4-flat-manifest-"));
+  try {
+    await mkdir(join(repoRoot, "contracts"), { recursive: true });
+    await mkdir(join(repoRoot, "work", "deployments"), { recursive: true });
+    await writeFile(join(repoRoot, "contracts", "access_seal_deploy.py"), artifactSource);
+    await writeFile(
+      join(repoRoot, "work", "deployments", "studionet.json"),
+      `${JSON.stringify(manifest())}\n`,
+    );
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet"),
+      /V4 deployment manifest.*canonical namespace/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("deployment preserves an unowned namespace lease and makes zero deployment calls", {
   timeout: 10_000,
 }, async () => {
@@ -607,7 +706,7 @@ test("deployment preserves an unowned namespace lease and makes zero deployment 
     "work",
     "deployments",
     "studionet",
-    "v3",
+    "v4",
   );
   const leasePath = join(v3Root, ".accessseal-v3.namespace.lock");
   const foreignBytes = "foreign namespace lease must survive\n";
@@ -647,7 +746,7 @@ test("normalizes the pinned simplified receipt and both official address shapes"
   assert.equal((studio as Record<string, unknown>).status_name, "FINALIZED");
   assert.equal((studio as Record<string, unknown>).statusName, undefined);
   for (const addressShape of ["studio", "testnet"] as const) {
-    await removeFixtureV3Manifest();
+    await removeFixtureV4Manifest();
     const result = await deployAccessSeal(
       client({
         waitForTransactionReceipt: async () => officialReceipt(
@@ -663,7 +762,7 @@ test("normalizes the pinned simplified receipt and both official address shapes"
     );
     assert.equal(result.contractAddress, address);
     assert.deepEqual(
-      JSON.parse(await readFile(v3ManifestPath(result), "utf8")),
+      JSON.parse(await readFile(v4ManifestPath(result), "utf8")),
       result,
     );
   }
@@ -804,6 +903,31 @@ test("fails closed when deployed schema differs from the source-derived schema",
   );
 });
 
+test("localnet accepts only the exact empty GLSim runtime methods shape", async () => {
+  const localManifest = manifest({ network: "localnet", chainId: 61127 });
+  const localClient = (deployedSchema: unknown) => client({
+    chain: { id: 61127, name: "Genlayer Localnet" },
+    getContractSchema: async () => deployedSchema,
+  });
+  for (const malformed of [
+    {},
+    { methods: null },
+    { methods: "" },
+    { methods: 0 },
+    { methods: [] },
+  ]) {
+    await assert.rejects(
+      verifyDeployment(localClient(malformed), localManifest, { repoRoot: fixtureRepoRoot }),
+      /schema/i,
+    );
+  }
+  await verifyDeployment(
+    localClient({ methods: {} }),
+    localManifest,
+    { repoRoot: fixtureRepoRoot },
+  );
+});
+
 test("public deployment independently rejects non-repository and dirty worktrees", async () => {
   const nonRepository = await mkdtemp(join(tmpdir(), "accessseal-no-git-"));
   const dirtyRepository = await mkdtemp(join(tmpdir(), "accessseal-dirty-git-"));
@@ -834,7 +958,7 @@ test("public deployment independently rejects non-repository and dirty worktrees
 });
 
 test("does not write a manifest when authoritative readback fails", async () => {
-  const path = v3ManifestPath(manifest());
+  const path = v4ManifestPath(manifest());
   await rm(path, { force: true });
   await assert.rejects(
     deployAccessSeal(
@@ -977,7 +1101,7 @@ test("frozen schema policy rejects extra privilege and signature drift", () => {
   );
 });
 
-test("V3 schema exposes buyer evidence sealing and rejects privileged escape hatches", () => {
+test("V4 schema exposes bounded review context and rejects owner or upgrader methods", () => {
   assert.deepEqual(schema.methods.close_evidence, {
     params: [["case_id", "string"]],
     kwparams: {},
@@ -985,7 +1109,13 @@ test("V3 schema exposes buyer evidence sealing and rejects privileged escape hat
     ret: "null",
     payable: false,
   });
-  for (const method of ["owner", "upgrade", "override_verdict"] as const) {
+  assert.deepEqual(schema.methods.get_review_context, {
+    params: [["case_id", "string"], ["epoch", "int"]],
+    kwparams: {},
+    readonly: true,
+    ret: "string",
+  });
+  for (const method of ["owner", "upgrader", "upgrade", "override_verdict"] as const) {
     assert.throws(
       () =>
         verifyFrozenSchema({

@@ -10,8 +10,12 @@ CASE_SCHEMA = "accessseal-case-v1"
 TERMS_SCHEMA = "accessseal-terms-v1"
 EVIDENCE_SCHEMA = "accessseal-evidence/1"
 RELEASE_MANIFEST_SCHEMA = "accessseal-release-manifest/1"
+REVIEW_CONTEXT_SCHEMA = "accessseal-review-context/1"
+DOM_FACTS_SCHEMA = "accessseal-dom-facts/1"
+SCANNER_REPORT_SCHEMA = "accessseal-scanner-report/1"
+CRITICAL_FLOW_TRACE_SCHEMA = "accessseal-critical-flow-trace/1"
 PROFILE_VERSION = "accessseal-static/1"
-REVIEW_SCHEMA = "accessseal-review/1"
+REVIEW_SCHEMA = "accessseal-review/2"
 RETRY_COOLDOWN_SECONDS = 300
 MANDATORY_EVIDENCE_TYPES = (
     "RELEASE_MANIFEST",
@@ -84,7 +88,8 @@ MAX_MANIFEST_BYTES = 16384
 MAX_MANIFEST_FILES = 16
 MAX_HTML_BYTES = 32768
 MAX_JSON_ARTIFACT_BYTES = 16384
-MAX_SCREENSHOT_BYTES = 65536
+MAX_REVIEW_CONTEXT_BYTES = 16_384
+MAX_SCREENSHOT_BYTES = 16_384
 MAX_TOTAL_ARTIFACT_BYTES = 131072
 # GenVM v0.2.16 web.get has no timeout, streaming, or bounded-read argument.
 # Complete reviews therefore make exactly six requests and enforce these caps
@@ -180,6 +185,7 @@ RAW_REVIEW_FIELDS = (
     "verdict",
 )
 FINAL_REVIEW_FIELDS = (
+    "contextHash",
     "evidenceRefs",
     "materialBlockers",
     "missingEvidence",
@@ -189,6 +195,40 @@ FINAL_REVIEW_FIELDS = (
     "schemaVersion",
     "verdict",
 )
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _review_context_hash(context_json: str) -> str:
+    return "sha256:" + sha256(context_json.encode("utf-8")).hexdigest()
+
+
+def _fetch_exact_png(image_uri: str, image_hash: str, byte_limit: int) -> bytes:
+    try:
+        response = gl.nondet.web.get(
+            image_uri,
+            headers={"Accept": "image/png"},
+        )
+    except Exception:
+        raise gl.vm.UserError("review screenshot could not be fetched")
+    if response.status != 200 or response.body is None:
+        raise gl.vm.UserError("review screenshot returned an unavailable response")
+    screenshot = response.body
+    if len(screenshot) == 0 or len(screenshot) > byte_limit:
+        raise gl.vm.UserError("review screenshot exceeded its byte bound")
+    if not screenshot.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise gl.vm.UserError("review screenshot was not a PNG")
+    if "sha256:" + sha256(screenshot).hexdigest() != image_hash:
+        raise gl.vm.UserError("review screenshot hash did not match its binding")
+    return screenshot
 
 
 @gl.evm.contract_interface
@@ -213,38 +253,6 @@ def build_review_prompt(review_data_json: str) -> str:
         + "missingEvidence, rationale. Use only the listed verdicts, blocker "
         + "codes, and mandatory evidence codes; keep rationale under 2048 UTF-8 "
         + "bytes. Contract-owned bindings are not model output."
-        + "\nUNTRUSTED_BINDING_AND_DATA_JSON="
-        + untrusted_data
-    )
-
-
-def build_review_validation_prompt(
-    review_data_json: str,
-    leader_review_json: str,
-) -> str:
-    untrusted_data = json.dumps(
-        json.loads(review_data_json),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    leader_review = json.dumps(
-        json.loads(leader_review_json),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    return (
-        FIXED_REVIEW_RUBRIC
-        + "\nValidate whether the normalized final leader review is supported "
-        + "by the exact evidence under this rubric. Assess every verdict, "
-        + "including UNRESOLVED. Return exactly {\"supported\":true} only when "
-        + "the evidence supports the verdict and every blocker and missing-"
-        + "evidence claim. Return {\"supported\":false} when evidence does not "
-        + "support the verdict, any blocker or missing-evidence claim is omitted "
-        + "or invented, or the decision is not reliably adjudicable."
-        + "\nLEADER_REVIEW_JSON="
-        + leader_review
         + "\nUNTRUSTED_BINDING_AND_DATA_JSON="
         + untrusted_data
     )
@@ -404,6 +412,7 @@ def _review_result(
     material_blockers: list[str],
     missing_evidence: list[str],
     evidence_refs: list[str],
+    context_hash: str,
     rationale: str,
 ) -> dict[str, object]:
     return {
@@ -414,6 +423,7 @@ def _review_result(
         "materialBlockers": material_blockers,
         "missingEvidence": missing_evidence,
         "evidenceRefs": evidence_refs,
+        "contextHash": context_hash,
         "rationaleHash": "sha256:" + sha256(rationale.encode()).hexdigest(),
     }
 
@@ -469,6 +479,7 @@ def _safe_review_candidate(
     release_digest: str,
     profile_hash: str,
     evidence_refs: list[str],
+    context_hash: str,
 ) -> dict[str, object]:
     invalid_shape = _review_result(
         "UNRESOLVED",
@@ -477,6 +488,7 @@ def _safe_review_candidate(
         [],
         [],
         evidence_refs,
+        context_hash,
         MODEL_OUTPUT_INVALID_SHAPE,
     )
     if not isinstance(candidate, dict):
@@ -494,6 +506,7 @@ def _safe_review_candidate(
             [],
             [],
             evidence_refs,
+            context_hash,
             MODEL_OUTPUT_INVALID_CLAIMS,
         )
     blockers = _normalize_blockers(candidate["materialBlockers"])
@@ -506,6 +519,7 @@ def _safe_review_candidate(
             [],
             [],
             evidence_refs,
+            context_hash,
             MODEL_OUTPUT_INVALID_CLAIMS,
         )
     rationale = candidate["rationale"]
@@ -522,6 +536,7 @@ def _safe_review_candidate(
             [],
             [],
             evidence_refs,
+            context_hash,
             MODEL_OUTPUT_INVALID_CLAIMS,
         )
 
@@ -538,6 +553,7 @@ def _safe_review_candidate(
             [],
             [],
             evidence_refs,
+            context_hash,
             MODEL_OUTPUT_INVALID_CLAIMS,
         )
     return _review_result(
@@ -547,18 +563,60 @@ def _safe_review_candidate(
         blockers,
         missing,
         evidence_refs,
+        context_hash,
         rationale,
     )
 
 
-def _safe_support_candidate(candidate: object) -> bool:
-    return (
-        isinstance(candidate, dict)
-        and len(candidate) == 1
-        and "supported" in candidate
-        and isinstance(candidate["supported"], bool)
-        and candidate["supported"] is True
+def _evaluate_review_context(
+    context_json: str,
+    screenshot: bytes,
+    evidence_refs: list[str],
+    release_digest: str,
+    profile_hash: str,
+    context_hash: str,
+) -> dict[str, object]:
+    try:
+        candidate = gl.nondet.exec_prompt(
+            build_review_prompt(context_json),
+            response_format="json",
+            images=[screenshot],
+        )
+    except Exception:
+        return _review_result(
+            "UNRESOLVED",
+            release_digest,
+            profile_hash,
+            [],
+            [],
+            evidence_refs,
+            context_hash,
+            MODEL_EXECUTION_FAILED,
+        )
+    return _safe_review_candidate(
+        candidate,
+        release_digest,
+        profile_hash,
+        evidence_refs,
+        context_hash,
     )
+
+
+def _review_consensus_fields(review: object) -> tuple[object, ...] | None:
+    if not isinstance(review, dict):
+        return None
+    required = (
+        "verdict",
+        "materialBlockers",
+        "missingEvidence",
+        "profileHash",
+        "releaseDigest",
+        "evidenceRefs",
+        "contextHash",
+    )
+    if any(field not in review for field in required):
+        return None
+    return tuple(review[field] for field in required)
 
 
 def _reviews_semantically_valid(
@@ -566,6 +624,7 @@ def _reviews_semantically_valid(
     release_digest: str,
     profile_hash: str,
     evidence_refs: list[str],
+    context_hash: str,
 ) -> bool:
     if not isinstance(review, dict):
         return False
@@ -582,6 +641,8 @@ def _reviews_semantically_valid(
     if review["releaseDigest"] != release_digest:
         return False
     if review["profileHash"] != profile_hash:
+        return False
+    if review["contextHash"] != context_hash:
         return False
     references = review["evidenceRefs"]
     if not isinstance(references, list):
@@ -639,6 +700,11 @@ class AccessSeal(gl.Contract):
     evidence_hashes: TreeMap[str, str]
     used_evidence_hashes: TreeMap[str, bool]
     used_evidence_nonces: TreeMap[str, bool]
+    review_contexts: TreeMap[str, str]
+    review_context_hashes: TreeMap[str, str]
+    review_context_ready: TreeMap[str, bool]
+    review_image_uris: TreeMap[str, str]
+    review_image_hashes: TreeMap[str, str]
     review_results: TreeMap[str, str]
     review_attempt_results: TreeMap[str, str]
     review_attempt_proof_ids: TreeMap[str, str]
@@ -1070,6 +1136,703 @@ class AccessSeal(gl.Contract):
         if sorted(evidence_types) != sorted(REQUIRED_EARLY_SEAL_EVIDENCE_TYPES):
             raise gl.vm.UserError("evidence profile is incomplete")
 
+    def _context_integer(self, value: object, field: str) -> int:
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > MAX_SAFE_JSON_INTEGER
+        ):
+            raise gl.vm.UserError(field + " must be a safe nonnegative integer")
+        return value
+
+    def _context_list(self, value: object, field: str) -> list[object]:
+        if not isinstance(value, list) or len(value) > MAX_EVIDENCE_PER_EPOCH:
+            raise gl.vm.UserError(field + " must be a bounded list")
+        return value
+
+    def _context_string(self, value: object, field: str) -> str:
+        if not isinstance(value, str) or _utf8_size(value) is None:
+            raise gl.vm.UserError(field + " must be a UTF-8 string")
+        return value
+
+    def _context_url(self, value: object, origin: str, field: str) -> str:
+        url = self._context_string(value, field)
+        if url != origin and not url.startswith(origin + "/"):
+            raise gl.vm.UserError(field + " origin does not match case")
+        return url
+
+    def _context_artifact(
+        self, body: bytes, schema: str, name: str
+    ) -> dict[str, object]:
+        try:
+            value = json.loads(body.decode("utf-8"))
+            _canonical_json(value)
+        except (UnicodeDecodeError, TypeError, ValueError, UnicodeEncodeError):
+            raise gl.vm.UserError(name + " artifact was malformed")
+        if not isinstance(value, dict) or value.get("schemaVersion") != schema:
+            raise gl.vm.UserError(name + " schema version is not allowed")
+        return value
+
+    def _build_review_context(
+        self, case_id: str, epoch: u256, now: int
+    ) -> dict[str, object]:
+        epoch_key = self._epoch_key(case_id, epoch)
+        profile_hash = self.profile_hashes[case_id]
+        release_digest = self.release_digests[epoch_key]
+        origin = self.subject_origins[case_id]
+        count = self.evidence_counts[epoch_key]
+        if int(count) != len(MANDATORY_EVIDENCE_TYPES):
+            raise gl.vm.UserError("evidence profile is incomplete")
+        records: list[dict[str, object]] = []
+        observed_times: list[int] = []
+        expiry_times: list[int] = []
+        for evidence_type in MANDATORY_EVIDENCE_TYPES:
+            matches: list[dict[str, object]] = []
+            for index in range(int(count)):
+                key = self._evidence_key(case_id, epoch, u256(index))
+                try:
+                    record = json.loads(self.evidence_envelopes[key])
+                except (TypeError, ValueError):
+                    raise gl.vm.UserError("stored evidence envelope was malformed")
+                if not isinstance(record, dict):
+                    raise gl.vm.UserError("stored evidence envelope was malformed")
+                if record.get("evidenceType") == evidence_type:
+                    matches.append(record)
+            if len(matches) != 1:
+                raise gl.vm.UserError("evidence profile is incomplete")
+            record = matches[0]
+            self._validate_evidence_domain(
+                case_id,
+                record,
+                "OPEN_RELEASE"
+                if evidence_type == "RELEASE_MANIFEST"
+                else "APPEND_EVIDENCE",
+            )
+            if record["releaseDigest"] != release_digest:
+                raise gl.vm.UserError("evidence release digest does not match epoch")
+            observed_times.append(
+                self._context_integer(record["observedAt"], "evidence observedAt")
+            )
+            expiry = self._context_integer(
+                record["expiresAt"], "evidence expiresAt"
+            )
+            if expiry <= now:
+                raise gl.vm.UserError("evidence profile contains expired evidence")
+            expiry_times.append(expiry)
+            records.append(record)
+        by_type = {str(item["evidenceType"]): item for item in records}
+
+        manifest_record = by_type["RELEASE_MANIFEST"]
+        try:
+            response = gl.nondet.web.get(
+                str(manifest_record["payloadUri"]),
+                headers={"Accept": "application/json"},
+            )
+        except Exception:
+            raise gl.vm.UserError("release manifest could not be fetched")
+        if response.status != 200 or response.body is None:
+            raise gl.vm.UserError("release manifest returned an unavailable response")
+        manifest_body = response.body
+        if len(manifest_body) == 0 or len(manifest_body) > MAX_MANIFEST_BYTES:
+            raise gl.vm.UserError("release manifest exceeded its byte bound")
+        digest = "sha256:" + sha256(manifest_body).hexdigest()
+        if digest != release_digest or digest != manifest_record["payloadSha256"]:
+            raise gl.vm.UserError("release manifest hash did not match its binding")
+        manifest = _parse_release_manifest(
+            manifest_body, case_id, int(epoch), origin, profile_hash
+        )
+        if manifest is None:
+            raise gl.vm.UserError("release manifest was malformed or wrongly bound")
+        files = manifest["files"]
+        if not isinstance(files, list):
+            raise gl.vm.UserError("release manifest files were malformed")
+        entries: dict[str, dict[str, object]] = {}
+        for evidence_type in MANIFEST_EVIDENCE_TYPES:
+            found = [
+                item
+                for item in files
+                if isinstance(item, dict)
+                and item.get("evidenceType") == evidence_type
+            ]
+            if len(found) != 1:
+                raise gl.vm.UserError("release manifest members are incomplete")
+            item = found[0]
+            record = by_type[evidence_type]
+            if (
+                origin + str(item["path"]) != record["payloadUri"]
+                or item["mediaType"] != record["mediaType"]
+                or item["sha256"] != record["payloadSha256"]
+            ):
+                raise gl.vm.UserError(
+                    "release manifest member conflicts with its evidence envelope"
+                )
+            entries[evidence_type] = item
+
+        total_bytes = len(manifest_body)
+        bodies: dict[str, bytes] = {}
+        for evidence_type in MANIFEST_EVIDENCE_TYPES:
+            record = by_type[evidence_type]
+            try:
+                response = gl.nondet.web.get(
+                    str(record["payloadUri"]),
+                    headers={"Accept": str(record["mediaType"])},
+                )
+            except Exception:
+                raise gl.vm.UserError("mandatory artifact could not be fetched")
+            if response.status != 200 or response.body is None:
+                raise gl.vm.UserError(
+                    "mandatory artifact returned an unavailable response"
+                )
+            body = response.body
+            limit = MAX_JSON_ARTIFACT_BYTES
+            if evidence_type == "HTML_BUNDLE":
+                limit = MAX_HTML_BYTES
+            elif evidence_type == "SCREENSHOT":
+                limit = MAX_SCREENSHOT_BYTES
+            if len(body) == 0:
+                raise gl.vm.UserError("mandatory artifact payload is empty")
+            if len(body) > limit:
+                raise gl.vm.UserError("mandatory artifact exceeded its byte bound")
+            total_bytes += len(body)
+            if total_bytes > MAX_TOTAL_ARTIFACT_BYTES:
+                raise gl.vm.UserError("artifact set exceeded its total byte bound")
+            digest = "sha256:" + sha256(body).hexdigest()
+            if (
+                digest != record["payloadSha256"]
+                or digest != entries[evidence_type]["sha256"]
+            ):
+                raise gl.vm.UserError("mandatory artifact hash did not match")
+            bodies[evidence_type] = body
+        try:
+            bodies["HTML_BUNDLE"].decode("utf-8")
+        except UnicodeDecodeError:
+            raise gl.vm.UserError("HTML artifact was not valid UTF-8")
+
+        dom = self._context_artifact(
+            bodies["DOM_FACTS"], DOM_FACTS_SCHEMA, "DOM facts"
+        )
+        scanner = self._context_artifact(
+            bodies["SCANNER_REPORT"], SCANNER_REPORT_SCHEMA, "scanner report"
+        )
+        flow_trace = self._context_artifact(
+            bodies["CRITICAL_FLOW_TRACE"],
+            CRITICAL_FLOW_TRACE_SCHEMA,
+            "critical flow trace",
+        )
+        self._context_integer(dom.get("observedAt"), "DOM facts observedAt")
+        self._context_integer(scanner.get("observedAt"), "scanner observedAt")
+        self._context_integer(
+            flow_trace.get("observedAt"), "critical flow observedAt"
+        )
+
+        normalized_pages: list[object] = []
+        for page in self._context_list(dom.get("pages"), "DOM pages"):
+            if not isinstance(page, dict):
+                raise gl.vm.UserError("DOM page must be an object")
+            landmarks = self._context_list(page.get("landmarks"), "DOM landmarks")
+            if any(not isinstance(item, str) for item in landmarks):
+                raise gl.vm.UserError("DOM landmarks must contain strings")
+            headings = self._context_list(page.get("headings"), "DOM headings")
+            normalized_headings: list[object] = []
+            for heading in headings:
+                if not isinstance(heading, dict):
+                    raise gl.vm.UserError("DOM heading must be an object")
+                level = self._context_integer(
+                    heading.get("level"), "DOM heading level"
+                )
+                if level < 1 or level > 6:
+                    raise gl.vm.UserError("DOM heading level is invalid")
+                normalized_headings.append(
+                    {
+                        "level": level,
+                        "name": self._context_string(
+                            heading.get("name"), "DOM heading name"
+                        ),
+                    }
+                )
+            labels = self._context_list(page.get("formLabels"), "DOM form labels")
+            normalized_labels: list[object] = []
+            for label in labels:
+                if not isinstance(label, dict):
+                    raise gl.vm.UserError("DOM form label must be an object")
+                normalized_labels.append(
+                    {
+                        "control": self._context_string(
+                            label.get("control"), "DOM form control"
+                        ),
+                        "label": self._context_string(
+                            label.get("label"), "DOM form label"
+                        ),
+                    }
+                )
+            images = self._context_list(
+                page.get("imageAlternatives"), "DOM image alternatives"
+            )
+            normalized_images: list[object] = []
+            for image in images:
+                if not isinstance(image, dict):
+                    raise gl.vm.UserError("DOM image alternative must be an object")
+                if not isinstance(image.get("decorative"), bool):
+                    raise gl.vm.UserError(
+                        "DOM image decorative state must be boolean"
+                    )
+                normalized_images.append(
+                    {
+                        "alt": self._context_string(
+                            image.get("alt"), "DOM image alternative text"
+                        ),
+                        "decorative": image["decorative"],
+                        "src": self._context_string(
+                            image.get("src"), "DOM image source"
+                        ),
+                    }
+                )
+            normalized_pages.append(
+                {
+                    "url": self._context_url(page.get("url"), origin, "DOM page URL"),
+                    "landmarks": [str(item) for item in landmarks],
+                    "headings": normalized_headings,
+                    "formLabels": normalized_labels,
+                    "imageAlternatives": normalized_images,
+                    "skipLinkTarget": self._context_string(
+                        page.get("skipLinkTarget"), "DOM skip link target"
+                    ),
+                }
+            )
+
+        raw_tool = scanner.get("tool")
+        if not isinstance(raw_tool, dict):
+            raise gl.vm.UserError("scanner tool type is invalid")
+        tool = {
+            "name": self._context_string(
+                raw_tool.get("name"), "scanner tool name"
+            ),
+            "version": self._context_string(
+                raw_tool.get("version"), "scanner tool version"
+            ),
+        }
+        normalized_scans: list[object] = []
+        for scan in self._context_list(scanner.get("scans"), "scanner scans"):
+            if not isinstance(scan, dict):
+                raise gl.vm.UserError("scanner scan must be an object")
+            violations = self._context_list(
+                scan.get("violations"), "scanner violations"
+            )
+            normalized_violations: list[object] = []
+            for violation in violations:
+                if not isinstance(violation, dict):
+                    raise gl.vm.UserError("scanner violation must be an object")
+                impact = self._context_string(
+                    violation.get("impact"), "scanner violation impact"
+                )
+                if impact not in ("minor", "moderate", "serious", "critical"):
+                    raise gl.vm.UserError("scanner violation impact is invalid")
+                normalized_violations.append(
+                    {
+                        "id": self._context_string(
+                            violation.get("id"), "scanner violation ID"
+                        ),
+                        "impact": impact,
+                    }
+                )
+            incomplete_ids: list[str] = []
+            for item in self._context_list(
+                scan.get("incomplete"), "scanner incomplete findings"
+            ):
+                if not isinstance(item, dict):
+                    raise gl.vm.UserError("scanner incomplete finding must be an object")
+                incomplete_ids.append(
+                    self._context_string(item.get("id"), "scanner incomplete ID")
+                )
+            normalized_scans.append(
+                {
+                    "url": self._context_url(
+                        scan.get("url"), origin, "scanner scan URL"
+                    ),
+                    "violations": normalized_violations,
+                    "incompleteIds": incomplete_ids,
+                    "passes": self._context_integer(
+                        scan.get("passes"), "scanner passes"
+                    ),
+                }
+            )
+
+        if flow_trace.get("caseId") != case_id:
+            raise gl.vm.UserError("critical flow case does not match")
+        if flow_trace.get("flowsHash") != self.flows_hashes[case_id]:
+            raise gl.vm.UserError("critical flow hash does not match case")
+        normalized_flows: list[object] = []
+        for flow in self._context_list(flow_trace.get("flows"), "critical flows"):
+            if not isinstance(flow, dict):
+                raise gl.vm.UserError("critical flow must be an object")
+            if not isinstance(flow.get("passed"), bool):
+                raise gl.vm.UserError("critical flow passed must be boolean")
+            checkpoints: list[object] = []
+            for step in self._context_list(
+                flow.get("steps"), "critical flow steps"
+            ):
+                if not isinstance(step, dict):
+                    raise gl.vm.UserError("critical flow step must be an object")
+                if not isinstance(step.get("passed"), bool):
+                    raise gl.vm.UserError(
+                        "critical flow checkpoint passed must be boolean"
+                    )
+                checkpoints.append(
+                    {
+                        "checkpoint": self._context_string(
+                            step.get("checkpoint"), "critical flow checkpoint"
+                        ),
+                        "passed": step["passed"],
+                    }
+                )
+            normalized_flows.append(
+                {
+                    "id": self._context_string(flow.get("id"), "critical flow ID"),
+                    "passed": flow["passed"],
+                    "checkpoints": checkpoints,
+                }
+            )
+        blockers = flow_trace.get("materialBlockers")
+        if (
+            not isinstance(blockers, dict)
+            or sorted(blockers.keys()) != sorted(MATERIAL_BLOCKER_CODES)
+            or any(not isinstance(blockers[code], bool) for code in blockers)
+        ):
+            raise gl.vm.UserError("critical flow material blockers are invalid")
+        normalized_blockers = {
+            code: blockers[code] for code in MATERIAL_BLOCKER_CODES
+        }
+
+        screenshot_body = bodies["SCREENSHOT"]
+        if not screenshot_body.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise gl.vm.UserError("screenshot artifact was not a PNG")
+        screenshot = by_type["SCREENSHOT"]
+        context = {
+            "schemaVersion": REVIEW_CONTEXT_SCHEMA,
+            "binding": {
+                "chainId": int(self.chain_ids[case_id]),
+                "contractAddress": self.contract_addresses[case_id],
+                "caseId": case_id,
+                "epoch": int(epoch),
+                "profileHash": profile_hash,
+                "releaseDigest": release_digest,
+                "subjectOrigin": origin,
+            },
+            "evidence": [
+                {"evidenceType": item["evidenceType"], "sha256": item["payloadSha256"]}
+                for item in records
+            ],
+            "dom": {"pages": normalized_pages},
+            "scanner": {"tool": tool, "scans": normalized_scans},
+            "criticalFlows": {
+                "flowsHash": flow_trace["flowsHash"],
+                "flows": normalized_flows,
+                "materialBlockers": normalized_blockers,
+            },
+            "screenshot": {
+                "uri": screenshot["payloadUri"],
+                "sha256": screenshot["payloadSha256"],
+                "mediaType": "image/png",
+                "byteLength": len(screenshot_body),
+            },
+            "observedAt": min(observed_times),
+            "expiresAt": min(expiry_times),
+        }
+        try:
+            context_json = _canonical_json(context)
+            context_size = len(context_json.encode("utf-8"))
+        except (TypeError, ValueError, UnicodeEncodeError):
+            raise gl.vm.UserError("review context was not canonicalizable")
+        if context_size > MAX_REVIEW_CONTEXT_BYTES:
+            raise gl.vm.UserError("review context exceeds size limit")
+        return {
+            "contextJson": context_json,
+            "contextHash": _review_context_hash(context_json),
+            "imageUri": str(screenshot["payloadUri"]),
+            "imageSha256": str(screenshot["payloadSha256"]),
+        }
+
+    def _valid_review_context_record(
+        self, case_id: str, epoch: u256, record: object
+    ) -> bool:
+        if not isinstance(record, dict) or sorted(record.keys()) != [
+            "contextHash",
+            "contextJson",
+            "imageSha256",
+            "imageUri",
+        ]:
+            return False
+        context_json = record["contextJson"]
+        if not isinstance(context_json, str):
+            return False
+        try:
+            if len(context_json.encode("utf-8")) > MAX_REVIEW_CONTEXT_BYTES:
+                return False
+            context = json.loads(context_json)
+            if _canonical_json(context) != context_json:
+                return False
+        except (TypeError, ValueError, UnicodeEncodeError):
+            return False
+        if (
+            not isinstance(context, dict)
+            or sorted(context.keys())
+            != sorted(
+                [
+                    "binding",
+                    "criticalFlows",
+                    "dom",
+                    "evidence",
+                    "expiresAt",
+                    "observedAt",
+                    "scanner",
+                    "schemaVersion",
+                    "screenshot",
+                ]
+            )
+            or context.get("schemaVersion") != REVIEW_CONTEXT_SCHEMA
+        ):
+            return False
+        if record["contextHash"] != _review_context_hash(context_json):
+            return False
+        binding = context.get("binding")
+        if not isinstance(binding, dict) or binding != {
+            "chainId": int(self.chain_ids[case_id]),
+            "contractAddress": self.contract_addresses[case_id],
+            "caseId": case_id,
+            "epoch": int(epoch),
+            "profileHash": self.profile_hashes[case_id],
+            "releaseDigest": self.release_digests[self._epoch_key(case_id, epoch)],
+            "subjectOrigin": self.subject_origins[case_id],
+        }:
+            return False
+
+        def valid_string(value: object) -> bool:
+            return isinstance(value, str) and _utf8_size(value) is not None
+
+        def valid_integer(value: object, *, positive: bool = False) -> bool:
+            return (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and (value > 0 if positive else value >= 0)
+                and value <= MAX_SAFE_JSON_INTEGER
+            )
+
+        def exact_keys(value: object, keys: list[str]) -> bool:
+            return isinstance(value, dict) and sorted(value.keys()) == sorted(keys)
+
+        def bounded_list(value: object) -> bool:
+            return isinstance(value, list) and len(value) <= MAX_EVIDENCE_PER_EPOCH
+
+        def string_list(value: object) -> bool:
+            return bounded_list(value) and all(valid_string(item) for item in value)
+
+        epoch_key = self._epoch_key(case_id, epoch)
+        count = self.evidence_counts[epoch_key]
+        if int(count) != len(MANDATORY_EVIDENCE_TYPES):
+            return False
+        stored_by_type: dict[str, dict[str, object]] = {}
+        try:
+            for index in range(int(count)):
+                evidence_key = self._evidence_key(
+                    case_id, epoch, u256(index)
+                )
+                envelope = json.loads(self.evidence_envelopes[evidence_key])
+                if not isinstance(envelope, dict):
+                    return False
+                evidence_type = envelope.get("evidenceType")
+                if (
+                    not isinstance(evidence_type, str)
+                    or evidence_type in stored_by_type
+                ):
+                    return False
+                stored_by_type[evidence_type] = envelope
+            expected_evidence = [
+                {
+                    "evidenceType": evidence_type,
+                    "sha256": stored_by_type[evidence_type]["payloadSha256"],
+                }
+                for evidence_type in MANDATORY_EVIDENCE_TYPES
+            ]
+            expected_observed_at = min(
+                int(stored_by_type[evidence_type]["observedAt"])
+                for evidence_type in MANDATORY_EVIDENCE_TYPES
+            )
+            expected_expires_at = min(
+                int(stored_by_type[evidence_type]["expiresAt"])
+                for evidence_type in MANDATORY_EVIDENCE_TYPES
+            )
+            screenshot_envelope = stored_by_type["SCREENSHOT"]
+        except (KeyError, TypeError, ValueError):
+            return False
+        evidence = context.get("evidence")
+        if evidence != expected_evidence:
+            return False
+        for item in evidence:
+            if (
+                not exact_keys(item, ["evidenceType", "sha256"])
+                or not valid_string(item["evidenceType"])
+                or not _is_lowercase_sha256_text(item["sha256"])
+            ):
+                return False
+        if (
+            not valid_integer(context.get("observedAt"))
+            or not valid_integer(context.get("expiresAt"), positive=True)
+            or context["observedAt"] != expected_observed_at
+            or context["expiresAt"] != expected_expires_at
+        ):
+            return False
+
+        origin = self.subject_origins[case_id]
+
+        def valid_origin_url(value: object) -> bool:
+            return valid_string(value) and (
+                value == origin or value.startswith(origin + "/")
+            )
+
+        dom = context.get("dom")
+        if not exact_keys(dom, ["pages"]) or not bounded_list(dom["pages"]):
+            return False
+        page_urls: list[str] = []
+        for page in dom["pages"]:
+            if not exact_keys(
+                page,
+                [
+                    "formLabels",
+                    "headings",
+                    "imageAlternatives",
+                    "landmarks",
+                    "skipLinkTarget",
+                    "url",
+                ],
+            ):
+                return False
+            if (
+                not valid_origin_url(page["url"])
+                or page["url"] in page_urls
+                or not string_list(page["landmarks"])
+                or not valid_string(page["skipLinkTarget"])
+            ):
+                return False
+            page_urls.append(page["url"])
+            if not bounded_list(page["headings"]):
+                return False
+            for heading in page["headings"]:
+                if (
+                    not exact_keys(heading, ["level", "name"])
+                    or not valid_integer(heading["level"], positive=True)
+                    or heading["level"] > 6
+                    or not valid_string(heading["name"])
+                ):
+                    return False
+            if not bounded_list(page["formLabels"]):
+                return False
+            for label in page["formLabels"]:
+                if (
+                    not exact_keys(label, ["control", "label"])
+                    or not valid_string(label["control"])
+                    or not valid_string(label["label"])
+                ):
+                    return False
+            if not bounded_list(page["imageAlternatives"]):
+                return False
+            for image in page["imageAlternatives"]:
+                if (
+                    not exact_keys(image, ["alt", "decorative", "src"])
+                    or not valid_string(image["alt"])
+                    or not isinstance(image["decorative"], bool)
+                    or not valid_string(image["src"])
+                ):
+                    return False
+
+        scanner = context.get("scanner")
+        if not exact_keys(scanner, ["scans", "tool"]):
+            return False
+        tool = scanner["tool"]
+        if (
+            not exact_keys(tool, ["name", "version"])
+            or not valid_string(tool["name"])
+            or not valid_string(tool["version"])
+            or not bounded_list(scanner["scans"])
+        ):
+            return False
+        scan_urls: list[str] = []
+        for scan in scanner["scans"]:
+            if not exact_keys(
+                scan,
+                ["incompleteIds", "passes", "url", "violations"],
+            ):
+                return False
+            if (
+                not valid_origin_url(scan["url"])
+                or scan["url"] in scan_urls
+                or not string_list(scan["incompleteIds"])
+                or not valid_integer(scan["passes"])
+                or not bounded_list(scan["violations"])
+            ):
+                return False
+            scan_urls.append(scan["url"])
+            for violation in scan["violations"]:
+                if (
+                    not exact_keys(violation, ["id", "impact"])
+                    or not valid_string(violation["id"])
+                    or violation["impact"]
+                    not in ("minor", "moderate", "serious", "critical")
+                ):
+                    return False
+        if sorted(scan_urls) != sorted(page_urls):
+            return False
+
+        critical_flows = context.get("criticalFlows")
+        if (
+            not exact_keys(
+                critical_flows,
+                ["flows", "flowsHash", "materialBlockers"],
+            )
+            or critical_flows["flowsHash"] != self.flows_hashes[case_id]
+            or not bounded_list(critical_flows["flows"])
+        ):
+            return False
+        for flow in critical_flows["flows"]:
+            if (
+                not exact_keys(flow, ["checkpoints", "id", "passed"])
+                or not valid_string(flow["id"])
+                or not isinstance(flow["passed"], bool)
+                or not bounded_list(flow["checkpoints"])
+            ):
+                return False
+            for checkpoint in flow["checkpoints"]:
+                if (
+                    not exact_keys(checkpoint, ["checkpoint", "passed"])
+                    or not valid_string(checkpoint["checkpoint"])
+                    or not isinstance(checkpoint["passed"], bool)
+                ):
+                    return False
+        blockers = critical_flows["materialBlockers"]
+        if (
+            not exact_keys(blockers, list(MATERIAL_BLOCKER_CODES))
+            or any(not isinstance(blockers[code], bool) for code in blockers)
+        ):
+            return False
+
+        screenshot = context.get("screenshot")
+        return (
+            exact_keys(
+                screenshot, ["byteLength", "mediaType", "sha256", "uri"]
+            )
+            and record["imageUri"] == screenshot.get("uri")
+            and record["imageSha256"] == screenshot.get("sha256")
+            and screenshot.get("uri") == screenshot_envelope["payloadUri"]
+            and screenshot.get("sha256")
+            == screenshot_envelope["payloadSha256"]
+            and valid_origin_url(screenshot.get("uri"))
+            and screenshot.get("mediaType") == "image/png"
+            and valid_integer(screenshot.get("byteLength"), positive=True)
+            and screenshot["byteLength"] <= MAX_SCREENSHOT_BYTES
+            and _is_lowercase_sha256_text(record["contextHash"])
+            and _is_lowercase_sha256_text(record["imageSha256"])
+        )
+
     def _require_case(self, case_id: str) -> None:
         if case_id not in self.buyers:
             raise gl.vm.UserError("case does not exist")
@@ -1178,6 +1941,11 @@ class AccessSeal(gl.Contract):
         self.evidence_sealed[epoch_key] = False
         self.evidence_sealed_at[epoch_key] = u256(0)
         self.evidence_sealed_by[epoch_key] = Address(bytes(20))
+        self.review_contexts[epoch_key] = ""
+        self.review_context_hashes[epoch_key] = ""
+        self.review_context_ready[epoch_key] = False
+        self.review_image_uris[epoch_key] = ""
+        self.review_image_hashes[epoch_key] = ""
         self.cure_counts[case_id] = u256(0)
         self.review_attempts[epoch_key] = u256(0)
         return case_id
@@ -1244,6 +2012,8 @@ class AccessSeal(gl.Contract):
                 ),
                 "profileHash": self.profile_hashes[case_id],
                 "readAt": int(self._now()),
+                "reviewContextHash": self.review_context_hashes[epoch_key],
+                "reviewContextReady": self.review_context_ready[epoch_key],
                 "reserved": int(self.reserved_by_case[case_id]),
                 "salt": self.salts[case_id],
                 "subjectOrigin": self.subject_origins[case_id],
@@ -1342,6 +2112,30 @@ class AccessSeal(gl.Contract):
         epoch = self.epochs[case_id]
         self._require_complete_fresh_evidence_profile(case_id, epoch)
         epoch_key = self._epoch_key(case_id, epoch)
+
+        def build_context() -> dict[str, object]:
+            return self._build_review_context(case_id, epoch, now)
+
+        def validate_context(leader_result: gl.vm.Result) -> bool:
+            if not isinstance(leader_result, gl.vm.Return):
+                return False
+            leader_context = leader_result.calldata
+            if not self._valid_review_context_record(case_id, epoch, leader_context):
+                return False
+            try:
+                validator_context = self._build_review_context(case_id, epoch, now)
+            except Exception:
+                return False
+            return validator_context == leader_context
+
+        review_context = gl.vm.run_nondet_unsafe(build_context, validate_context)
+        if not self._valid_review_context_record(case_id, epoch, review_context):
+            raise gl.vm.UserError("review context consensus result is invalid")
+        self.review_contexts[epoch_key] = str(review_context["contextJson"])
+        self.review_context_hashes[epoch_key] = str(review_context["contextHash"])
+        self.review_image_uris[epoch_key] = str(review_context["imageUri"])
+        self.review_image_hashes[epoch_key] = str(review_context["imageSha256"])
+        self.review_context_ready[epoch_key] = True
         self.evidence_sealed[epoch_key] = True
         self.evidence_sealed_at[epoch_key] = u256(now)
         self.evidence_sealed_by[epoch_key] = self.buyers[case_id]
@@ -1372,87 +2166,66 @@ class AccessSeal(gl.Contract):
             separators=(",", ":"),
         )
 
+    @gl.public.view
+    def get_review_context(self, case_id: str, epoch: u256) -> str:
+        self._require_case(case_id)
+        epoch_key = self._epoch_key(case_id, epoch)
+        if not self.review_context_ready[epoch_key]:
+            raise gl.vm.UserError("review context does not exist")
+        return _canonical_json(
+            {
+                "caseId": case_id,
+                "epoch": int(epoch),
+                "schemaVersion": REVIEW_CONTEXT_SCHEMA,
+                "ready": True,
+                "contextJson": self.review_contexts[epoch_key],
+                "contextHash": self.review_context_hashes[epoch_key],
+                "imageUri": self.review_image_uris[epoch_key],
+                "imageSha256": self.review_image_hashes[epoch_key],
+            }
+        )
+
     @gl.public.write
     def request_review(self, case_id: str) -> None:
         self._require_case(case_id)
-        if self.lifecycles[case_id] not in (
-            EVIDENCE_OPEN,
-            EVIDENCE_SEALED,
-        ):
+        if self.lifecycles[case_id] != EVIDENCE_SEALED:
             raise gl.vm.UserError("evidence is not open for review")
 
         epoch = self.epochs[case_id]
         epoch_key = self._epoch_key(case_id, epoch)
-        count = self.evidence_counts[epoch_key]
-        if int(count) < 2:
-            raise gl.vm.UserError(
-                "review requires at least one supporting evidence item"
-            )
         now = int(self._now())
         created_at = int(self.created_at_by_case[case_id])
         if now >= created_at + int(self.hard_deadlines[case_id]):
             raise gl.vm.UserError("case hard deadline has expired")
-        if (
-            not self.evidence_sealed[epoch_key]
-            and now <= created_at + int(self.evidence_deadlines[case_id])
-        ):
-            raise gl.vm.UserError(
-                "review is not eligible before the evidence cutoff"
-            )
         if epoch_key in self.review_results:
             raise gl.vm.UserError("review epoch is already finalized")
+        if not self.evidence_sealed[epoch_key]:
+            raise gl.vm.UserError("evidence is not sealed for review")
+        if not self.review_context_ready[epoch_key]:
+            raise gl.vm.UserError("review context is not ready")
 
         release_digest = self.release_digests[epoch_key]
         profile_hash = self.profile_hashes[case_id]
-        subject_origin = self.subject_origins[case_id]
+        context_json = self.review_contexts[epoch_key]
+        context_hash = self.review_context_hashes[epoch_key]
+        image_uri = self.review_image_uris[epoch_key]
+        image_hash = self.review_image_hashes[epoch_key]
+        if context_hash != _review_context_hash(context_json):
+            raise gl.vm.UserError("review context hash does not match")
+        context_record = {
+            "contextJson": context_json,
+            "contextHash": context_hash,
+            "imageUri": image_uri,
+            "imageSha256": image_hash,
+        }
+        if not self._valid_review_context_record(case_id, epoch, context_record):
+            raise gl.vm.UserError("review context record is invalid")
+
+        count = self.evidence_counts[epoch_key]
         evidence_refs: list[str] = []
-        evidence_types: list[str] = []
-        evidence_facts: list[object] = []
         for index in range(int(count)):
             evidence_key = self._evidence_key(case_id, epoch, u256(index))
-            envelope = json.loads(self.evidence_envelopes[evidence_key])
-            reference = self.evidence_hashes[evidence_key]
-            evidence_type = str(envelope["evidenceType"])
-            evidence_refs.append(reference)
-            if int(envelope["expiresAt"]) > now and evidence_type not in evidence_types:
-                evidence_types.append(evidence_type)
-            evidence_facts.append(
-                {
-                    "evidenceRef": reference,
-                    "evidenceType": evidence_type,
-                    "expiresAt": int(envelope["expiresAt"]),
-                    "fresh": int(envelope["expiresAt"]) > now,
-                    "mediaType": str(envelope["mediaType"]),
-                    "observedAt": int(envelope["observedAt"]),
-                    "payloadSha256": str(envelope["payloadSha256"]),
-                    "payloadUri": str(envelope["payloadUri"]),
-                    "submittedAt": int(envelope["submittedAt"]),
-                }
-            )
-
-        missing_mandatory: list[str] = []
-        for evidence_type in MANDATORY_EVIDENCE_TYPES:
-            if evidence_type not in evidence_types:
-                missing_mandatory.append(evidence_type)
-        if len(missing_mandatory) > 0:
-            review = _review_result(
-                "REQUEST_MORE_INFO",
-                release_digest,
-                profile_hash,
-                [],
-                missing_mandatory,
-                evidence_refs,
-                "mandatory evidence is missing, stale, or incomplete",
-            )
-            self._record_review_and_schedule_finality(case_id, epoch, review)
-            return
-
-        evidence_facts_json = json.dumps(
-            evidence_facts,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
+            evidence_refs.append(self.evidence_hashes[evidence_key])
 
         def unresolved(reason: str) -> dict[str, object]:
             return _review_result(
@@ -1462,227 +2235,23 @@ class AccessSeal(gl.Contract):
                 [],
                 [],
                 evidence_refs,
+                context_hash,
                 reason,
             )
 
-        def request_more_info(
-            missing: list[str], reason: str
-        ) -> dict[str, object]:
-            normalized_missing = list(missing)
-            normalized_missing.sort()
-            return _review_result(
-                "REQUEST_MORE_INFO",
+        def adjudicate() -> dict[str, object]:
+            screenshot = _fetch_exact_png(
+                image_uri,
+                image_hash,
+                MAX_SCREENSHOT_BYTES,
+            )
+            return _evaluate_review_context(
+                context_json,
+                screenshot,
+                evidence_refs,
                 release_digest,
                 profile_hash,
-                [],
-                normalized_missing,
-                evidence_refs,
-                reason,
-            )
-
-        def adjudicate(context_only: bool = False) -> dict[str, object]:
-            evidence_records = json.loads(evidence_facts_json)
-            records_by_type: dict[str, dict[str, object]] = {}
-            for required_type in MANDATORY_EVIDENCE_TYPES:
-                matches: list[dict[str, object]] = []
-                for item in evidence_records:
-                    if item["evidenceType"] == required_type:
-                        matches.append(item)
-                if len(matches) == 0:
-                    return request_more_info(
-                        [required_type],
-                        "mandatory evidence envelope is missing",
-                    )
-                if len(matches) != 1:
-                    return unresolved("evidence envelopes conflict by type")
-                if matches[0]["fresh"] is not True:
-                    return request_more_info(
-                        [required_type],
-                        "mandatory evidence envelope is stale",
-                    )
-                records_by_type[required_type] = matches[0]
-
-            manifest_record = records_by_type["RELEASE_MANIFEST"]
-            try:
-                manifest_response = gl.nondet.web.get(
-                    str(manifest_record["payloadUri"]),
-                    headers={"Accept": "application/json"},
-                )
-            except Exception:
-                return unresolved("release manifest could not be fetched")
-            if manifest_response.status != 200 or manifest_response.body is None:
-                return unresolved("release manifest returned an unavailable response")
-            manifest_body = manifest_response.body
-            if len(manifest_body) == 0 or len(manifest_body) > MAX_MANIFEST_BYTES:
-                return unresolved("release manifest exceeded its byte bound")
-            manifest_digest = "sha256:" + sha256(manifest_body).hexdigest()
-            if (
-                manifest_digest != release_digest
-                or manifest_digest != manifest_record["payloadSha256"]
-            ):
-                return unresolved("release manifest hash did not match its binding")
-            manifest = _parse_release_manifest(
-                manifest_body,
-                case_id,
-                int(epoch),
-                subject_origin,
-                profile_hash,
-            )
-            if manifest is None:
-                return unresolved("release manifest was malformed or wrongly bound")
-
-            manifest_files = manifest["files"]
-            entries_by_type: dict[str, dict[str, object]] = {}
-            missing_members: list[str] = []
-            for required_type in MANIFEST_EVIDENCE_TYPES:
-                entries: list[dict[str, object]] = []
-                for entry in manifest_files:
-                    if entry["evidenceType"] == required_type:
-                        entries.append(entry)
-                if len(entries) == 0:
-                    missing_members.append(required_type)
-                    continue
-                if len(entries) != 1:
-                    return unresolved("release manifest members conflict by type")
-                record = records_by_type[required_type]
-                manifest_entry = entries[0]
-                if (
-                    subject_origin + str(manifest_entry["path"])
-                    != record["payloadUri"]
-                    or manifest_entry["mediaType"] != record["mediaType"]
-                    or manifest_entry["sha256"] != record["payloadSha256"]
-                ):
-                    return unresolved(
-                        "release manifest member conflicts with its evidence envelope"
-                    )
-                entries_by_type[required_type] = manifest_entry
-            if len(missing_members) > 0:
-                return request_more_info(
-                    missing_members,
-                    "mandatory release manifest members are missing",
-                )
-
-            total_bytes = len(manifest_body)
-            payload_bodies: dict[str, bytes] = {}
-            for required_type in MANIFEST_EVIDENCE_TYPES:
-                record = records_by_type[required_type]
-                try:
-                    response = gl.nondet.web.get(
-                        str(record["payloadUri"]),
-                        headers={"Accept": str(record["mediaType"])},
-                    )
-                except Exception:
-                    return unresolved("mandatory artifact could not be fetched")
-                if response.status != 200 or response.body is None:
-                    return unresolved(
-                        "mandatory artifact returned an unavailable response"
-                    )
-                body = response.body
-                if len(body) == 0:
-                    return request_more_info(
-                        [required_type],
-                        "mandatory artifact payload is empty",
-                    )
-                byte_limit = MAX_JSON_ARTIFACT_BYTES
-                if required_type == "HTML_BUNDLE":
-                    byte_limit = MAX_HTML_BYTES
-                elif required_type == "SCREENSHOT":
-                    byte_limit = MAX_SCREENSHOT_BYTES
-                if len(body) > byte_limit:
-                    return unresolved("mandatory artifact exceeded its byte bound")
-                total_bytes += len(body)
-                if total_bytes > MAX_TOTAL_ARTIFACT_BYTES:
-                    return unresolved("artifact set exceeded its total byte bound")
-                payload_hash = "sha256:" + sha256(body).hexdigest()
-                if (
-                    payload_hash != record["payloadSha256"]
-                    or payload_hash != entries_by_type[required_type]["sha256"]
-                ):
-                    return unresolved("mandatory artifact hash did not match")
-                payload_bodies[required_type] = body
-
-            try:
-                page_text = payload_bodies["HTML_BUNDLE"].decode("utf-8")
-            except UnicodeDecodeError:
-                return unresolved("HTML artifact was not valid UTF-8")
-
-            json_artifacts: dict[str, object] = {}
-            for required_type in (
-                "DOM_FACTS",
-                "SCANNER_REPORT",
-                "CRITICAL_FLOW_TRACE",
-            ):
-                try:
-                    artifact_text = payload_bodies[required_type].decode("utf-8")
-                    artifact_value = json.loads(artifact_text)
-                except (UnicodeDecodeError, TypeError, ValueError):
-                    return unresolved("JSON artifact was malformed")
-                if not isinstance(artifact_value, dict):
-                    return unresolved("JSON artifact must be an object")
-                try:
-                    json.dumps(artifact_value, allow_nan=False)
-                except (TypeError, ValueError):
-                    return unresolved("JSON artifact contained non-finite numbers")
-                json_artifacts[required_type] = artifact_value
-
-            screenshot_body = payload_bodies["SCREENSHOT"]
-            if not screenshot_body.startswith(b"\x89PNG\r\n\x1a\n"):
-                return unresolved("screenshot artifact was not a PNG")
-
-            review_data_json = json.dumps(
-                {
-                    "artifacts": {
-                        "criticalFlowTrace": json_artifacts[
-                            "CRITICAL_FLOW_TRACE"
-                        ],
-                        "domFacts": json_artifacts["DOM_FACTS"],
-                        "html": page_text,
-                        "manifest": manifest,
-                        "scannerReport": json_artifacts["SCANNER_REPORT"],
-                        "screenshot": {
-                            "byteLength": len(screenshot_body),
-                            "mediaType": records_by_type["SCREENSHOT"]["mediaType"],
-                            "payloadSha256": records_by_type["SCREENSHOT"][
-                                "payloadSha256"
-                            ],
-                            "payloadUri": records_by_type["SCREENSHOT"]["payloadUri"],
-                        },
-                    },
-                    "binding": {
-                        "caseId": case_id,
-                        "epoch": int(epoch),
-                        "profileHash": profile_hash,
-                        "releaseDigest": release_digest,
-                        "subjectOrigin": subject_origin,
-                    },
-                    "evidenceFacts": evidence_records,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            )
-            context = {
-                "reviewDataJson": review_data_json,
-                "screenshotBody": screenshot_body,
-            }
-            if context_only:
-                return context
-            review_data_json = str(context["reviewDataJson"])
-            screenshot_body = context["screenshotBody"]
-            prompt = build_review_prompt(review_data_json)
-            try:
-                candidate = gl.nondet.exec_prompt(
-                    prompt,
-                    response_format="json",
-                    images=[screenshot_body],
-                )
-            except Exception:
-                return unresolved(MODEL_EXECUTION_FAILED)
-            return _safe_review_candidate(
-                candidate,
-                release_digest,
-                profile_hash,
-                evidence_refs,
+                context_hash,
             )
 
         def validate(leader_result: gl.vm.Result) -> bool:
@@ -1694,30 +2263,13 @@ class AccessSeal(gl.Contract):
                 release_digest,
                 profile_hash,
                 evidence_refs,
+                context_hash,
             ):
                 return False
-            context = adjudicate(True)
-            if "reviewDataJson" not in context:
-                return context == leader_review
-            review_data_json = str(context["reviewDataJson"])
-            screenshot_body = context["screenshotBody"]
-            validation_prompt = build_review_validation_prompt(
-                review_data_json,
-                json.dumps(
-                    leader_review,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-            )
-            try:
-                support = gl.nondet.exec_prompt(
-                    validation_prompt,
-                    response_format="json",
-                    images=[screenshot_body],
-                )
-            except Exception:
-                return False
-            return _safe_support_candidate(support)
+            validator_review = adjudicate()
+            return _review_consensus_fields(
+                validator_review
+            ) == _review_consensus_fields(leader_review)
 
         review = gl.vm.run_nondet_unsafe(adjudicate, validate)
         if not _reviews_semantically_valid(
@@ -1725,6 +2277,7 @@ class AccessSeal(gl.Contract):
             release_digest,
             profile_hash,
             evidence_refs,
+            context_hash,
         ):
             review = unresolved("consensus result failed final semantic validation")
         self._record_review_and_schedule_finality(case_id, epoch, review)
@@ -1835,6 +2388,11 @@ class AccessSeal(gl.Contract):
         self.evidence_sealed[epoch_key] = False
         self.evidence_sealed_at[epoch_key] = u256(0)
         self.evidence_sealed_by[epoch_key] = Address(bytes(20))
+        self.review_contexts[epoch_key] = ""
+        self.review_context_hashes[epoch_key] = ""
+        self.review_context_ready[epoch_key] = False
+        self.review_image_uris[epoch_key] = ""
+        self.review_image_hashes[epoch_key] = ""
         self.review_attempts[epoch_key] = u256(0)
         self.lifecycles[case_id] = EVIDENCE_OPEN
 

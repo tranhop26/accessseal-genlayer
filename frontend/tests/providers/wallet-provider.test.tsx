@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  classifyWalletChangeFailure,
   requestWalletAccount,
   useWallet,
   WalletProvider,
@@ -92,6 +93,11 @@ beforeEach(() => {
 });
 
 describe("requestWalletAccount", () => {
+  it("classifies a cancelled account change as a wallet rejection", () => {
+    expect(classifyWalletChangeFailure({ code: 4001 })).toBe(
+      "WALLET_REJECTED",
+    );
+  });
   it("requests account permission before reading the changed wallet account", async () => {
     const provider = {
       request: vi.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce([ADDRESS]),

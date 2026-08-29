@@ -55,8 +55,8 @@ def _review_rmi(contract, direct_vm, buyer, vendor, *, salt="rmi-0"):
         buyer,
         vendor,
         salt=salt,
-        supporting_evidence=("HTML_BUNDLE",),
     )
+    direct_vm._live_llm_handler = _rmi_review_handler
     contract.request_review(case_id)
     assert json.loads(contract.get_review(case_id, 0))["verdict"] == (
         "REQUEST_MORE_INFO"
@@ -66,10 +66,12 @@ def _review_rmi(contract, direct_vm, buyer, vendor, *, salt="rmi-0"):
 
 def _open_cure_epoch(
     contract,
+    direct_vm,
+    buyer,
     case_id,
     vendor,
     *,
-    supporting_evidence=("HTML_BUNDLE",),
+    supporting_evidence=ALL_SUPPORTING_EVIDENCE,
 ):
     release = build_release(case_id)
     manifest = copy.deepcopy(release["manifest"])
@@ -113,7 +115,23 @@ def _open_cure_epoch(
         evidence["submittedAt"] = 1_786_580_990
         evidence["expiresAt"] = 1_786_586_000
         contract.as_(vendor).append_evidence(case_id, compact_json(evidence))
+    mock_adjudication(direct_vm, release, llm_handler=_rmi_review_handler)
+    contract.as_(buyer).close_evidence(case_id)
     return release
+
+
+def _rmi_review_handler(_data):
+    return {
+        "ok": semantic_only_candidate(
+            "REQUEST_MORE_INFO",
+            missing=["SCREENSHOT"],
+            rationale="The sealed screenshot evidence needs clarification.",
+        )
+    }
+
+
+def _failed_review_handler(_data):
+    raise RuntimeError("model unavailable")
 
 
 def test_review_finality_uses_authenticated_idempotent_finalized_self_message(
@@ -157,9 +175,7 @@ def test_finality_callback_rejects_forged_wrong_and_stale_domains_without_mutati
     case_id, release = open_reviewable_case(
         contract, direct_vm, buyer, vendor, salt="finality-forgery"
     )
-    mock_adjudication(
-        direct_vm, release, status_overrides={"RELEASE_MANIFEST": 503}
-    )
+    direct_vm._live_llm_handler = _failed_review_handler
     contract.request_review(case_id)
     self_address = Address(contract.get_case_json(case_id)["contractAddress"])
     pending = _finality(contract, case_id)
@@ -208,9 +224,7 @@ def test_multiple_retries_preserve_complete_attempt_scoped_audit_records(
     case_id, release = open_reviewable_case(
         contract, direct_vm, buyer, vendor, salt="attempt-audit"
     )
-    mock_adjudication(
-        direct_vm, release, status_overrides={"RELEASE_MANIFEST": 503}
-    )
+    direct_vm._live_llm_handler = _failed_review_handler
     contract.request_review(case_id)
     _confirm_finality(contract, case_id)
     attempt_zero = json.loads(contract.get_review_attempt(case_id, 0, 0))
@@ -260,9 +274,6 @@ def test_one_rmi_cure_preserves_history_and_rejects_old_epoch_domain(
     assert json.loads(contract.get_review_attempt(case_id, 0, 0))["review"] == (
         old_review
     )
-    new_release = _open_cure_epoch(contract, case_id, vendor)
-    assert new_release["releaseDigest"] != old_release["releaseDigest"]
-
     old_envelope = envelope_for(
         contract,
         case_id,
@@ -278,6 +289,11 @@ def test_one_rmi_cure_preserves_history_and_rejects_old_epoch_domain(
         message="evidence epoch does not match current epoch",
     )
 
+    new_release = _open_cure_epoch(
+        contract, direct_vm, buyer, case_id, vendor
+    )
+    assert new_release["releaseDigest"] != old_release["releaseDigest"]
+
     contract.request_review(case_id)
     _confirm_finality(contract, case_id)
     contract.as_(vendor).start_cure.reverts(
@@ -285,17 +301,16 @@ def test_one_rmi_cure_preserves_history_and_rejects_old_epoch_domain(
     )
 
 
-def test_cure_epoch_resets_seal_and_requires_a_new_seal_before_cutoff(
-    contract, direct_vm, buyer, vendor
+def test_cure_epoch_resets_seal_and_all_v4_review_context_maps(
+    contract,
+    direct_vm,
+    buyer,
+    vendor,
+    complete_v4_case,
+    v4_web_routes,
 ):
-    case_id, release = open_reviewable_case(
-        contract,
-        direct_vm,
-        buyer,
-        vendor,
-        salt="sealed-rmi-before-cutoff",
-        advance_to_cutoff=False,
-    )
+    case_id, release = complete_v4_case(contract, buyer, vendor)
+    v4_web_routes(release)
     mock_adjudication(
         direct_vm,
         release,
@@ -319,44 +334,17 @@ def test_cure_epoch_resets_seal_and_requires_a_new_seal_before_cutoff(
     assert cured["evidenceSealed"] is False
     assert cured["evidenceSealedAt"] == 0
     assert cured["evidenceSealedBy"] == "0x" + "00" * 20
-
-    direct_vm.warp("2026-08-13T00:29:51+00:00")
-    cure_release = _open_cure_epoch(
-        contract,
-        case_id,
-        vendor,
-        supporting_evidence=ALL_SUPPORTING_EVIDENCE,
+    assert cured["reviewContextReady"] is False
+    assert cured["reviewContextHash"] == ""
+    epoch_key = case_id + "|1"
+    assert contract.review_contexts[epoch_key] == ""
+    assert contract.review_context_hashes[epoch_key] == ""
+    assert contract.review_context_ready[epoch_key] is False
+    assert contract.review_image_uris[epoch_key] == ""
+    assert contract.review_image_hashes[epoch_key] == ""
+    contract.get_review_context.reverts(
+        case_id, 1, message="review context does not exist"
     )
-    cure_evidence = json.loads(contract.get_evidence(case_id, 1))
-    assert [
-        envelope["evidenceType"] for envelope in cure_evidence["envelopes"]
-    ] == [
-        "RELEASE_MANIFEST",
-        "HTML_BUNDLE",
-        "SCREENSHOT",
-        "DOM_FACTS",
-        "SCANNER_REPORT",
-        "CRITICAL_FLOW_TRACE",
-    ]
-    contract.request_review.reverts(
-        case_id,
-        message="review is not eligible before the evidence cutoff",
-    )
-
-    contract.as_(buyer).close_evidence(case_id)
-    resealed = contract.get_case_json(case_id)
-    assert resealed["lifecycle"] == "EVIDENCE_SEALED"
-    assert resealed["evidenceSealed"] is True
-    assert resealed["evidenceSealedAt"] == 1_786_580_991
-    assert resealed["evidenceSealedBy"] == buyer.as_hex.lower()
-
-    mock_adjudication(direct_vm, cure_release)
-    contract.request_review(case_id)
-
-    assert _finality(contract, case_id)["status"] == (
-        "PENDING_PROTOCOL_FINALITY"
-    )
-    assert json.loads(contract.get_review(case_id, 1))["verdict"] == "APPROVED"
 
 
 def test_cure_requires_vendor_rmi_finality_and_never_changes_funded_terms(
@@ -404,9 +392,7 @@ def test_unresolved_retry_enforces_active_gate_cooldown_unique_ids_and_budget(
     contract, direct_vm, buyer, vendor, outsider
 ):
     case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
-    mock_adjudication(
-        direct_vm, release, status_overrides={"RELEASE_MANIFEST": 503}
-    )
+    direct_vm._live_llm_handler = _failed_review_handler
     contract.request_review(case_id)
     assert json.loads(contract.get_review(case_id, 0))["verdict"] == "UNRESOLVED"
 
@@ -465,10 +451,7 @@ def test_unresolved_retry_before_cutoff_reuses_current_epoch_seal(
         salt="sealed-retry-before-cutoff",
         advance_to_cutoff=False,
     )
-    mock_adjudication(
-        direct_vm, release, status_overrides={"RELEASE_MANIFEST": 503}
-    )
-    contract.as_(buyer).close_evidence(case_id)
+    direct_vm._live_llm_handler = _failed_review_handler
     sealed = contract.get_case_json(case_id)
     contract.request_review(case_id)
     _confirm_finality(contract, case_id)
@@ -487,9 +470,7 @@ def test_expire_unresolved_creates_deterministic_buyer_refund_only_after_budget(
     contract, direct_vm, buyer, vendor, outsider
 ):
     case_id, release = open_reviewable_case(contract, direct_vm, buyer, vendor)
-    mock_adjudication(
-        direct_vm, release, status_overrides={"RELEASE_MANIFEST": 503}
-    )
+    direct_vm._live_llm_handler = _failed_review_handler
     contract.request_review(case_id)
     _confirm_finality(contract, case_id)
     contract.as_(outsider).expire_unresolved.reverts(
@@ -532,7 +513,6 @@ def test_hard_timeout_refund_is_permissionless_and_blocked_by_active_review(
         vendor,
         salt="timeout-no-review",
         advance_to_cutoff=False,
-        supporting_evidence=("HTML_BUNDLE",),
     )
     direct_vm.warp("2026-08-13T02:00:01+00:00")
     contract.as_(outsider).timeout_refund(timeout_case)

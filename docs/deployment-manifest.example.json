@@ -1,14 +1,15 @@
 {
-  "chainId": 61999,
-  "contractAddress": "REPLACE_WITH_DEPLOYED_CONTRACT_ADDRESS",
-  "contractClassification": "INTENTIONALLY_FROZEN",
-  "deployedAt": "REPLACE_WITH_UTC_DEPLOYMENT_TIMESTAMP",
-  "deploymentTransaction": "REPLACE_WITH_DEPLOYMENT_TRANSACTION_HASH",
-  "gitCommit": "REPLACE_WITH_EXACT_CLEAN_GIT_COMMIT",
-  "network": "studionet",
-  "readableSourceSha256": "REPLACE_WITH_READABLE_SOURCE_SHA256",
-  "deploymentArtifactSha256": "REPLACE_WITH_DEPLOYMENT_ARTIFACT_SHA256",
-  "schemaSha256": "REPLACE_WITH_DEPLOYED_SCHEMA_SHA256",
   "schemaVersion": "accessseal-deployment-manifest/2",
-  "sourceSha256": "REPLACE_WITH_DEPLOYMENT_ARTIFACT_SHA256"
+  "contractVersion": "V4",
+  "network": "Not yet executed",
+  "chainId": "Not yet executed",
+  "contractAddress": "Not yet executed",
+  "deploymentTransaction": "Not yet executed",
+  "readableSourceSha256": "Not yet executed",
+  "deploymentArtifactSha256": "Not yet executed",
+  "sourceSha256": "Not yet executed",
+  "schemaSha256": "Not yet executed",
+  "gitCommit": "Not yet executed",
+  "deployedAt": "Not yet executed",
+  "contractClassification": "INTENTIONALLY_FROZEN"
 }

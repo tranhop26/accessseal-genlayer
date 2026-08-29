@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { deflateSync } from "node:zlib";
 import test, { afterEach, beforeEach } from "node:test";
 
 import { MEDIA_TYPES, canonicalizeEvidence, hashEvidence } from "../../scripts/generate-evidence.ts";
@@ -12,7 +13,7 @@ import {
   type BuiltEnvelope,
 } from "../../scripts/generate-live-envelopes.ts";
 import { generateLiveEvidenceBundle, verifyPublicEvidence } from "../../scripts/generate-live-evidence.ts";
-import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS, RELEASE_MANIFEST_PATH } from "../../scripts/live-evidence-schema.ts";
+import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS, RELEASE_MANIFEST_PATH, sha256 } from "../../scripts/live-evidence-schema.ts";
 
 const roots: string[] = [];
 let publicDir = "";
@@ -106,6 +107,46 @@ async function built(): Promise<BuiltEnvelope[]> {
   return buildLiveEnvelopeSet({ publicDir, submittedAt, expiresAt, generationId });
 }
 
+function crc32(bytes: Uint8Array): number {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let index = 0; index < 8; index += 1) value = (value >>> 1) ^ (-(value & 1) & 0xedb88320);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function chunk(type: string, data: Uint8Array): Buffer {
+  const result = Buffer.alloc(12 + data.byteLength);
+  result.writeUInt32BE(data.byteLength, 0);
+  result.write(type, 4, "ascii");
+  Buffer.from(data).copy(result, 8);
+  result.writeUInt32BE(crc32(result.subarray(4, 8 + data.byteLength)), 8 + data.byteLength);
+  return result;
+}
+
+function validPng(): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(320, 0);
+  header.writeUInt32BE(180, 4);
+  header[8] = 8;
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.alloc((320 + 1) * 180))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function v4Options(screenshot: Uint8Array) {
+  const { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
+  return { binding: { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor, casePath: `/cases/${caseId}`, auditedPageUrls: [`${subjectOrigin}/cases`, `${subjectOrigin}/cases/new`, `${subjectOrigin}/cases/${caseId}`], criticalFlows: [
+    { id: "workspace-navigation", pageUrl: `${subjectOrigin}/cases`, checkpoints: ["skip-focused", "main-focused", "overview-navigation", "cases-navigation"] },
+    { id: "create-case-preview", pageUrl: `${subjectOrigin}/cases/new`, checkpoints: ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"] },
+    { id: "case-section-navigation", pageUrl: `${subjectOrigin}/cases/${caseId}`, checkpoints: ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"] },
+  ], maxObservationAgeSeconds: 86400, maxEnvelopeLifetimeSeconds: 518400, replayDomain: "v4-candidate-replay", profileHash: `0x${"0123456789abcdef".repeat(4)}`, releaseId: "v4-candidate-20260828" }, reviewImageSha256: `sha256:${sha256(screenshot)}` };
+}
+
 test("verifies a V2 versioned-manifest bundle without trusting cached metadata", async () => {
   const verified = await verifyPublicEvidence(publicDir);
   assert.equal(verified.manifest.files.length, 5);
@@ -159,6 +200,73 @@ test("builds one OPEN_RELEASE and five canonical APPEND_EVIDENCE envelopes", asy
     assert.equal(envelope.payloadSha256, file.sha256);
     assert.equal(envelope.releaseDigest, verified.releaseDigest);
   }
+});
+
+test("V4 envelopes carry the manifest-bound screenshot path, hash, and media type", async () => {
+  const screenshot = validPng();
+  const capture = join(roots[0]!, "v4-capture");
+  await mkdir(capture);
+  for (const [name, source] of [["release.html", "release.html"], ["dom-facts.json", "dom-facts.json"], ["scanner-report.json", "scanner-report.json"], ["critical-flow-trace.json", "critical-flow-trace.json"]] as const) {
+    await writeFile(join(capture, name), await readFile(join(roots[0]!, "capture", source)));
+  }
+  await writeFile(join(capture, "screenshot.png"), screenshot);
+  const base = v4Options(screenshot);
+  const caseId = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const subjectOrigin = "https://v4-audited.example";
+  const urls = [`${subjectOrigin}/cases`, `${subjectOrigin}/cases/new`, `${subjectOrigin}/cases/${caseId}`];
+  const v4 = {
+    ...base,
+    binding: {
+      ...base.binding,
+      caseId,
+      casePath: `/cases/${caseId}`,
+      subjectOrigin,
+      flowsHash: "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      caseCreatedAt: LIVE_EVIDENCE_BINDING.caseCreatedAt - 100,
+      evidenceDeadlineSeconds: 43_200,
+      hardDeadlineSeconds: 600_000,
+      maxObservationAgeSeconds: 60,
+      maxEnvelopeLifetimeSeconds: 86_400,
+      replayDomain: "v4-distinct-replay",
+      auditedPageUrls: urls,
+      criticalFlows: base.binding.criticalFlows.map((flow, index) => ({ ...flow, id: ["v4-workspace-run", "v4-create-run", "v4-case-run"][index]!, pageUrl: urls[index]! })),
+    },
+  };
+  const rewrite = async (name: string, transform: (value: Record<string, unknown>) => void) => {
+    const value = JSON.parse(await readFile(join(capture, name), "utf8")) as Record<string, unknown>;
+    transform(value);
+    await writeFile(join(capture, name), JSON.stringify(value));
+  };
+  await rewrite("dom-facts.json", (facts) => { facts.observedAt = observedAt; facts.pages = (facts.pages as Array<Record<string, unknown>>).map((page, index) => ({ ...page, url: urls[index] })); });
+  await rewrite("scanner-report.json", (report) => { report.observedAt = observedAt; report.scans = (report.scans as Array<Record<string, unknown>>).map((scan, index) => ({ ...scan, url: urls[index] })); });
+  await rewrite("critical-flow-trace.json", (trace) => {
+    trace.caseId = caseId;
+    trace.flowsHash = v4.binding.flowsHash;
+    trace.observedAt = observedAt;
+    trace.flows = (trace.flows as Array<Record<string, unknown>>).map((flow, index) => ({ ...flow, id: ["v4-workspace-run", "v4-create-run", "v4-case-run"][index], steps: (flow.steps as Array<Record<string, unknown>>).map((step) => ({ ...step, page: urls[index] })) }));
+  });
+  await generateLiveEvidenceBundle(capture, publicDir, { v4 } as any);
+  const set = await (buildLiveEnvelopeSet as any)({ publicDir, submittedAt, expiresAt: submittedAt + 86_400, generationId, v4 }) as BuiltEnvelope[];
+  const verified = await verifyPublicEvidence(publicDir, { v4 } as any);
+  const manifestScreenshot = verified.manifest.files.find((file) => file.evidenceType === "SCREENSHOT");
+  const screenshotEnvelope = set.find((item) => item.envelope.evidenceType === "SCREENSHOT");
+
+  assert.ok(manifestScreenshot);
+  assert.ok(screenshotEnvelope);
+  assert.equal(screenshotEnvelope.envelope.payloadUri, `${subjectOrigin}${manifestScreenshot.path}`);
+  assert.equal(screenshotEnvelope.envelope.payloadSha256, manifestScreenshot.sha256);
+  assert.equal(screenshotEnvelope.envelope.mediaType, manifestScreenshot.mediaType);
+  assert.equal(verified.manifest.schemaVersion, "accessseal-release-manifest/2");
+  assert.equal((verified.manifest as any).reviewImage.sha256, screenshotEnvelope.envelope.payloadSha256);
+  assert.equal(screenshotEnvelope.envelope.caseId, caseId);
+  assert.match(screenshotEnvelope.envelope.nonce, /^v4-distinct-replay-v4-candidate-20260828-/);
+  await assert.rejects(
+    (buildLiveEnvelopeSet as any)({ publicDir, submittedAt, expiresAt: submittedAt + 86_401, generationId, v4 }),
+    /86400|expiry/i,
+  );
+  const legacySet = await built();
+  const legacyEvidence = await verifyPublicEvidence(publicDir);
+  assert.throws(() => (validateLiveEnvelopeSet as any)(legacySet, legacyEvidence, { v4 }), /case|domain/i);
 });
 
 test("rejects invalid freshness and expiry domains", async () => {

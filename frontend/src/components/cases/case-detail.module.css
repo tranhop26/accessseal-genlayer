@@ -359,6 +359,389 @@
   gap: 0.75rem;
 }
 
+.workflowOverview {
+  border-top: 1px solid var(--as-border);
+  display: grid;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+}
+
+.workflowOverviewHeader,
+.commandPanelHeader,
+.evidenceSummary,
+.activityList header {
+  align-items: flex-start;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.workflowOverviewHeader h2,
+.commandPanelHeader h2,
+.activityList h3,
+.evidenceWorkspaceItem h3 {
+  margin: 0;
+}
+
+.activeRole,
+.recordCount {
+  background: var(--as-info-surface);
+  border-radius: 999px;
+  color: var(--as-info);
+  display: inline-flex;
+  font-size: 0.75rem;
+  gap: 0.4rem;
+  padding: 0.45rem 0.7rem;
+}
+
+.activeRole span {
+  color: var(--as-muted);
+}
+
+.workflowStepper {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.workflowStepper li {
+  align-items: flex-start;
+  border-top: 2px solid var(--as-border);
+  color: var(--as-muted);
+  display: flex;
+  gap: 0.65rem;
+  padding: 0.85rem 0.6rem 0;
+}
+
+.workflowStepper li[data-state="complete"] {
+  border-color: #5bc5a4;
+}
+
+.workflowStepper li[data-state="current"] {
+  border-color: var(--as-primary);
+  color: var(--as-text);
+}
+
+.stageIcon {
+  align-items: center;
+  background: var(--as-bg);
+  border: 1px solid var(--as-border);
+  border-radius: 50%;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-weight: 800;
+  height: 1.5rem;
+  justify-content: center;
+  width: 1.5rem;
+}
+
+.workflowStepper li[data-state="complete"] .stageIcon {
+  background: var(--as-success-surface);
+  border-color: #9de0c8;
+  color: var(--as-success);
+}
+
+.workflowStepper li[data-state="current"] .stageIcon {
+  background: #f0efff;
+  border-color: #b9b4ff;
+  color: var(--as-primary-hover);
+}
+
+.stageCopy {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.stageCopy small {
+  line-height: 1.35;
+}
+
+.roleWarning {
+  background: #fffaf0;
+  border-left: 3px solid var(--as-warning);
+  border-radius: var(--as-radius-sm);
+  margin: 0;
+  padding: 0.8rem 1rem;
+}
+
+.roleWarning > span {
+  color: var(--as-warning);
+  font-weight: 900;
+}
+
+.evidenceReviewSplit {
+  align-items: start;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1.15fr) minmax(20rem, 0.85fr);
+}
+
+.commandPanel,
+.accountingPanel,
+.activityPanel {
+  background: var(--as-surface);
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-md);
+  box-shadow: var(--as-shadow);
+  display: grid;
+  gap: 1rem;
+  padding: 1.25rem;
+  scroll-margin-top: 1rem;
+}
+
+.recordCount {
+  background: var(--as-bg);
+  color: var(--as-muted);
+  white-space: nowrap;
+}
+
+.evidenceControls,
+.evidenceControls label {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.evidenceControls label {
+  font-size: 0.8rem;
+  font-weight: 750;
+}
+
+.evidenceControls textarea {
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-sm);
+  font: 0.82rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace;
+  min-height: 10rem;
+  padding: 0.75rem;
+  resize: vertical;
+}
+
+.evidenceWorkspaceList {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.evidenceWorkspaceItem {
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-sm);
+  overflow: hidden;
+}
+
+.evidenceDetails {
+  min-width: 0;
+}
+
+.evidenceSummary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  list-style-position: inside;
+  min-height: 44px;
+  padding: 1rem;
+}
+
+.evidenceSummary > span:first-child {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.evidenceMediaType {
+  color: var(--as-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.evidenceDetailsBody {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+  padding: 0 1rem 1rem;
+}
+
+.evidenceTypeLabel {
+  font-size: 0.92rem;
+  font-weight: 800;
+}
+
+.semanticSuccess,
+.semanticWarning,
+.semanticDanger {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 0.72rem;
+  font-weight: 750;
+  gap: 0.35rem;
+  padding: 0.35rem 0.55rem;
+  white-space: nowrap;
+}
+
+.semanticSuccess { background: var(--as-success-surface); color: var(--as-success); }
+.semanticWarning { background: var(--as-warning-surface); color: #855900; }
+.semanticDanger { background: var(--as-danger-surface); color: var(--as-danger); }
+
+.safePreview {
+  background: var(--as-bg);
+  border-radius: var(--as-radius-sm);
+  min-height: 8rem;
+  overflow: hidden;
+}
+
+.safePreview img,
+.safePreview iframe {
+  border: 0;
+  display: block;
+  height: 13rem;
+  object-fit: contain;
+  width: 100%;
+}
+
+.metadataOnly {
+  background: var(--as-bg);
+  border-radius: var(--as-radius-sm);
+  color: var(--as-muted);
+  font-size: 0.78rem;
+  margin: 0;
+  padding: 0.7rem;
+}
+
+.evidenceMetadata,
+.reviewFacts {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.evidenceMetadata > div,
+.reviewFacts > div {
+  border-top: 1px solid var(--as-border);
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: minmax(8rem, 0.42fr) minmax(0, 1fr);
+  padding: 0.65rem 0;
+}
+
+.evidenceMetadata dt,
+.reviewFacts dt {
+  color: var(--as-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.evidenceMetadata dd,
+.reviewFacts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.evidenceMetadata code,
+.reviewFacts code,
+.activityList code {
+  overflow-wrap: anywhere;
+}
+
+.verdictCard,
+.pendingVerdict {
+  align-items: flex-start;
+  background: var(--as-bg);
+  border: 1px solid var(--as-border);
+  border-left-width: 3px;
+  border-radius: var(--as-radius-sm);
+  display: flex;
+  gap: 0.8rem;
+  padding: 1rem;
+}
+
+.verdictCard[data-tone="success"] { border-left-color: var(--as-success); }
+.verdictCard[data-tone="danger"] { border-left-color: var(--as-danger); }
+.verdictCard[data-tone="warning"] { border-left-color: var(--as-warning); }
+.pendingVerdict { border-left-color: var(--as-info); }
+
+.verdictCard h3,
+.verdictCard p,
+.pendingVerdict p {
+  margin: 0.25rem 0 0;
+}
+
+.verdictIcon,
+.pendingVerdict > span {
+  align-items: center;
+  background: var(--as-surface);
+  border-radius: 50%;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-weight: 900;
+  height: 1.8rem;
+  justify-content: center;
+  width: 1.8rem;
+}
+
+.accountingMetrics {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.accountingMetrics > div {
+  background: var(--as-bg);
+  border-radius: var(--as-radius-sm);
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.9rem;
+}
+
+.accountingMetrics span {
+  color: var(--as-muted);
+  font-size: 0.75rem;
+}
+
+.activityList {
+  display: grid;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.activityList > li {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 0.9rem 0;
+}
+
+.activityList > li + li {
+  border-top: 1px solid var(--as-border);
+}
+
+.activityMarker {
+  align-items: center;
+  background: var(--as-success-surface);
+  border-radius: 50%;
+  color: var(--as-success);
+  display: inline-flex;
+  font-size: 0.72rem;
+  height: 1.6rem;
+  justify-content: center;
+  width: 1.6rem;
+}
+
+.activityList time {
+  color: var(--as-muted);
+  font-size: 0.75rem;
+}
+
+.activityList p { color: var(--as-muted); margin: 0.35rem 0; }
+.activityList dl { display: flex; flex-wrap: wrap; gap: 0.8rem; margin: 0; }
+.activityList dl > div { display: flex; gap: 0.35rem; min-width: 0; }
+.activityList dt { color: var(--as-muted); font-size: 0.75rem; }
+.activityList dd { margin: 0; min-width: 0; }
+
 .hashBox {
   background: var(--as-bg);
   border-radius: var(--as-radius-sm);
@@ -614,12 +997,61 @@
   opacity: 0.5;
 }
 
+.walletPromptBackdrop {
+  align-items: center;
+  background: rgb(10 37 64 / 48%);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 1rem;
+  position: fixed;
+  z-index: 40;
+}
+
+.walletPrompt {
+  background: var(--as-surface);
+  border-radius: var(--as-radius-md);
+  box-shadow: 0 24px 80px rgb(10 37 64 / 28%);
+  max-width: 30rem;
+  padding: 1.5rem;
+  width: min(100%, 30rem);
+}
+
+.walletPrompt h2 {
+  margin: 0;
+}
+
+.walletPrompt p {
+  color: var(--as-muted);
+  line-height: 1.55;
+}
+
+@media (min-width: 768px) and (max-width: 1099px) {
+  .evidenceReviewSplit {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 767px) {
   .summaryGrid,
   .twoColumn,
-  .decisionLayout {
+  .decisionLayout,
+  .evidenceReviewSplit {
     grid-template-columns: 1fr;
   }
+
+  .workflowStepper {
+    grid-template-columns: 1fr;
+  }
+
+  .workflowStepper li {
+    border-left: 2px solid var(--as-border);
+    border-top: 0;
+    padding: 0.45rem 0 0.9rem 0.85rem;
+  }
+
+  .workflowStepper li[data-state="complete"] { border-left-color: #5bc5a4; }
+  .workflowStepper li[data-state="current"] { border-left-color: var(--as-primary); }
 
   .summaryItem,
   .summaryItem:nth-child(3n) {
@@ -629,11 +1061,39 @@
   .metricGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .accountingMetrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summaryAction {
+    background: var(--as-surface);
+    bottom: calc(4.35rem + env(safe-area-inset-bottom));
+    box-shadow: 0 -10px 24px rgb(10 37 64 / 8%);
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+    position: sticky;
+    z-index: 4;
+  }
+
+  .hashCode,
+  .hashBox code,
+  .summaryItem code,
+  .compactDl code,
+  .card code,
+  .actionCard code {
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
 }
 
 @media (max-width: 479px) {
   .summaryHeader,
   .summaryAction,
+  .workflowOverviewHeader,
+  .commandPanelHeader,
+  .evidenceSummary,
+  .activityList header,
   .dispatchState,
   .errorNotice {
     align-items: stretch;
@@ -647,6 +1107,10 @@
   }
 
   .workflowSection,
+  .workflowOverview,
+  .commandPanel,
+  .accountingPanel,
+  .activityPanel,
   .summaryHeader,
   .summaryItem,
   .summaryAction {
@@ -655,6 +1119,16 @@
 
   .compactDl > div {
     gap: 0.25rem;
+    grid-template-columns: 1fr;
+  }
+
+  .evidenceMetadata > div,
+  .reviewFacts > div {
+    gap: 0.25rem;
+    grid-template-columns: 1fr;
+  }
+
+  .accountingMetrics {
     grid-template-columns: 1fr;
   }
 

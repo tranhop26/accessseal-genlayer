@@ -29,9 +29,9 @@ import {
 import styles from "./cases.module.css";
 
 const STORAGE_KEY = "accessseal.case-ids.v1";
-const SHA256_CASE_ID = /^sha256:[0-9a-f]{64}$/;
+const CASE_ID = /^(?:sha256:|0x)[0-9a-f]{64}$/;
 const IMPORT_ERROR =
-  "Enter a case ID in the form sha256: followed by 64 lowercase hexadecimal characters.";
+  "Enter a lowercase 0x or sha256: case ID followed by 64 hexadecimal characters.";
 
 function readKnownIds(): string[] {
   if (typeof window === "undefined") return [];
@@ -45,7 +45,7 @@ function readKnownIds(): string[] {
     )
       return [];
     return parsed.filter(
-      (id, index) => SHA256_CASE_ID.test(id) && parsed.indexOf(id) === index,
+      (id, index) => CASE_ID.test(id) && parsed.indexOf(id) === index,
     );
   } catch {
     return [];
@@ -207,7 +207,7 @@ export function CasesDashboard() {
   function importCase(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const caseId = value.trim();
-    if (!SHA256_CASE_ID.test(caseId)) {
+    if (!CASE_ID.test(caseId)) {
       setImportError(IMPORT_ERROR);
       return;
     }

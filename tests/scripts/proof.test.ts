@@ -86,6 +86,7 @@ after(async () => rm(root, { recursive: true, force: true }));
 
 const manifest: DeploymentManifest = {
   schemaVersion: "accessseal-deployment-manifest/2",
+  contractVersion: "V4",
   network: "studionet",
   chainId: 61999,
   contractAddress: contract,

@@ -8,7 +8,7 @@ import {
   canonicalJsonHash,
   removeExclusiveJsonInstall,
   sourceHash,
-  withV3ManifestNamespaceLease,
+  withV3ManifestNamespaceLease as withV4ManifestNamespaceLease,
   type ExclusiveJsonInstallReceipt,
 } from "../scripts/source-hash.ts";
 import {
@@ -17,7 +17,9 @@ import {
   identifyClientNetwork,
   normalizeReceipt,
   readRepositoryGitState,
+  readReviewedArtifactSchema,
   verifyDeployment,
+  verifyFrozenSchema,
   verifyTrackedArtifact,
   type DeploymentManifest,
   type NetworkName,
@@ -35,12 +37,12 @@ export type DeploymentClient = VerificationClient & {
 };
 
 export type GitState = { commit: string; clean: boolean };
-export type V3DeploymentManifest = DeploymentManifest & {
-  contractVersion: "V3";
+export type V4DeploymentManifest = DeploymentManifest & {
+  contractVersion: "V4";
 };
-export type V3ManifestPath = {
+export type V4ManifestPath = {
   network: string;
-  contractVersion: "V3";
+  contractVersion: "V4";
   contractAddress: string;
   deploymentArtifactSha256: string;
 };
@@ -67,30 +69,30 @@ function deploymentManifestDirectory(
   network: string,
   deploymentArtifactSha256: string,
 ): string {
-  if (!SOURCE_HASH.test(deploymentArtifactSha256)) {
+  if (!SOURCE_HASH.test(deploymentArtifactSha256) || isRepeatedHex(deploymentArtifactSha256)) {
     throw new Error("deployment artifact source hash is invalid");
   }
   return join(
-    deploymentManifestV3Root(repoRoot, network),
+    deploymentManifestV4Root(repoRoot, network),
     deploymentArtifactSha256,
   );
 }
 
-function deploymentManifestV3Root(repoRoot: string, network: string): string {
+function deploymentManifestV4Root(repoRoot: string, network: string): string {
   return join(
     repoRoot,
     "work",
     "deployments",
     validateNetworkName(network),
-    "v3",
+    "v4",
   );
 }
 
 export function deploymentManifestPath(
   repoRoot: string,
-  value: V3ManifestPath,
+  value: V4ManifestPath,
 ): string {
-  if (value.contractVersion !== "V3") {
+  if (value.contractVersion !== "V4") {
     throw new Error("deployment manifest contract version is invalid");
   }
   if (!ADDRESS.test(value.contractAddress)) {
@@ -106,7 +108,7 @@ export function deploymentManifestPath(
   );
 }
 
-async function preflightV3ManifestDestination(
+async function preflightV4ManifestDestination(
   repoRoot: string,
   network: NetworkName,
   deploymentArtifactSha256: string,
@@ -118,9 +120,9 @@ async function preflightV3ManifestDestination(
       deploymentArtifactSha256,
     );
     await ensurePersistentPosixJsonCapability(
-      join(directory, ".accessseal-v3.preflight.json"),
+      join(directory, ".accessseal-v4.preflight.json"),
       {
-        schemaVersion: "accessseal-v3-posix-preflight/1",
+        schemaVersion: "accessseal-v4-posix-preflight/1",
         deploymentArtifactSha256,
       },
     );
@@ -135,7 +137,7 @@ async function preflightV3ManifestDestination(
   let probeReceipt: ExclusiveJsonInstallReceipt | undefined;
   let probeError: unknown;
   try {
-    probeReceipt = await atomicWriteJsonExclusive(probe, { preflight: "accessseal-v3" });
+    probeReceipt = await atomicWriteJsonExclusive(probe, { preflight: "accessseal-v4" });
   } catch (error) {
     probeError = error;
   }
@@ -159,7 +161,7 @@ async function preflightV3ManifestDestination(
 export async function deployAccessSeal(
   client: DeploymentClient,
   options: DeployOptions,
-): Promise<V3DeploymentManifest> {
+): Promise<V4DeploymentManifest> {
   const repoRoot = options.repoRoot ?? process.cwd();
   const network = validateNetworkName(options.network);
   if (client.chain.id !== NETWORK_CHAIN_IDS[network] || client.chain.name !== NETWORK_CHAIN_NAMES[network]) {
@@ -179,20 +181,18 @@ export async function deployAccessSeal(
     throw new Error("contract source or deployment artifact bytes are missing");
   }
   const deploymentArtifactSha256 = sourceHash(deploymentArtifact);
-  const v3Root = deploymentManifestV3Root(repoRoot, network);
-  await withV3ManifestNamespaceLease(
-    v3Root,
-    () => preflightV3ManifestDestination(
+  const v4Root = deploymentManifestV4Root(repoRoot, network);
+  await withV4ManifestNamespaceLease(
+    v4Root,
+    () => preflightV4ManifestDestination(
       repoRoot,
       network,
       deploymentArtifactSha256,
     ),
   );
+  const reviewedSchema = readReviewedArtifactSchema(repoRoot);
+  verifyFrozenSchema(reviewedSchema);
 
-  const expectedSchema = await client.getContractSchemaForCode(deploymentArtifact);
-  if (!(expectedSchema && typeof expectedSchema === "object")) {
-    throw new Error("official client source schema response is unavailable");
-  }
   const deploymentTransaction = await client.deployContract({ code: deploymentArtifact, args: [] });
   if (typeof deploymentTransaction !== "string" || !TX_HASH.test(deploymentTransaction)) {
     throw new Error("official client deployment transaction shape is unavailable");
@@ -212,9 +212,9 @@ export async function deployAccessSeal(
   assertReceipt(finalized, true);
   const contractAddress = extractContractAddress(finalized);
 
-  const manifest: V3DeploymentManifest = {
+  const manifest: V4DeploymentManifest = {
     schemaVersion: "accessseal-deployment-manifest/2",
-    contractVersion: "V3",
+    contractVersion: "V4",
     network,
     chainId: NETWORK_CHAIN_IDS[network],
     contractAddress,
@@ -222,7 +222,7 @@ export async function deployAccessSeal(
     readableSourceSha256: sourceHash(readableSource),
     deploymentArtifactSha256,
     sourceSha256: deploymentArtifactSha256,
-    schemaSha256: canonicalJsonHash(expectedSchema),
+    schemaSha256: canonicalJsonHash(reviewedSchema),
     gitCommit: gitState.commit,
     deployedAt: new Date().toISOString(),
     contractClassification: "INTENTIONALLY_FROZEN",
@@ -230,15 +230,19 @@ export async function deployAccessSeal(
   await verifyDeployment(client, manifest, { repoRoot });
   const path = deploymentManifestPath(repoRoot, {
     network,
-    contractVersion: "V3",
+    contractVersion: "V4",
     contractAddress,
     deploymentArtifactSha256,
   });
-  await withV3ManifestNamespaceLease(
-    v3Root,
+  await withV4ManifestNamespaceLease(
+    v4Root,
     () => atomicWriteJsonExclusive(path, manifest),
   );
   return manifest;
+}
+
+function isRepeatedHex(value: string): boolean {
+  return /^([0-9a-f])\1+$/i.test(value);
 }
 
 function assertReceipt(value: unknown, requireFinalized: boolean): void {

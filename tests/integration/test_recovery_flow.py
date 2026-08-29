@@ -12,6 +12,7 @@ from conftest import (
     open_release,
     read_json,
     rpc,
+    submit_complete_evidence,
     submit_release_epoch,
 )
 
@@ -23,7 +24,7 @@ def _review(contract, actors, fixture_site, salt, verdict, *, keyboard_trap=Fals
     case_id, release = open_release(contract, actors, fixture_site, salt, **kwargs)
     context = io_context(
         release,
-        None if verdict == "REQUEST_MORE_INFO" else candidate(contract, case_id, release, verdict),
+        candidate(contract, case_id, release, verdict),
         unavailable_manifest=unavailable,
     )
     receipt = contract.connect(actors[2]).request_review([case_id]).transact(
@@ -65,7 +66,6 @@ def test_request_more_info_opens_one_vendor_cure_epoch(
         fixture_site,
         "integration-rmi",
         "REQUEST_MORE_INFO",
-        supporting=("HTML_BUNDLE",),
     )
     assert read_json(deployed_contract, "get_review", [case_id, 0])["verdict"] == "REQUEST_MORE_INFO"
     deployed_contract.connect(actors[1]).start_cure([case_id]).transact(
@@ -78,6 +78,9 @@ def test_request_more_info_opens_one_vendor_cure_epoch(
     assert read_json(deployed_contract, "get_review_attempt", [case_id, 0, 0])["status"] == "FINALIZED"
     cure_release = submit_release_epoch(
         deployed_contract, actors[1], fixture_site, case_id, epoch=1
+    )
+    submit_complete_evidence(
+        deployed_contract, case_id, actors[0], actors[1], cure_release, epoch=1
     )
     cure = deployed_contract.connect(actors[2]).request_review([case_id]).transact(
         wait_transaction_status=TransactionStatus.FINALIZED,
@@ -136,6 +139,23 @@ def test_timeout_refund_is_permissionless_and_replay_is_rejected(
     assert tx_execution_failed(replay, "case is not eligible for timeout refund")
     assert read_json(deployed_contract, "get_settlement", [case_id]) == settlement
     assert_accounting_conservation(deployed_contract)
+
+
+def test_v4_outsider_permissionlessly_prepares_and_executes_vendor_payout(
+    v4_context,
+):
+    """Fails if settlement authority can change the approved vendor recipient."""
+    settlement, accounting = v4_context.run_outsider_payout()
+
+    assert settlement["reviewRequester"] == settlement["outsider"]
+    assert settlement["recipient"] == settlement["vendor"]
+    assert settlement["executor"] == settlement["outsider"]
+    assert accounting["totalDeposits"] == (
+        accounting["reserved"]
+        + accounting["pendingDispatch"]
+        + accounting["dispatchedPayouts"]
+        + accounting["dispatchedRefunds"]
+    )
 
 
 def test_settlement_and_retry_gates_reject_wrong_phase_without_state_advance(

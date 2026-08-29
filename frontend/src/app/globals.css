@@ -10,6 +10,10 @@
   --as-warning: #9a6700;
   --as-danger: #b42318;
   --as-info: #175cd3;
+  --as-success-surface: #e8f7f1;
+  --as-warning-surface: #fff5d9;
+  --as-danger-surface: #fff0ee;
+  --as-info-surface: #f0f5ff;
   --as-radius-sm: 8px;
   --as-radius-md: 12px;
   --as-shadow: 0 1px 2px rgb(10 37 64 / 6%), 0 8px 24px rgb(10 37 64 / 5%);

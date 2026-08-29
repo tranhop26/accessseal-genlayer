@@ -1,42 +1,53 @@
-# AccessSeal proof status
+# AccessSeal V4 proof matrix
 
-This tracked document defines the required final evidence; it does not claim that external publication/deployment gates have run. The canonical completed matrix will be generated as an atomic two-file package at `work/evidence/final/proof-matrix.md` by `npm run proof:collect -- --network <network>` only after independent publication, chain, readback, and command verification succeeds.
+This is the required public/local proof plan. It does not claim any external action. The authoritative final package, if separately collected after confirmed publication/deployment, is ignored local output under `work/evidence/final/`.
 
-## External identifiers
+## Live-evidence slots
 
-| Item | Current status |
+| Evidence slot | Current value |
 |---|---|
-| Public GitHub repository/commit | Not claimed — GitHub identity and push confirmation gate pending |
-| External GenLayer contract/address | Not claimed — deployment wallet and action-time confirmation gate pending |
-| Deployment transaction/explorer | Not claimed — external deployment/readback pending |
-| Vercel URL | Not claimed — Vercel account/team/project and action-time confirmation gate pending |
+| V4 contract address | Not yet executed |
+| V4 deployment transaction | Not yet executed |
+| Vercel production URL | Not yet executed |
+| Payout transaction(s) | Not yet executed |
+| Refund transaction(s) | Not yet executed |
+| Recipient child transaction / balance proof | Not yet executed |
 
-Addresses and transactions in ignored `work/deployments/localnet.json` or `work/evidence/*` are ephemeral **local GLSim evidence only**. They are not external contract or recipient-delivery proof.
+Any localnet/Bradbury amount is simulated testnet value. Ignored `work/` artifacts are local GLSim evidence only and cannot fill a live-evidence slot.
 
-## Required final matrix
+## Required actor/action proof
 
-| Proof | Actor | Action | Contract method | Transaction hash | `FINALIZED` / execution | Authoritative readback | Transfer state | Recipient confirmation | Source/test |
-|---|---|---|---|---|---|---|---|---|---|
-| Payout | Unrelated public settler(s) | Prepare and dispatch approved vendor payout | `prepare_payout`, `execute_settlement` | Two pending external hashes | Pending | Exact case actors, executor, settlement/accounting | Must be `DISPATCHED_FINALIZED` | Separate linked child success required | `scripts/glsim_support.py`, `tests/integration/test_harness_controls.py` |
-| Refund | Unrelated public settler(s) | Prepare and dispatch rejected buyer refund | `prepare_refund`, `execute_settlement` | Two pending external hashes | Pending | Exact case actors, executor, settlement/accounting | Must be `DISPATCHED_FINALIZED` | Separate linked child success required | `scripts/glsim_support.py`, `tests/integration/test_harness_controls.py` |
-| RMI cure | Vendor, then public reviewer | Start new epoch and finalize cured review | `start_cure`, `request_review` | Pending external proof | Pending | Epoch increment, old attempt preserved, new verdict | `NO_TRANSFER` during RMI | Not applicable | `tests/integration/test_recovery_flow.py`, `frontend/e2e/recovery.spec.ts` |
-| Unresolved | Public reviewer | Unavailable/conflicting source produces safe result | `request_review` | Pending external proof | Pending | `UNRESOLVED`, accounting unchanged | `NO_TRANSFER` | Not applicable | `tests/integration/test_recovery_flow.py`, `frontend/e2e/recovery.spec.ts` |
-| Replay rejection | Unrelated caller | Repeat timeout/settlement/evidence domain | Relevant guarded method | Pending external proof | Finalized expected failure required | Exact before/after state unchanged | `NO_TRANSFER` | Not applicable | direct/integration/browser replay regressions |
-| Frozen classification | Deployment verifier | Verify exact reviewed schema and no privilege | Deployment/readback | Pending external proof | Deployment must finalize successfully | Exact readable-source hash, deployed-artifact hash, schema and frozen method surface | `NO_TRANSFER` | Not applicable | `deploy/999_verify_access_seal.ts`, `tests/scripts/deploy.test.ts` |
+| Actor | Action and exact method | Direct/integration proof | Required authoritative readback | Live evidence |
+|---|---|---|---|---|
+| Buyer | Create/fund: `create_case`, `fund` | `tests/direct/test_case_lifecycle.py`, `tests/integration/test_consensus_flow.py` | `get_case`, `get_accounting` | Not yet executed |
+| Vendor | Accept locked terms: `accept_terms` | `tests/direct/test_case_lifecycle.py`, `tests/integration/test_consensus_flow.py` | `get_case` | Not yet executed |
+| Vendor | Submit exact epoch: `open_evidence`, `append_evidence` | `tests/direct/test_evidence.py`, `tests/direct/test_review_context.py` | `get_evidence` | Not yet executed |
+| Buyer | Seal bounded context: `close_evidence` | `tests/direct/test_review_context.py`, `tests/direct/test_adjudication.py` | `get_case`, `get_review_context` | Not yet executed |
+| Permissionless reviewer | Request bounded review: `request_review` | `tests/direct/test_adjudication.py`, `tests/integration/test_consensus_flow.py` | `get_review`, `get_review_attempt`, `get_review_finality` | Not yet executed |
+| Vendor | Cure RMI: `start_cure` | `tests/direct/test_recovery.py`, `tests/integration/test_recovery_flow.py`, `frontend/e2e/recovery.spec.ts` | New epoch and preserved old attempt | Not yet executed |
+| Permissionless reviewer | Review cured epoch: `request_review` | `tests/direct/test_recovery.py`, `tests/integration/test_recovery_flow.py`, `frontend/e2e/recovery.spec.ts` | Final review/finality for new epoch | Not yet executed |
+| Permissionless reviewer | Retry/exhaust unresolved: `retry_review`, `expire_unresolved` | `tests/direct/test_recovery.py`, `tests/integration/test_recovery_flow.py` | Finality/retry budget, refund preparation, accounting | Not yet executed |
+| Permissionless settler | Approved payout: `prepare_payout`, `execute_settlement` | `tests/direct/test_settlement.py`, `tests/integration/test_recovery_flow.py`, `frontend/e2e/happy-path.spec.ts` | Finalized approved review; `get_settlement`; `get_accounting` | Not yet executed |
+| Permissionless settler | Rejected refund: `prepare_refund`, `execute_settlement` | `tests/direct/test_settlement.py`, `tests/integration/test_recovery_flow.py`, `frontend/e2e/happy-path.spec.ts` | Finalized rejected review; `get_settlement`; `get_accounting` | Not yet executed |
+| Permissionless caller | Timeout/replay boundary: `timeout_refund`, `prepare_payout`, `prepare_refund`, `execute_settlement`, `retry_review` | `tests/direct/test_recovery.py`, `tests/direct/test_settlement.py`, `tests/integration/test_recovery_flow.py`, `frontend/e2e/recovery.spec.ts` | Exact pre/post case, review, settlement, accounting | Not yet executed |
+| Deployment verifier | V4 frozen deployment: deployment and `verify:deployment` | `tests/scripts/deploy.test.ts`, `tests/integration/test_deployment_scripts.py` | Code, schema, accounting, finalized execution, V4 manifest | Not yet executed |
 
-## Collector acceptance gate
+## Local verification record
 
-The final collector requires:
+The complete local suite is:
 
-- clean current `HEAD`, verified public GitHub commit, and identical published readable/artifact contract bytes;
-- deterministic artifact regeneration under the 48,000-byte budget, both exact tracked hashes, deployed/artifact-derived schema hash, and frozen interface;
-- pinned-SDK network identity and official HTTPS RPC/explorer URL (Studionet explorer: `https://genlayer-explorer.vercel.app`), finalized successful deployment, and exact address/accounting readback;
-- Vercel API production/commit/URL binding plus a reachable AccessSeal response;
-- actual collector-run root lint (contract plus prompt), separate `genvm-lint schema --json` frozen-schema binding, root typecheck, direct, integration, root scripts, frontend lint/typecheck/unit/build, two E2E runs, and secret scan with exact suite counts/output hashes;
-- typed row-specific evidence: two transactions for RMI cure; one successful review plus absence of settlement for unresolved; one finalized failed call plus preserved settlement for replay; deployment/source/schema readback for frozen classification;
-- pinned-SDK decoded payout/refund parent calls, exact returned hashes and senders, authoritative buyer/vendor actor exclusion, settlement executor binding, one exact external message, official triggered-child linkage, child finality/success, recipient/lossless decimal-string amount binding, settlement readback, and accounting conservation;
-- typed live-child/deployment-verifier provenance plus every fixed source/test reference contained in the repository and bound to its exact tracked `HEAD` blob;
-- a final clean-HEAD/commit/contract/schema/blob recheck after commands and immediately before atomic installation;
-- explicit simulated-value and `DISPATCHED_FINALIZED` limitations.
+```powershell
+npm run contract:check
+npm run lint
+npm run typecheck
+npm run test:direct
+npm run test:integration
+npm run test:scripts
+npm --prefix frontend run test
+npm --prefix frontend run test:e2e
+npm run build
+npm run evidence:verify
+npm run audit:secrets
+```
 
-The input is locator-only. Caller-authored status, readback, balance, or `PASS` fields are rejected by the exact schema and cannot become evidence. Placeholders, failed/missing checks, dirty source, non-final transactions, wrong methods/arguments, publication or chain mismatches, non-conserving accounting, unlinked child delivery, symlink/untracked references, or partial output installation cause collection to fail while preserving the prior proof pair.
+The suite demonstrates local behavior and regression coverage; it is not a substitute for the explicit live slots above. A live proof package must bind an exact clean commit, V4 compact/readable source hashes, frozen schema, finalized successful deployment, Vercel production/commit response, decoded method calls, `latest-final` contract reads, accounting conservation, and (for a payout/refund) recipient delivery proof. No caller-authored “PASS”, placeholder, address, transaction, verdict, or balance field may become proof.

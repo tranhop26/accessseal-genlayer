@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 from genlayer_py import create_account
+from genlayer_py.exceptions import GenLayerError
 from gltest import get_validator_factory
 from gltest.contracts.contract import Contract
 from gltest.assertions import tx_execution_succeeded
@@ -340,12 +341,12 @@ def deployed_contract(glsim_server, actors):
     deployment = rpc(
         "sim_deploy",
         {
-            "code_path": str(Path("contracts/access_seal_deploy.py").resolve()),
+            "code_path": str(Path("contracts/access_seal.py").resolve()),
             "sender": actors[0].address,
         },
     )
     schema_result = subprocess.run(
-        ["genvm-lint", "schema", "--json", "contracts/access_seal_deploy.py"],
+        ["genvm-lint", "schema", "--json", "contracts/access_seal.py"],
         check=True,
         capture_output=True,
         text=True,
@@ -533,21 +534,10 @@ def io_context(
     when=CUTOFF_TIME,
 ):
     rpc("sim_setTime", [when])
-    web = {}
-    for path, body in release["served"].items():
-        web[ORIGIN + path] = {
-            "method": "GET",
-            "status": 503 if unavailable_manifest and path == MANIFEST_PATH else 200,
-            # JSON-RPC cannot carry bytes. The pinned runner decodes this
-            # explicit transport envelope before installing the GLSim mock.
-            "body": "",
-            "bodyBase64": base64.b64encode(body).decode("ascii"),
-        }
+    web = _mock_web_routes(release)
+    web = {ORIGIN + PATHS["SCREENSHOT"]: web[ORIGIN + PATHS["SCREENSHOT"]]}
     llm = (
         {
-            r"[\s\S]*LEADER_REVIEW_JSON=[\s\S]*": compact(
-                {"supported": supported}
-            ),
             r"[\s\S]*UNTRUSTED_BINDING_AND_DATA_JSON=[\s\S]*": compact(
                 candidate
             ),
@@ -561,6 +551,244 @@ def io_context(
         mock_web_response={"nondet_web_request": web},
     )
     return {"validators": [v.to_dict() for v in validators], "genvm_datetime": when}
+
+
+def _mock_web_routes(release, *, screenshot_status=200):
+    return {
+        ORIGIN + path: {
+            "method": "GET",
+            "status": screenshot_status if path == PATHS["SCREENSHOT"] else 200,
+            "body": "",
+            "bodyBase64": base64.b64encode(body).decode("ascii"),
+        }
+        for path, body in release["served"].items()
+    }
+
+
+def _v4_validator(
+    release,
+    candidate,
+    *,
+    screenshot_only=False,
+    screenshot_status=200,
+    callback_timeout=False,
+):
+    web = _mock_web_routes(release, screenshot_status=screenshot_status)
+    if screenshot_only:
+        web = {ORIGIN + PATHS["SCREENSHOT"]: web[ORIGIN + PATHS["SCREENSHOT"]]}
+    llm = {
+        r"[\s\S]*UNTRUSTED_BINDING_AND_DATA_JSON=[\s\S]*": compact(candidate)
+    }
+    validator = get_validator_factory().create_mock_validator(
+        mock_llm_response={"nondet_exec_prompt": llm},
+        mock_web_response={"nondet_web_request": web},
+    ).to_dict()
+    if callback_timeout:
+        validator["config"]["accesssealCallbackTimeout"] = True
+    return validator
+
+
+def v4_io_context(
+    release,
+    leader_candidate,
+    *,
+    validator_candidates=None,
+    validator_timeout=False,
+    when=CUTOFF_TIME,
+):
+    rpc("sim_setTime", [when])
+    leader = _v4_validator(release, leader_candidate, screenshot_only=True)
+    if validator_candidates is None:
+        validator_candidates = [leader_candidate] * 5
+    validators = [leader] + [
+        _v4_validator(
+            release,
+            candidate_value,
+            screenshot_only=True,
+            callback_timeout=validator_timeout,
+        )
+        for candidate_value in validator_candidates[1:]
+    ]
+    return {
+        "validators": validators,
+        "genvm_datetime": when,
+    }
+
+
+class V4IntegrationContext:
+    def __init__(self, contract, actors, fixture_site):
+        self.contract = contract
+        self.actors = actors
+        self.fixture_site = fixture_site
+        self._sequence = 0
+
+    def _next_salt(self, suffix):
+        self._sequence += 1
+        return f"v4-{suffix}-{self._sequence}-{secrets.token_hex(6)}"
+
+    def _seal(self, suffix):
+        buyer, _vendor, _reviewer, _outsider = self.actors
+        case_id = create_funded_case(
+            self.contract, self.actors, self._next_salt(suffix)
+        )
+        release = submit_release_epoch(
+            self.contract,
+            self.actors[1],
+            self.fixture_site,
+            case_id,
+            epoch=0,
+        )
+        seal_web = _mock_web_routes(release)
+        validators = get_validator_factory().batch_create_mock_validators(
+            5,
+            mock_web_response={"nondet_web_request": seal_web},
+        )
+        seal = self.contract.connect(buyer).close_evidence([case_id]).transact(
+            wait_transaction_status=TransactionStatus.FINALIZED,
+            transaction_context={
+                "validators": [validator.to_dict() for validator in validators],
+                "genvm_datetime": release["transactionTime"],
+            },
+        )
+        assert_success(seal)
+        return case_id, release
+
+    @staticmethod
+    def _receipt_readback(receipt):
+        transaction = rpc("eth_getTransactionByHash", [receipt["hash"]])
+        return {
+            "status": transaction["status"],
+            "tx_execution_result": transaction.get("txExecutionResultName"),
+            "sender": transaction.get("from_address", transaction.get("from")),
+        }
+
+    def run_happy_path(self, *, review_requester=None, suffix="happy"):
+        rpc("accessseal_resetValidatorTelemetry", [])
+        case_id, release = self._seal(suffix)
+        _buyer, vendor, reviewer, outsider = self.actors
+        requester = review_requester or reviewer
+        review = self.contract.connect(requester).request_review([case_id]).transact(
+            wait_transaction_status=TransactionStatus.FINALIZED,
+            transaction_context=v4_io_context(
+                release, candidate(self.contract, case_id, release, "APPROVED")
+            ),
+        )
+        receipt = self._receipt_readback(review)
+        review_readback = {
+            "review": read_json(self.contract, "get_review", [case_id, 0]),
+            "attempt": read_json(
+                self.contract, "get_review_attempt", [case_id, 0, 0]
+            ),
+            "finality": read_json(
+                self.contract, "get_review_finality", [case_id]
+            ),
+            "caseAfterReview": read_json(self.contract, "get_case", [case_id]),
+        }
+        self.contract.connect(outsider).prepare_payout([case_id]).transact(
+            wait_transaction_status=TransactionStatus.FINALIZED
+        )
+        prepared = read_json(self.contract, "get_settlement", [case_id])
+        self.contract.connect(outsider).execute_settlement(
+            [case_id, prepared["settlementId"]]
+        ).transact(wait_transaction_status=TransactionStatus.FINALIZED)
+        settlement = read_json(self.contract, "get_settlement", [case_id])
+        settlement["vendor"] = vendor.address.lower()
+        settlement["outsider"] = outsider.address.lower()
+        settlement["reviewRequester"] = receipt["sender"]
+        review_readback.update(
+            {
+                "settlement": settlement,
+                "accounting": read_json(self.contract, "get_accounting", []),
+                "vendor": vendor.address.lower(),
+                "outsider": outsider.address.lower(),
+            }
+        )
+        return (
+            receipt,
+            rpc("accessseal_getValidatorTelemetry", []),
+            review_readback,
+        )
+
+    def run_negative_control(self, control):
+        rpc("accessseal_resetValidatorTelemetry", [])
+        case_id, release = self._seal(control)
+        _buyer, _vendor, reviewer, outsider = self.actors
+        approved = candidate(self.contract, case_id, release, "APPROVED")
+        reserved_before = read_json(self.contract, "get_accounting", [])["reserved"]
+        if control == "disagreement":
+            rejected = candidate(self.contract, case_id, release, "REJECTED")
+            rejected["materialBlockers"] = ["focus-obscured"]
+            rejected["rationale"] = "Independent validator found obscured focus."
+            validators = [
+                approved,
+                rejected,
+                candidate(self.contract, case_id, release, "REJECTED"),
+                rejected,
+                approved,
+            ]
+            context = v4_io_context(
+                release, approved, validator_candidates=validators
+            )
+        elif control == "timeout":
+            context = v4_io_context(release, approved, validator_timeout=True)
+        else:
+            raise ValueError(f"unknown control: {control}")
+        try:
+            review = self.contract.connect(reviewer).request_review([case_id]).transact(
+                wait_transaction_status=TransactionStatus.FINALIZED,
+                transaction_context=context,
+            )
+        except GenLayerError as error:
+            if str(error) != "Transaction failed":
+                raise
+            receipt = rpc("accessseal_getLastConsensusOutcome", [])
+            assert receipt["consensusRejected"] is True
+        else:
+            raise AssertionError("negative validator control unexpectedly succeeded")
+
+        def missing_readback(method, args, expected_message):
+            try:
+                read_json(self.contract, method, args)
+            except GenLayerError as error:
+                assert expected_message in str(error), str(error)
+                return False
+            raise AssertionError(f"{method} unexpectedly exists")
+
+        review_exists = missing_readback("get_review", [case_id, 0], "review does not exist")
+        attempt_exists = missing_readback(
+            "get_review_attempt",
+            [case_id, 0, 0],
+            "review attempt does not exist",
+        )
+        retry = self.contract.connect(outsider).retry_review(
+            [case_id, f"{control}-retry"]
+        ).transact(
+            wait_transaction_status=TransactionStatus.FINALIZED,
+            transaction_context={"genvm_datetime": RETRY_TIME},
+        )
+        retry_rejected = not tx_execution_succeeded(retry)
+        return {
+            "receipt": receipt,
+            "telemetry": rpc("accessseal_getValidatorTelemetry", []),
+            "reviewResultExists": review_exists,
+            "reviewAttemptExists": attempt_exists,
+            "case": read_json(self.contract, "get_case", [case_id]),
+            "accounting": read_json(self.contract, "get_accounting", []),
+            "reservedBefore": reserved_before,
+            "retryEligible": not retry_rejected,
+        }
+
+    def run_outsider_payout(self):
+        _buyer, _vendor, _reviewer, outsider = self.actors
+        _receipt, _telemetry, readback = self.run_happy_path(
+            review_requester=outsider, suffix="outsider-payout"
+        )
+        return readback["settlement"], readback["accounting"]
+
+
+@pytest.fixture
+def v4_context(deployed_contract, actors, fixture_site):
+    return V4IntegrationContext(deployed_contract, actors, fixture_site)
 
 
 def create_funded_case(contract, actors, salt: str, *, max_retries=2):
@@ -602,8 +830,8 @@ def submit_release_epoch(contract, vendor, fixture_site, case_id, *, epoch, keyb
     return release
 
 
-def submit_complete_evidence(contract, case_id, buyer, vendor) -> None:
-    evidence = read_json(contract, "get_evidence", [case_id, 0])
+def submit_complete_evidence(contract, case_id, buyer, vendor, release, *, epoch=0) -> None:
+    evidence = read_json(contract, "get_evidence", [case_id, epoch])
     case = read_json(contract, "get_case", [case_id])
 
     assert case["buyer"] == buyer.address.lower()
@@ -616,23 +844,30 @@ def submit_complete_evidence(contract, case_id, buyer, vendor) -> None:
         vendor.address.lower()
     }
 
+    seal_web = _mock_web_routes(release)
+    validators = get_validator_factory().batch_create_mock_validators(
+        5, mock_web_response={"nondet_web_request": seal_web}
+    )
     assert_success(
         contract.connect(buyer)
         .close_evidence([case_id])
         .transact(
             wait_transaction_status=TransactionStatus.FINALIZED,
-            transaction_context={"genvm_datetime": EVIDENCE_TIME},
+            transaction_context={
+                "validators": [validator.to_dict() for validator in validators],
+                "genvm_datetime": release["transactionTime"],
+            },
         )
     )
     sealed = read_json(contract, "get_case", [case_id])
     assert sealed["lifecycle"] == "EVIDENCE_SEALED"
     assert sealed["evidenceSealed"] is True
-    assert sealed["evidenceSealedAt"] == EVIDENCE_OBSERVED_AT
+    assert sealed["evidenceSealedAt"] == release["observedAt"]
     assert sealed["evidenceSealedBy"] == buyer.address.lower()
 
 
 def open_release(contract, actors, fixture_site, salt, *, keyboard_trap=False, supporting=EVIDENCE_TYPES):
-    _, vendor, _, _ = actors
+    buyer, vendor, _, _ = actors
     case_id = create_funded_case(contract, actors, salt)
     release = submit_release_epoch(
         contract,
@@ -643,16 +878,24 @@ def open_release(contract, actors, fixture_site, salt, *, keyboard_trap=False, s
         keyboard_trap=keyboard_trap,
         supporting=supporting,
     )
+    submit_complete_evidence(contract, case_id, buyer, vendor, release)
     return case_id, release
 
 
 def candidate(contract, case_id, release, verdict, *, epoch=0):
     blockers = ["keyboard-trap"] if verdict == "REJECTED" else []
+    missing = ["DOM_FACTS"] if verdict == "REQUEST_MORE_INFO" else []
     return {
         "verdict": verdict,
         "materialBlockers": blockers,
-        "missingEvidence": [],
-        "rationale": "Bound artifact content establishes: keyboard-trap" if blockers else "Bound artifact content establishes no material blocker.",
+        "missingEvidence": missing,
+        "rationale": (
+            "Bound artifact content establishes: keyboard-trap"
+            if blockers
+            else "Bound artifact evidence needs additional DOM facts."
+            if missing
+            else "Bound artifact content establishes no material blocker."
+        ),
     }
 
 

@@ -22,12 +22,24 @@ export type CaseRecord = {
   maxUnresolvedRetries: number;
   profileHash: string;
   readAt: number | null;
+  reviewContextHash?: `sha256:${string}` | "";
+  reviewContextReady?: boolean;
   reserved: bigint;
   salt: string;
   subjectOrigin: string;
   termsHash: string;
   vendor: string;
   vendorAccepted: boolean;
+};
+export type ReviewContextRecord = {
+  caseId: string;
+  epoch: number;
+  schemaVersion: "accessseal-review-context/1";
+  ready: boolean;
+  contextJson: string;
+  contextHash: `sha256:${string}`;
+  imageUri: string;
+  imageSha256: `sha256:${string}`;
 };
 export type ReviewRecord = {
   schemaVersion: string;
@@ -37,6 +49,7 @@ export type ReviewRecord = {
   materialBlockers: string[];
   missingEvidence: string[];
   evidenceRefs: string[];
+  contextHash?: `sha256:${string}`;
   rationaleHash: string;
 };
 export type ReviewFinality = {
@@ -139,6 +152,21 @@ const V3_CASE_KEYS = [
   "evidenceSealedBy",
   "readAt",
 ].sort();
+const V4_CASE_KEYS = [
+  ...V3_CASE_KEYS,
+  "reviewContextHash",
+  "reviewContextReady",
+].sort();
+const REVIEW_CONTEXT_KEYS = [
+  "caseId",
+  "contextHash",
+  "contextJson",
+  "epoch",
+  "imageSha256",
+  "imageUri",
+  "ready",
+  "schemaVersion",
+].sort();
 const REVIEW_KEYS = [
   "evidenceRefs",
   "materialBlockers",
@@ -149,6 +177,7 @@ const REVIEW_KEYS = [
   "schemaVersion",
   "verdict",
 ].sort();
+const BOUNDED_CONTEXT_REVIEW_KEYS = [...REVIEW_KEYS, "contextHash"].sort();
 const FINALITY_KEYS = ["attempt", "epoch", "proofId", "status"].sort();
 const SETTLEMENT_KEYS = [
   "amount",
@@ -290,7 +319,12 @@ function decodeGenVmUserError(value: unknown): string | undefined {
 }
 function parseReview(value: unknown): ReviewRecord {
   const r = object(value, "Review");
-  exact(r, REVIEW_KEYS, "Review");
+  const schemaVersion = text(r.schemaVersion, "Review schema");
+  if (schemaVersion === "accessseal-review/1")
+    exact(r, REVIEW_KEYS, "Review");
+  else if (schemaVersion === "accessseal-review/2")
+    exact(r, BOUNDED_CONTEXT_REVIEW_KEYS, "Review");
+  else throw new Error("Review schema version is invalid.");
   const verdict = text(r.verdict, "Review verdict") as ReviewRecord["verdict"];
   if (
     !["APPROVED", "REJECTED", "REQUEST_MORE_INFO", "UNRESOLVED"].includes(
@@ -298,9 +332,6 @@ function parseReview(value: unknown): ReviewRecord {
     )
   )
     throw new Error("Review verdict is invalid.");
-  const schemaVersion = text(r.schemaVersion, "Review schema");
-  if (schemaVersion !== "accessseal-review/1")
-    throw new Error("Review schema version is invalid.");
   return {
     schemaVersion,
     verdict,
@@ -309,8 +340,228 @@ function parseReview(value: unknown): ReviewRecord {
     materialBlockers: stringArray(r.materialBlockers, "Blockers"),
     missingEvidence: stringArray(r.missingEvidence, "Missing evidence"),
     evidenceRefs: stringArray(r.evidenceRefs, "Evidence refs"),
+    ...(schemaVersion === "accessseal-review/2"
+      ? { contextHash: text(r.contextHash, "Review context hash", SHA) as `sha256:${string}` }
+      : {}),
     rationaleHash: text(r.rationaleHash, "Review rationale hash", SHA),
   };
+}
+
+async function browserSha256(value: string): Promise<`sha256:${string}`> {
+  if (!globalThis.crypto?.subtle)
+    throw new Error("Browser SHA-256 is unavailable for review context verification.");
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return `sha256:${[...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+type CloseEvidenceCall = {
+  source: "studio" | "bradbury";
+  method: unknown;
+  args: unknown;
+  kwargs: unknown;
+};
+
+function consistentTransactionAlias(
+  transaction: Record<string, unknown>,
+  keys: string[],
+  pattern: RegExp,
+): string | null {
+  const values = keys
+    .map((key) => transaction[key])
+    .filter((value) => value !== undefined);
+  if (
+    values.length === 0 ||
+    values.some(
+      (value) =>
+        typeof value !== "string" || !pattern.test(value.toLowerCase()),
+    )
+  )
+    return null;
+  const normalized = values.map((value) => String(value).toLowerCase());
+  return new Set(normalized).size === 1 ? normalized[0]! : null;
+}
+
+function byteArray(value: unknown): Uint8Array | null {
+  if (
+    !Array.isArray(value) ||
+    value.some(
+      (item) =>
+        !Number.isInteger(item) || Number(item) < 0 || Number(item) > 255,
+    )
+  )
+    return null;
+  return Uint8Array.from(value as number[]);
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function decodeBase64(value: unknown): Uint8Array | null {
+  if (typeof value !== "string" || typeof globalThis.atob !== "function")
+    return null;
+  try {
+    const decoded = globalThis.atob(value);
+    return Uint8Array.from(decoded, (char) => char.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCloseEvidenceCall(
+  value: unknown,
+  source: CloseEvidenceCall["source"],
+): CloseEvidenceCall | null {
+  if (value instanceof Map) {
+    if (
+      value.size !== 3 ||
+      !value.has("method") ||
+      !value.has("args") ||
+      !value.has("kwargs")
+    )
+      return null;
+    return {
+      source,
+      method: value.get("method"),
+      args: value.get("args"),
+      kwargs: value.get("kwargs"),
+    };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!hasExactKeys(record, ["args", "kwargs", "method"])) return null;
+  return {
+    source,
+    method: record.method,
+    args: record.args,
+    kwargs: record.kwargs,
+  };
+}
+
+function hasNoKeywordArguments(value: unknown): boolean {
+  if (value instanceof Map) return value.size === 0;
+  return (
+    !!value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+  );
+}
+
+function decodeCloseEvidenceCall(
+  transaction: Record<string, unknown>,
+): CloseEvidenceCall | null {
+  // genlayer-js@1.1.8 returns Studio/localnet input at data.calldata.raw,
+  // while Bradbury returns txDataDecoded without leader receipt calldata.
+  const hasStudio = transaction.data !== undefined;
+  const hasBradbury = transaction.txDataDecoded !== undefined;
+  if (hasStudio === hasBradbury || transaction.tx_data_decoded !== undefined)
+    return null;
+
+  if (hasStudio) {
+    if (!transaction.data || typeof transaction.data !== "object") return null;
+    const calldata = (transaction.data as { calldata?: unknown }).calldata;
+    if (!calldata || typeof calldata !== "object" || Array.isArray(calldata))
+      return null;
+    const aliases = calldata as {
+      base64?: unknown;
+      raw?: unknown;
+      readable?: unknown;
+    };
+    const raw = byteArray(aliases.raw);
+    if (!raw) return null;
+    if (aliases.base64 !== undefined) {
+      const base64 = decodeBase64(aliases.base64);
+      if (!base64 || !sameBytes(raw, base64)) return null;
+    }
+    try {
+      const decoded = abi.calldata.decode(raw);
+      if (
+        aliases.readable !== undefined &&
+        (typeof aliases.readable !== "string" ||
+          aliases.readable !== abi.calldata.toString(decoded))
+      )
+        return null;
+      return normalizeCloseEvidenceCall(decoded, "studio");
+    } catch {
+      return null;
+    }
+  }
+
+  const decoded = transaction.txDataDecoded;
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded))
+    return null;
+  const record = decoded as { type?: unknown; callData?: unknown };
+  if (record.type !== "call") return null;
+  return normalizeCloseEvidenceCall(record.callData, "bradbury");
+}
+
+function decodedCloseEvidenceReceiptMatches(
+  transaction: Record<string, unknown>,
+  expected: {
+    chainId: number;
+    contract: string;
+    caseId: string;
+    epoch: number;
+  },
+): boolean {
+  const consensus = transaction.consensus_data;
+  if (!consensus || typeof consensus !== "object" || Array.isArray(consensus))
+    return false;
+  const leaders = (consensus as { leader_receipt?: unknown }).leader_receipt;
+  if (!Array.isArray(leaders) || typeof globalThis.atob !== "function")
+    return false;
+  if (leaders.length === 0) return false;
+  return leaders.every((leader) => {
+    if (!leader || typeof leader !== "object" || Array.isArray(leader)) return false;
+    const calldata = (leader as { calldata?: unknown }).calldata;
+    const base64 =
+      typeof calldata === "string"
+        ? calldata
+        : calldata && typeof calldata === "object" && !Array.isArray(calldata)
+          ? (calldata as { base64?: unknown }).base64
+          : undefined;
+    const bytes = decodeBase64(base64);
+    if (!bytes) return false;
+    try {
+      const result = abi.calldata.decode(bytes);
+      if (!(result instanceof Map)) return false;
+      const contextJson = result.get("contextJson");
+      if (typeof contextJson !== "string") return false;
+      const context = object(parseJson(contextJson, "Receipt review context"), "Receipt review context");
+      const binding = object(context.binding, "Receipt review context binding");
+      exact(
+        binding,
+        [
+          "chainId",
+          "contractAddress",
+          "caseId",
+          "epoch",
+          "profileHash",
+          "releaseDigest",
+          "subjectOrigin",
+        ].sort(),
+        "Receipt review context binding",
+      );
+      return (
+        binding.caseId === expected.caseId &&
+        count(binding.chainId, "Receipt review context chain ID") === expected.chainId &&
+        typeof binding.contractAddress === "string" &&
+        binding.contractAddress.toLowerCase() === expected.contract.toLowerCase() &&
+        count(binding.epoch, "Receipt review context epoch") === expected.epoch
+      );
+    } catch {
+      return false;
+    }
+  });
 }
 
 export class AccessSealClient {
@@ -349,7 +600,8 @@ export class AccessSealClient {
   }
   async readCase(caseId: string): Promise<CaseRecord> {
     const r = object(await this.raw("get_case", [caseId], "Case"), "Case");
-    const hasV3Clock = hasExactKeys(r, V3_CASE_KEYS);
+    const hasV4ReviewContext = hasExactKeys(r, V4_CASE_KEYS);
+    const hasV3Clock = hasV4ReviewContext || hasExactKeys(r, V3_CASE_KEYS);
     const isLegacyV2 = hasExactKeys(r, LEGACY_V2_CASE_KEYS);
     if (!hasV3Clock && !isLegacyV2) exact(r, V3_CASE_KEYS, "Case");
     const result: CaseRecord = {
@@ -377,6 +629,10 @@ export class AccessSealClient {
       maxUnresolvedRetries: count(r.maxUnresolvedRetries, "Retry budget"),
       profileHash: text(r.profileHash, "Profile hash", HASH),
       readAt: hasV3Clock ? count(r.readAt, "Contract read clock") : null,
+      reviewContextHash: hasV4ReviewContext
+        ? (text(r.reviewContextHash, "Review context hash", /^(|sha256:[0-9a-f]{64})$/) as CaseRecord["reviewContextHash"])
+        : "",
+      reviewContextReady: hasV4ReviewContext ? (r.reviewContextReady as boolean) : false,
       reserved: amount(r.reserved, "Reserved"),
       salt: text(r.salt, "Salt"),
       subjectOrigin: text(r.subjectOrigin, "Origin"),
@@ -399,6 +655,10 @@ export class AccessSealClient {
     if (
       typeof r.vendorAccepted !== "boolean" ||
       (hasV3Clock && typeof r.evidenceSealed !== "boolean") ||
+      (hasV4ReviewContext && typeof r.reviewContextReady !== "boolean") ||
+      (hasV4ReviewContext &&
+        (result.reviewContextReady !== SHA.test(result.reviewContextHash ?? "") ||
+          (!result.reviewContextReady && result.reviewContextHash !== ""))) ||
       (hasV3Clock &&
         (result.createdAt === null ||
           result.evidenceCutoff === null ||
@@ -421,6 +681,95 @@ export class AccessSealClient {
       result.contractAddress !== this.address.toLowerCase()
     )
       throw new Error("Case evidence seal readback binding is invalid.");
+    return result;
+  }
+  async readReviewContext(
+    caseId: string,
+    epoch: number,
+  ): Promise<ReviewContextRecord> {
+    const caseRecord = await this.readCase(caseId);
+    const r = object(
+      await this.raw("get_review_context", [caseId, epoch], "Review context"),
+      "Review context",
+    );
+    exact(r, REVIEW_CONTEXT_KEYS, "Review context");
+    const contextJson = text(r.contextJson, "Review context JSON");
+    const result: ReviewContextRecord = {
+      caseId: text(r.caseId, "Review context case ID", HASH),
+      epoch: count(r.epoch, "Review context epoch"),
+      schemaVersion: text(
+        r.schemaVersion,
+        "Review context schema",
+      ) as ReviewContextRecord["schemaVersion"],
+      ready: r.ready as boolean,
+      contextJson,
+      contextHash: text(r.contextHash, "Review context hash", SHA) as ReviewContextRecord["contextHash"],
+      imageUri: text(r.imageUri, "Review context image URI"),
+      imageSha256: text(r.imageSha256, "Review context image hash", SHA) as ReviewContextRecord["imageSha256"],
+    };
+    if (
+      typeof r.ready !== "boolean" ||
+      result.schemaVersion !== "accessseal-review-context/1" ||
+      !result.ready ||
+      result.caseId !== caseId ||
+      result.epoch !== epoch ||
+      !caseRecord.reviewContextReady ||
+      (caseRecord.reviewContextHash ?? "") !== result.contextHash ||
+      new TextEncoder().encode(contextJson).byteLength > 16_384 ||
+      (await browserSha256(contextJson)) !== result.contextHash
+    )
+      throw new Error("Review context binding is invalid.");
+    const context = object(parseJson(contextJson, "Review context"), "Review context");
+    exact(
+      context,
+      [
+        "binding",
+        "criticalFlows",
+        "dom",
+        "evidence",
+        "expiresAt",
+        "observedAt",
+        "scanner",
+        "schemaVersion",
+        "screenshot",
+      ].sort(),
+      "Review context",
+    );
+    const binding = object(context.binding, "Review context binding");
+    const screenshot = object(context.screenshot, "Review context screenshot");
+    exact(
+      binding,
+      [
+        "chainId",
+        "contractAddress",
+        "caseId",
+        "epoch",
+        "profileHash",
+        "releaseDigest",
+        "subjectOrigin",
+      ].sort(),
+      "Review context binding",
+    );
+    exact(
+      screenshot,
+      ["byteLength", "mediaType", "sha256", "uri"],
+      "Review context screenshot",
+    );
+    if (
+      context.schemaVersion !== result.schemaVersion ||
+      binding.caseId !== caseId ||
+      binding.epoch !== epoch ||
+      binding.chainId !== caseRecord.chainId ||
+      binding.contractAddress !== caseRecord.contractAddress ||
+      binding.profileHash !== caseRecord.profileHash ||
+      binding.subjectOrigin !== caseRecord.subjectOrigin ||
+      !SHA.test(text(binding.releaseDigest, "Review context release digest")) ||
+      text(screenshot.mediaType, "Review context image type") !== "image/png" ||
+      count(screenshot.byteLength, "Review context image size") === 0 ||
+      screenshot.uri !== result.imageUri ||
+      screenshot.sha256 !== result.imageSha256
+    )
+      throw new Error("Review context binding is invalid.");
     return result;
   }
   async readReview(caseId: string, epoch: number) {
@@ -600,9 +949,7 @@ export class AccessSealClient {
     return this.write("close_evidence", [caseId]);
   }
   requestReview(caseId: string) {
-    return this.write("request_review", [caseId], 0n, {
-      consensusMaxRotations: 7,
-    });
+    return this.write("request_review", [caseId]);
   }
   startCure(caseId: string) {
     return this.write("start_cure", [caseId]);
@@ -677,6 +1024,57 @@ export class AccessSealClient {
       args.length === 1 &&
       args[0] === caseId
     );
+  }
+  async verifyCloseEvidenceTransaction(
+    txId: Hash,
+    expected: {
+      account: Address;
+      caseId: string;
+      chainId: number;
+      contract: string;
+      epoch: number;
+    },
+  ): Promise<boolean> {
+    if (!this.sdk.getTransaction) return false;
+    try {
+      const tx = object(
+        await this.sdk.getTransaction({ hash: txId }),
+        "Transaction",
+      );
+      const returnedHash = consistentTransactionAlias(
+        tx,
+        ["hash", "txId"],
+        HASH,
+      );
+      const recipient = consistentTransactionAlias(
+        tx,
+        ["recipient", "to_address"],
+        ADDRESS,
+      );
+      const sender = consistentTransactionAlias(
+        tx,
+        ["sender", "from_address"],
+        ADDRESS,
+      );
+      const call = decodeCloseEvidenceCall(tx);
+      return (
+        returnedHash === txId.toLowerCase() &&
+        recipient === this.address.toLowerCase() &&
+        recipient === expected.contract.toLowerCase() &&
+        sender === expected.account.toLowerCase() &&
+        // Bradbury proves the call but not its epoch/chain receipt binding, so
+        // already-sealed recovery is intentionally limited to Studio/localnet.
+        call?.source === "studio" &&
+        call.method === "close_evidence" &&
+        Array.isArray(call.args) &&
+        call.args.length === 1 &&
+        call.args[0] === expected.caseId &&
+        hasNoKeywordArguments(call.kwargs) &&
+        decodedCloseEvidenceReceiptMatches(tx, expected)
+      );
+    } catch {
+      return false;
+    }
   }
   async appeal(txId: Hash, bond: bigint) {
     if (!this.network)

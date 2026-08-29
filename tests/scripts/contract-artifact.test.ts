@@ -94,13 +94,18 @@ functions = {
     "_safe_review_candidate",
 }
 nodes = []
+available = set(dir(__builtins__)) | {"json", "sha256"}
 for node in tree.body:
     if isinstance(node, ast.Assign):
         names = [target.id for target in node.targets if isinstance(target, ast.Name)]
-        if any(name in constants for name in names) or (
-            names and all(name.startswith("_") for name in names) and isinstance(node.value, ast.Constant)
-        ):
+        dependencies = {
+            child.id
+            for child in ast.walk(node.value)
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+        }
+        if any(name in constants for name in names) or dependencies <= available:
             nodes.append(node)
+            available.update(names)
     elif isinstance(node, ast.FunctionDef) and node.name in functions:
         nodes.append(node)
 namespace = {"json": json, "sha256": sha256}
@@ -115,6 +120,7 @@ result = namespace["_safe_review_candidate"](
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     ["sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 )
 print(json.dumps(result, sort_keys=True, separators=(",", ":")))
 `;
@@ -125,7 +131,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
   return JSON.parse(result.stdout) as Record<string, unknown>;
 }
 
-test("builds the exact dependency-bound artifact deterministically within the Bradbury budget", async () => {
+test("builds the exact dependency-bound V4 artifact deterministically within the Bradbury budget", async () => {
   const root = await fixture();
   const firstRun = run(root, "--write");
   assert.equal(firstRun.status, 0, firstRun.stderr);
@@ -187,6 +193,16 @@ test("compacts repeated literals below the deploy limit without changing behavio
   assert.deepEqual(JSON.parse(behavior.stdout), Array(25).fill(literal));
 });
 
+test("preserves canonical GenLayer imports needed by the deployment runtime", async () => {
+  const root = await fixture();
+  const result = run(root, "--write");
+  assert.equal(result.status, 0, result.stderr);
+  const artifact = await readFile(join(root, "contracts/access_seal_deploy.py"), "utf8");
+  assert.match(artifact, /from genlayer import Address,DynArray,Keccak256,TreeMap,gl,u256/);
+  assert.match(artifact, /@gl\./);
+  assert.match(artifact, /class _EoaRecipient/);
+});
+
 test("tracked artifact preserves semantic-only review bindings from readable source", async () => {
   const artifactPath = resolve("contracts/access_seal_deploy.py");
   const readablePath = resolve("contracts/access_seal.py");
@@ -194,13 +210,14 @@ test("tracked artifact preserves semantic-only review bindings from readable sou
   assert.equal(checked.status, 0, checked.stderr);
 
   const expected = {
-    schemaVersion: "accessseal-review/1",
+    schemaVersion: "accessseal-review/2",
     verdict: "APPROVED",
     releaseDigest: `sha256:${"a".repeat(64)}`,
     profileHash: `0x${"b".repeat(64)}`,
     materialBlockers: [],
     missingEvidence: [],
     evidenceRefs: [`sha256:${"c".repeat(64)}`],
+    contextHash: `sha256:${"d".repeat(64)}`,
     rationaleHash:
       "sha256:da9f6ec333087ad036b9b1e98ff80dd19f39e301fa74dbc66f75b46783c2a5bc",
   };

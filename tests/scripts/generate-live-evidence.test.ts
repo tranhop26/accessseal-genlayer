@@ -4,9 +4,10 @@ import { createHash } from "node:crypto";
 import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { deflateSync } from "node:zlib";
 import test, { afterEach } from "node:test";
 
-import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS } from "../../scripts/live-evidence-schema.ts";
+import { LIVE_EVIDENCE_BINDING, PAYLOAD_SPECS, sha256 } from "../../scripts/live-evidence-schema.ts";
 
 const roots: string[] = [];
 const observedAt = LIVE_EVIDENCE_BINDING.caseCreatedAt + 1;
@@ -119,6 +120,47 @@ function runVerify(output: string) {
   });
 }
 
+function crc32(bytes: Uint8Array): number {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let index = 0; index < 8; index += 1) value = (value >>> 1) ^ (-(value & 1) & 0xedb88320);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function chunk(type: string, data: Uint8Array): Buffer {
+  const result = Buffer.alloc(12 + data.byteLength);
+  result.writeUInt32BE(data.byteLength, 0);
+  result.write(type, 4, "ascii");
+  Buffer.from(data).copy(result, 8);
+  result.writeUInt32BE(crc32(result.subarray(4, 8 + data.byteLength)), 8 + data.byteLength);
+  return result;
+}
+
+function validPng(byteLength?: number): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(320, 0);
+  header.writeUInt32BE(180, 4);
+  header[8] = 8;
+  const base = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.alloc((320 + 1) * 180))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+  if (byteLength === undefined) return base;
+  return Buffer.concat([base.subarray(0, -12), chunk("tEXt", Buffer.alloc(byteLength - base.byteLength - 12, 0x61)), base.subarray(-12)]);
+}
+
+function v4Options(screenshot: Uint8Array) {
+  const { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor } = LIVE_EVIDENCE_BINDING;
+  return {
+    binding: { caseId, caseCreatedAt, chainId, contract, epoch, evidenceDeadlineSeconds, flowsHash, hardDeadlineSeconds, profileVersion, sourceCommit, subjectOrigin, vendor, casePath: `/cases/${caseId}`, auditedPageUrls: [`${subjectOrigin}/cases`, `${subjectOrigin}/cases/new`, `${subjectOrigin}/cases/${caseId}`], criticalFlows: Object.entries(flowCheckpoints).map(([id, checkpoints], index) => ({ id, pageUrl: [`${subjectOrigin}/cases`, `${subjectOrigin}/cases/new`, `${subjectOrigin}/cases/${caseId}`][index]!, checkpoints })), maxObservationAgeSeconds: 86400, maxEnvelopeLifetimeSeconds: 518400, replayDomain: "v4-candidate-replay", profileHash: `0x${"0123456789abcdef".repeat(4)}`, releaseId: "v4-candidate-20260828" },
+    reviewImageSha256: `sha256:${sha256(screenshot)}`,
+  };
+}
+
 async function listedFiles(root: string, relative = ""): Promise<string[]> {
   const directory = join(root, relative);
   const entries = await readdir(directory, { withFileTypes: true });
@@ -225,6 +267,47 @@ test("rejects a conflicting release before writing any other output", async () =
   assert.match(result.stderr, /refus|overwrite|different|immutable/i);
   assert.deepEqual(await listedFiles(output), ["evidence/releases/2026-08-26-live-v3/release.html"]);
   assert.equal(await readFile(conflict, "utf8"), "different immutable release");
+});
+
+test("V4 evidence refuses to overwrite a historical release with different bytes", async () => {
+  const { input, output } = await fixture();
+  const historicalPath = join(output, PAYLOAD_SPECS.SCREENSHOT.path.slice(1));
+  await mkdir(dirname(historicalPath), { recursive: true });
+  await writeFile(historicalPath, Buffer.from("historical screenshot"));
+
+  const result = run(input, output);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /refus|overwrite|different|immutable/i);
+  assert.deepEqual(await readFile(historicalPath), Buffer.from("historical screenshot"));
+});
+
+test("V4 generator writes a six-file versioned candidate bound to the review-image hash", async () => {
+  const { input, output } = await fixture();
+  const screenshot = validPng();
+  await writeFile(join(input, "screenshot.png"), screenshot);
+  const result = await (await import("../../scripts/generate-live-evidence.ts")).generateLiveEvidenceBundle(input, output, { v4: v4Options(screenshot) } as any);
+  assert.equal(result.files.length, 6);
+  assert.match(result.releaseDigest, /^sha256:[0-9a-f]{64}$/);
+  assert.deepEqual((await listedFiles(output)).filter((file) => file.includes("v4-candidate-20260828")), [
+    "evidence/releases/v4-candidate-20260828/critical-flow-trace.json",
+    "evidence/releases/v4-candidate-20260828/dom-facts.json",
+    "evidence/releases/v4-candidate-20260828/release-manifest.json",
+    "evidence/releases/v4-candidate-20260828/release.html",
+    "evidence/releases/v4-candidate-20260828/scanner-report.json",
+    "evidence/releases/v4-candidate-20260828/screenshot.png",
+  ]);
+});
+
+test("V4 generator rejects a 16385-byte screenshot before installing any public output", async () => {
+  const { input, output } = await fixture();
+  const screenshot = validPng(16_385);
+  await writeFile(join(input, "screenshot.png"), screenshot);
+  await assert.rejects(
+    (await import("../../scripts/generate-live-evidence.ts")).generateLiveEvidenceBundle(input, output, { v4: v4Options(screenshot) } as any),
+    /SCREENSHOT exceeds 16384 bytes/,
+  );
+  await assert.rejects(readdir(output), /ENOENT/);
 });
 
 test("rejects a missing capture member without creating the public tree", async () => {

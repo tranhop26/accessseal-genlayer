@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { inflateSync } from "node:zlib";
 
 export const LIVE_EVIDENCE_BINDING = Object.freeze({
   caseId: "0xd3f684621674542957dbacb152e08616a3d315722091cc27dc3b5a9938cb6dd0",
@@ -18,6 +19,8 @@ export const LIVE_EVIDENCE_BINDING = Object.freeze({
   evidenceDeadlineSeconds: 86_400,
   hardDeadlineSeconds: 604_800,
 });
+
+export const MAX_SCREENSHOT_BYTES = 16_384;
 
 export const PAYLOAD_SPECS = Object.freeze({
   HTML_BUNDLE: Object.freeze({ path: "/evidence/releases/2026-08-26-live-v3/release.html", mediaType: "text/html", maxBytes: 32768 }),
@@ -68,16 +71,10 @@ const MANIFEST_KEYS = ["caseId", "epoch", "files", "profileHash", "schemaVersion
 const FILE_KEYS = ["evidenceType", "mediaType", "path", "sha256"];
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const MAX_TOTAL_BYTES = 131072;
-const AUDITED_PAGE_URLS = [
-  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`,
-  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`,
-  `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`,
-] as const;
 const DOM_PAGE_KEYS = [
   "accessibleNames", "disabledStates", "focusableControlOrder", "formLabels", "headings",
   "imageAlternatives", "landmarks", "skipLinkTarget", "url",
 ] as const;
-const FLOW_IDS = ["workspace-navigation", "create-case-preview", "case-section-navigation"] as const;
 const CREATE_FORM_LABELS = [
   "Vendor wallet", "Website origin", "Accessibility profile hash", "Critical flow 1", "Critical flow 2", "Critical flow 3", "Simulated escrow (wei)",
 ] as const;
@@ -85,6 +82,24 @@ const FLOW_CHECKPOINTS = Object.freeze({
   "workspace-navigation": ["skip-focused", "main-focused", "overview-navigation", "cases-navigation"],
   "create-case-preview": ["skip-focused", "main-focused", "vendor-input", "no-keyboard-trap", "terms-step", "subject-origin", "profile-hash", "critical-flow-1", "critical-flow-2", "critical-flow-3", "escrow", "preview-no-send"],
   "case-section-navigation": ["lifecycle-readback", "skip-focused", "main-focused", "terms-navigation", "terms-escape", "evidence-navigation", "evidence-escape", "decision-navigation", "decision-escape", "settlement-navigation", "settlement-escape"],
+});
+
+type SemanticFlow = { id: string; pageUrl: string; checkpoints: readonly string[] };
+type SemanticBinding = { caseId: string; flowsHash: string; subjectOrigin: string; auditedPageUrls: readonly string[]; criticalFlows: readonly SemanticFlow[] };
+const LEGACY_SEMANTIC_BINDING: SemanticBinding = Object.freeze({
+  caseId: LIVE_EVIDENCE_BINDING.caseId,
+  flowsHash: LIVE_EVIDENCE_BINDING.flowsHash,
+  subjectOrigin: LIVE_EVIDENCE_BINDING.subjectOrigin,
+  auditedPageUrls: Object.freeze([
+    `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`,
+    `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`,
+    `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`,
+  ]),
+  criticalFlows: Object.freeze([
+    { id: "workspace-navigation", pageUrl: `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases`, checkpoints: FLOW_CHECKPOINTS["workspace-navigation"] },
+    { id: "create-case-preview", pageUrl: `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/new`, checkpoints: FLOW_CHECKPOINTS["create-case-preview"] },
+    { id: "case-section-navigation", pageUrl: `${LIVE_EVIDENCE_BINDING.subjectOrigin}/cases/${LIVE_EVIDENCE_BINDING.caseId}`, checkpoints: FLOW_CHECKPOINTS["case-section-navigation"] },
+  ]),
 });
 
 function record(value: unknown, label: string): JsonRecord {
@@ -118,6 +133,25 @@ function nonEmptyString(value: unknown, label: string): string {
   return value;
 }
 
+function requireBoundHex(value: unknown, label: string, pattern: RegExp): void {
+  if (typeof value !== "string" || !pattern.test(value) || /^(?:0x)?([0-9a-f])\1*$/i.test(value)) {
+    throw new Error(`${label} must be non-empty, canonical, and not repeated hexadecimal`);
+  }
+}
+
+type LiveEvidenceBindingIdentifiers = {
+  caseId: string;
+  caseCreatedAt: number;
+  contract: string;
+  sourceCommit: string;
+};
+
+export function validateLiveEvidenceBinding(binding: LiveEvidenceBindingIdentifiers = LIVE_EVIDENCE_BINDING): void {
+  requireBoundHex(binding.caseId, "live binding caseId", /^0x[0-9a-f]{64}$/);
+  requireBoundHex(binding.contract, "live binding contract", /^0x[0-9a-f]{40}$/);
+  requireBoundHex(binding.sourceCommit, "live binding sourceCommit", /^[0-9a-f]{40}$/);
+}
+
 function stringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim().length === 0)) {
     throw new Error(`${label} must be an array of non-empty strings`);
@@ -134,8 +168,8 @@ function objectArray(value: unknown, label: string, keys: readonly string[]): Js
   });
 }
 
-function validateNormalizedPageUrl(value: unknown): string {
-  if (typeof value !== "string" || !value.startsWith(`${LIVE_EVIDENCE_BINDING.subjectOrigin}/`)) {
+function validateNormalizedPageUrl(value: unknown, binding: SemanticBinding): string {
+  if (typeof value !== "string" || !value.startsWith(`${binding.subjectOrigin}/`)) {
     throw new Error("DOM facts page URL is outside the normalized live origin");
   }
   let parsed: URL;
@@ -146,7 +180,7 @@ function validateNormalizedPageUrl(value: unknown): string {
   }
   if (
     parsed.protocol !== "https:" ||
-    parsed.origin !== LIVE_EVIDENCE_BINDING.subjectOrigin ||
+    parsed.origin !== binding.subjectOrigin ||
     parsed.search !== "" ||
     parsed.hash !== "" ||
     parsed.pathname.includes("//") ||
@@ -207,18 +241,18 @@ export function sha256(input: Uint8Array): string {
   return createHash("sha256").update(Buffer.from(input)).digest("hex");
 }
 
-function validateDomFacts(value: unknown, observedAt: number): string[] {
+function validateDomFacts(value: unknown, observedAt: number, binding: SemanticBinding): string[] {
   const facts = record(value, "DOM facts");
   sameString(facts.schemaVersion, "accessseal-dom-facts/1", "DOM facts schema version");
   integer(facts.observedAt, "DOM facts observedAt");
   if (facts.observedAt !== observedAt) throw new Error("DOM facts timestamp does not match capture");
-  if (!Array.isArray(facts.pages) || facts.pages.length !== AUDITED_PAGE_URLS.length) throw new Error("DOM facts must contain exactly three audited pages");
+  if (!Array.isArray(facts.pages) || facts.pages.length !== binding.auditedPageUrls.length) throw new Error("DOM facts must contain exactly three audited pages");
   const urls: string[] = [];
   for (const [index, pageValue] of facts.pages.entries()) {
     const page = record(pageValue, "DOM facts page");
     exactKeys(page, DOM_PAGE_KEYS, "DOM facts page");
-    const url = validateNormalizedPageUrl(page.url);
-    sameString(url, AUDITED_PAGE_URLS[index]!, "DOM facts page URL/order");
+    const url = validateNormalizedPageUrl(page.url, binding);
+    sameString(url, binding.auditedPageUrls[index]!, "DOM facts page URL/order");
     if (stringArray(page.landmarks, "DOM facts landmarks").length === 0) throw new Error("DOM facts landmarks are required");
     const headings = objectArray(page.headings, "DOM facts headings", ["level", "name"]);
     if (headings.length === 0) throw new Error("DOM facts headings are required");
@@ -238,7 +272,7 @@ function validateDomFacts(value: unknown, observedAt: number): string[] {
       nonEmptyString(labelled.control, "DOM facts labelled control");
       nonEmptyString(labelled.label, "DOM facts form label");
     }
-    if (url === AUDITED_PAGE_URLS[1]) {
+    if (url === binding.auditedPageUrls[1]) {
       const observedLabels = new Set(formLabels.map((item) => item.label));
       if (CREATE_FORM_LABELS.some((label) => !observedLabels.has(label))) throw new Error("DOM facts formLabels omit a required Create Case label");
     }
@@ -285,25 +319,25 @@ function validateScannerReport(value: unknown, observedAt: number, urls: string[
   if (scanned.size !== urls.length || urls.some((url) => !scanned.has(url))) throw new Error("scanner report is missing Axe URL coverage");
 }
 
-function validateFlowTrace(value: unknown, observedAt: number): void {
+function validateFlowTrace(value: unknown, observedAt: number, binding: SemanticBinding): void {
   const trace = record(value, "critical-flow trace");
   sameString(trace.schemaVersion, "accessseal-critical-flow-trace/1", "critical-flow schema version");
-  sameString(trace.caseId, LIVE_EVIDENCE_BINDING.caseId, "critical-flow case");
-  sameString(trace.flowsHash, LIVE_EVIDENCE_BINDING.flowsHash, "critical-flow hash");
+  sameString(trace.caseId, binding.caseId, "critical-flow case");
+  sameString(trace.flowsHash, binding.flowsHash, "critical-flow hash");
   integer(trace.observedAt, "critical-flow observedAt");
   if (trace.observedAt !== observedAt) throw new Error("critical-flow timestamp does not match capture");
-  if (!Array.isArray(trace.flows) || trace.flows.length !== FLOW_IDS.length) throw new Error("critical-flow trace must contain exactly three flows");
+  if (!Array.isArray(trace.flows) || trace.flows.length !== binding.criticalFlows.length) throw new Error("critical-flow trace must contain exactly three flows");
   for (const [flowIndex, flowValue] of trace.flows.entries()) {
     const flow = record(flowValue, "critical flow");
-    const flowId = FLOW_IDS[flowIndex]!;
-    sameString(flow.id, flowId, "critical-flow ID/order");
-    const expectedCheckpoints = FLOW_CHECKPOINTS[flowId];
+    const expectedFlow = binding.criticalFlows[flowIndex]!;
+    sameString(flow.id, expectedFlow.id, "critical-flow ID/order");
+    const expectedCheckpoints = expectedFlow.checkpoints;
     if (!Array.isArray(flow.steps) || flow.steps.length !== expectedCheckpoints.length || flow.passed !== true) throw new Error("critical-flow checkpoint coverage is incomplete");
     for (const [stepIndex, stepValue] of flow.steps.entries()) {
       const step = record(stepValue, "critical-flow step");
       sameString(step.checkpoint, expectedCheckpoints[stepIndex]!, "critical-flow checkpoint/order");
-      const stepUrl = validateNormalizedPageUrl(step.page);
-      sameString(stepUrl, AUDITED_PAGE_URLS[flowIndex]!, "critical-flow page URL");
+      const stepUrl = validateNormalizedPageUrl(step.page, binding);
+      sameString(stepUrl, expectedFlow.pageUrl, "critical-flow page URL");
       nonEmptyString(step.action, "critical-flow action");
       nonEmptyString(step.expected, "critical-flow expected result");
       nonEmptyString(step.actual, "critical-flow actual result");
@@ -348,12 +382,22 @@ function validateHtmlSnapshot(payload: Uint8Array): void {
   if (hasJavascriptUrl || unsafe.some((pattern) => pattern.test(safetyText) || pattern.test(renderedText))) throw new Error("HTML snapshot contains unsafe or sensitive state");
 }
 
-export function validateLiveCapture(capture: LiveCapture): void {
+export function validateLiveCapture(capture: LiveCapture, binding: SemanticBinding = LEGACY_SEMANTIC_BINDING): void {
   const value = record(capture, "live capture");
   integer(value.observedAt, "capture observedAt");
-  const urls = validateDomFacts(value.domFacts, value.observedAt as number);
+  const urls = validateDomFacts(value.domFacts, value.observedAt as number, binding);
   validateScannerReport(value.scannerReport, value.observedAt as number, urls);
-  validateFlowTrace(value.criticalFlowTrace, value.observedAt as number);
+  validateFlowTrace(value.criticalFlowTrace, value.observedAt as number, binding);
+}
+
+export function verifyPayload(evidenceType: EvidenceType, payload: Uint8Array): void {
+  const spec = PAYLOAD_SPECS[evidenceType];
+  const value = bytes(payload, evidenceType);
+  if (value.byteLength > spec.maxBytes) throw new Error(`${evidenceType} exceeds ${spec.maxBytes} bytes`);
+  if (evidenceType === "HTML_BUNDLE" && value.byteLength === 0) throw new Error("HTML_BUNDLE is empty");
+  if (evidenceType === "SCREENSHOT" && !Buffer.from(value).subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+    throw new Error("SCREENSHOT has an invalid PNG signature");
+  }
 }
 
 function validatePayloadBytes(payloads: EvidencePayloads): void {
@@ -362,26 +406,24 @@ function validatePayloadBytes(payloads: EvidencePayloads): void {
   let total = 0;
   for (const evidenceType of EVIDENCE_TYPES) {
     const payload = bytes(value[evidenceType], evidenceType);
-    const spec = PAYLOAD_SPECS[evidenceType];
-    if (payload.byteLength > spec.maxBytes) throw new Error(`${evidenceType} exceeds its size limit`);
+    verifyPayload(evidenceType, payload);
     total += payload.byteLength;
-    if (evidenceType === "HTML_BUNDLE" && payload.byteLength === 0) throw new Error("HTML_BUNDLE is empty");
-    if (evidenceType === "SCREENSHOT" && !Buffer.from(payload).subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) throw new Error("SCREENSHOT has an invalid PNG signature");
   }
   if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
 }
 
-function validatePayloadSemantics(payloads: EvidencePayloads): void {
+function validatePayloadSemantics(payloads: EvidencePayloads, binding: SemanticBinding = LEGACY_SEMANTIC_BINDING): void {
   const value = payloads as unknown as Record<string, Uint8Array>;
   validateHtmlSnapshot(value.HTML_BUNDLE);
   const domFacts = jsonPayload(value.DOM_FACTS, "DOM facts");
   const scannerReport = jsonPayload(value.SCANNER_REPORT, "scanner report");
   const criticalFlowTrace = jsonPayload(value.CRITICAL_FLOW_TRACE, "critical-flow trace");
   const observedAt = integer(domFacts.observedAt, "DOM facts observedAt");
-  validateLiveCapture({ observedAt, domFacts, scannerReport, criticalFlowTrace });
+  validateLiveCapture({ observedAt, domFacts, scannerReport, criticalFlowTrace }, binding);
 }
 
 export function buildReleaseManifest(payloads: EvidencePayloads): { manifest: ReleaseManifestV1; bytes: Buffer; releaseDigest: `sha256:${string}` } {
+  validateLiveEvidenceBinding();
   validatePayloadBytes(payloads);
   validatePayloadSemantics(payloads);
   const manifest: ReleaseManifestV1 = {
@@ -432,6 +474,7 @@ function parseManifest(manifestBytes: Uint8Array): ReleaseManifestV1 {
 }
 
 export function verifyEvidenceBundle(manifestBytes: Uint8Array, payloads: EvidencePayloads): ReleaseManifestV1 {
+  validateLiveEvidenceBinding();
   const manifest = parseManifest(manifestBytes);
   validatePayloadBytes(payloads);
   const value = payloads as unknown as Record<string, Uint8Array>;
@@ -444,4 +487,177 @@ export function verifyEvidenceBundle(manifestBytes: Uint8Array, payloads: Eviden
   if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
   validatePayloadSemantics(payloads);
   return manifest;
+}
+
+export type V4EvidenceBinding = {
+  auditedPageUrls: readonly [string, string, string];
+  casePath: string;
+  caseCreatedAt: number;
+  caseId: string;
+  chainId: string;
+  contract: string;
+  criticalFlows: readonly [SemanticFlow, SemanticFlow, SemanticFlow];
+  epoch: number;
+  evidenceDeadlineSeconds: number;
+  flowsHash: string;
+  hardDeadlineSeconds: number;
+  maxEnvelopeLifetimeSeconds: number;
+  maxObservationAgeSeconds: number;
+  profileHash: string;
+  profileVersion: "accessseal-static/1";
+  releaseId: string;
+  replayDomain: string;
+  sourceCommit: string;
+  subjectOrigin: string;
+  vendor: string;
+};
+
+export type V4EvidenceOptions = { binding: V4EvidenceBinding; reviewImageSha256: `sha256:${string}` };
+export type ReleaseManifestV4 = {
+  binding: V4EvidenceBinding;
+  files: ReleaseManifestFileV1[];
+  reviewImage: { height: number; mediaType: "image/png"; path: string; sha256: `sha256:${string}`; width: number };
+  schemaVersion: "accessseal-release-manifest/2";
+};
+
+export const V4_RELEASE_MANIFEST_SCHEMA = "accessseal-release-manifest/2" as const;
+const V4_BINDING_KEYS = ["auditedPageUrls", "caseCreatedAt", "caseId", "casePath", "chainId", "contract", "criticalFlows", "epoch", "evidenceDeadlineSeconds", "flowsHash", "hardDeadlineSeconds", "maxEnvelopeLifetimeSeconds", "maxObservationAgeSeconds", "profileHash", "profileVersion", "releaseId", "replayDomain", "sourceCommit", "subjectOrigin", "vendor"];
+const MIN_LEGIBLE_SCREENSHOT_WIDTH = 320;
+const MIN_LEGIBLE_SCREENSHOT_HEIGHT = 180;
+const MAX_SCREENSHOT_DIMENSION = 4096;
+
+export function v4ReleaseManifestPath(binding: V4EvidenceBinding): string {
+  return `/evidence/releases/${binding.releaseId}/release-manifest.json`;
+}
+
+export function v4PayloadSpecs(binding: V4EvidenceBinding) {
+  const base = `/evidence/releases/${binding.releaseId}`;
+  return Object.freeze({
+    HTML_BUNDLE: Object.freeze({ path: `${base}/release.html`, mediaType: "text/html", maxBytes: 32768 }),
+    SCREENSHOT: Object.freeze({ path: `${base}/screenshot.png`, mediaType: "image/png", maxBytes: MAX_SCREENSHOT_BYTES }),
+    DOM_FACTS: Object.freeze({ path: `${base}/dom-facts.json`, mediaType: "application/json", maxBytes: 16384 }),
+    SCANNER_REPORT: Object.freeze({ path: `${base}/scanner-report.json`, mediaType: "application/json", maxBytes: 16384 }),
+    CRITICAL_FLOW_TRACE: Object.freeze({ path: `${base}/critical-flow-trace.json`, mediaType: "application/json", maxBytes: 16384 }),
+  });
+}
+
+function crc32(bytes: Uint8Array): number {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let shift = 0; shift < 8; shift += 1) value = (value >>> 1) ^ (-(value & 1) & 0xedb88320);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+export function pngDimensions(payload: Uint8Array): { width: number; height: number } {
+  const bytes = Buffer.from(payload);
+  if (!bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) throw new Error("SCREENSHOT has an invalid PNG signature");
+  let offset = PNG_SIGNATURE.length;
+  let width = 0;
+  let height = 0;
+  let sawHeader = false;
+  let sawImageData = false;
+  const idat: Buffer[] = [];
+  let bitDepth = 0;
+  let colorType = 0;
+  let interlace = 0;
+  while (offset < bytes.length) {
+    if (offset + 12 > bytes.length) throw new Error("SCREENSHOT PNG is truncated");
+    const length = bytes.readUInt32BE(offset);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > bytes.length) throw new Error("SCREENSHOT PNG chunk is truncated");
+    const type = bytes.toString("ascii", offset + 4, dataStart);
+    if (!/^[A-Za-z]{4}$/.test(type) || crc32(bytes.subarray(offset + 4, dataEnd)) !== bytes.readUInt32BE(dataEnd)) throw new Error("SCREENSHOT PNG chunk is invalid");
+    if (!sawHeader) {
+      if (type !== "IHDR" || length !== 13) throw new Error("SCREENSHOT PNG requires IHDR first");
+      width = bytes.readUInt32BE(dataStart);
+      height = bytes.readUInt32BE(dataStart + 4);
+      bitDepth = bytes[dataStart + 8]!;
+      colorType = bytes[dataStart + 9]!;
+      interlace = bytes[dataStart + 12]!;
+      const allowed: Record<number, readonly number[]> = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+      if (width === 0 || height === 0 || bytes[dataStart + 10] !== 0 || bytes[dataStart + 11] !== 0 || ![0, 1].includes(bytes[dataStart + 12]!) || !allowed[colorType]?.includes(bitDepth)) throw new Error("SCREENSHOT PNG IHDR is invalid");
+      sawHeader = true;
+    } else if (type === "IHDR") throw new Error("SCREENSHOT PNG contains multiple IHDR chunks");
+    if (type === "IDAT") { sawImageData = true; idat.push(bytes.subarray(dataStart, dataEnd)); }
+    if (type === "IEND") {
+      if (length !== 0 || !sawImageData || dataEnd + 4 !== bytes.length) throw new Error("SCREENSHOT PNG IEND is invalid");
+      if (interlace !== 0 || bitDepth !== 8 || ![0, 2, 4, 6].includes(colorType)) throw new Error("SCREENSHOT PNG format is unsupported");
+      let decoded: Buffer;
+      try { decoded = inflateSync(Buffer.concat(idat)); } catch { throw new Error("SCREENSHOT PNG IDAT cannot be decoded"); }
+      const channels = ({ 0: 1, 2: 3, 4: 2, 6: 4 } as Record<number, number>)[colorType]!;
+      const rowBytes = width * channels;
+      if (decoded.byteLength !== height * (rowBytes + 1)) throw new Error("SCREENSHOT PNG IDAT scanlines are invalid");
+      for (let row = 0; row < height; row += 1) if (decoded[row * (rowBytes + 1)]! > 4) throw new Error("SCREENSHOT PNG filter is invalid");
+      return { width, height };
+    }
+    offset = dataEnd + 4;
+  }
+  throw new Error("SCREENSHOT PNG is incomplete");
+}
+
+function validateV4Binding(binding: V4EvidenceBinding): void {
+  exactKeys(binding as unknown as JsonRecord, V4_BINDING_KEYS, "V4 evidence binding");
+  requireBoundHex(binding.caseId, "V4 caseId", /^0x[0-9a-f]{64}$/);
+  requireBoundHex(binding.contract, "V4 contract", /^0x[0-9a-f]{40}$/);
+  requireBoundHex(binding.sourceCommit, "V4 sourceCommit", /^[0-9a-f]{40}$/);
+  requireBoundHex(binding.profileHash, "V4 profileHash", /^0x[0-9a-f]{64}$/);
+  requireBoundHex(binding.flowsHash, "V4 flowsHash", /^0x[0-9a-f]{64}$/);
+  if (!/^v4-[a-z0-9][a-z0-9-]{1,61}$/.test(binding.releaseId) || binding.profileVersion !== "accessseal-static/1" || !/^https:\/\/[a-z0-9.-]+$/.test(binding.subjectOrigin) || !/^0x[0-9a-f]{40}$/.test(binding.vendor) || !/^[0-9]+$/.test(binding.chainId) || !Number.isSafeInteger(binding.epoch) || binding.epoch < 0 || !Number.isSafeInteger(binding.caseCreatedAt) || binding.caseCreatedAt < 0 || !Number.isSafeInteger(binding.evidenceDeadlineSeconds) || binding.evidenceDeadlineSeconds < 1 || !Number.isSafeInteger(binding.hardDeadlineSeconds) || binding.hardDeadlineSeconds < binding.evidenceDeadlineSeconds || !Number.isSafeInteger(binding.maxObservationAgeSeconds) || binding.maxObservationAgeSeconds < 1 || !Number.isSafeInteger(binding.maxEnvelopeLifetimeSeconds) || binding.maxEnvelopeLifetimeSeconds < 1 || !/^[a-z0-9][a-z0-9-]{2,61}$/.test(binding.replayDomain) || binding.casePath !== `/cases/${binding.caseId}` || !Array.isArray(binding.auditedPageUrls) || binding.auditedPageUrls.length !== 3 || binding.auditedPageUrls[0] !== `${binding.subjectOrigin}/cases` || binding.auditedPageUrls[1] !== `${binding.subjectOrigin}/cases/new` || binding.auditedPageUrls[2] !== `${binding.subjectOrigin}${binding.casePath}` || !Array.isArray(binding.criticalFlows) || binding.criticalFlows.length !== 3 || new Set(binding.criticalFlows.map((flow) => flow?.id)).size !== 3 || binding.criticalFlows.some((flow, index) => typeof flow?.id !== "string" || flow.id.length === 0 || flow.pageUrl !== binding.auditedPageUrls[index] || !Array.isArray(flow.checkpoints) || flow.checkpoints.length === 0 || flow.checkpoints.some((checkpoint) => typeof checkpoint !== "string" || checkpoint.length === 0))) throw new Error("V4 evidence binding is invalid");
+}
+
+function semanticBindingForV4(binding: V4EvidenceBinding): SemanticBinding {
+  return { caseId: binding.caseId, flowsHash: binding.flowsHash, subjectOrigin: binding.subjectOrigin, auditedPageUrls: binding.auditedPageUrls, criticalFlows: binding.criticalFlows };
+}
+
+export function verifyV4Payload(evidenceType: EvidenceType, payload: Uint8Array, binding: V4EvidenceBinding): { width: number; height: number } | undefined {
+  validateV4Binding(binding);
+  const spec = v4PayloadSpecs(binding)[evidenceType];
+  if (payload.byteLength > spec.maxBytes) throw new Error(`${evidenceType} exceeds ${spec.maxBytes} bytes`);
+  if (evidenceType === "HTML_BUNDLE" && payload.byteLength === 0) throw new Error("HTML_BUNDLE is empty");
+  if (evidenceType !== "SCREENSHOT") return undefined;
+  const dimensions = pngDimensions(payload);
+  if (dimensions.width < MIN_LEGIBLE_SCREENSHOT_WIDTH || dimensions.height < MIN_LEGIBLE_SCREENSHOT_HEIGHT || dimensions.width > MAX_SCREENSHOT_DIMENSION || dimensions.height > MAX_SCREENSHOT_DIMENSION) throw new Error("SCREENSHOT dimensions are not legible");
+  return dimensions;
+}
+
+function validateV4Payloads(payloads: EvidencePayloads, options: V4EvidenceOptions): { width: number; height: number } {
+  const value = record(payloads, "evidence payloads");
+  exactKeys(value, EVIDENCE_TYPES, "evidence payloads");
+  let total = 0;
+  let screenshot: { width: number; height: number } | undefined;
+  for (const evidenceType of EVIDENCE_TYPES) {
+    const payload = bytes(value[evidenceType], evidenceType);
+    const dimensions = verifyV4Payload(evidenceType, payload, options.binding);
+    if (dimensions !== undefined) screenshot = dimensions;
+    total += payload.byteLength;
+  }
+  if (total >= MAX_TOTAL_BYTES) throw new Error("evidence payload aggregate exceeds size limit");
+  if (screenshot === undefined) throw new Error("V4 screenshot is missing");
+  return screenshot;
+}
+
+export function buildV4ReleaseManifest(payloads: EvidencePayloads, options: V4EvidenceOptions): { manifest: ReleaseManifestV4; bytes: Buffer; releaseDigest: `sha256:${string}` } {
+  validateV4Binding(options.binding);
+  const dimensions = validateV4Payloads(payloads, options);
+  validatePayloadSemantics(payloads, semanticBindingForV4(options.binding));
+  const specs = v4PayloadSpecs(options.binding);
+  const screenshotSha256 = `sha256:${sha256(payloads.SCREENSHOT)}` as `sha256:${string}`;
+  if (options.reviewImageSha256 !== screenshotSha256) throw new Error("V4 review-image hash does not match the screenshot");
+  const manifest: ReleaseManifestV4 = {
+    schemaVersion: V4_RELEASE_MANIFEST_SCHEMA,
+    binding: { ...options.binding },
+    files: EVIDENCE_TYPES.map((evidenceType) => ({ evidenceType, mediaType: specs[evidenceType].mediaType, path: specs[evidenceType].path, sha256: `sha256:${sha256(payloads[evidenceType])}` })),
+    reviewImage: { path: specs.SCREENSHOT.path, mediaType: "image/png", sha256: screenshotSha256, ...dimensions },
+  };
+  const bytes = Buffer.from(canonicalJson(manifest));
+  return { manifest, bytes, releaseDigest: `sha256:${sha256(bytes)}` };
+}
+
+export function verifyV4EvidenceBundle(manifestBytes: Uint8Array, payloads: EvidencePayloads, options: V4EvidenceOptions): ReleaseManifestV4 {
+  const built = buildV4ReleaseManifest(payloads, options);
+  if (!Buffer.from(manifestBytes).equals(built.bytes)) throw new Error("V4 release manifest does not match its exact bound evidence");
+  return built.manifest;
 }

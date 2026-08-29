@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { abi } from "genlayer-js";
 import {
   AccessSealClient,
   deriveCaseBindings,
@@ -14,6 +15,10 @@ const address = "0x1234567890abcdef1234567890abcdef12345678" as const;
 const buyer = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const vendor = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const digest = `0x${"c".repeat(64)}`;
+type TestCalldataValue =
+  | string
+  | TestCalldataValue[]
+  | Map<string, TestCalldataValue>;
 const caseJson = (overrides: Record<string, unknown> = {}) =>
   JSON.stringify({
     buyer,
@@ -57,7 +62,191 @@ const legacyV2CaseJson = (overrides: Record<string, unknown> = {}) => {
   return JSON.stringify(value);
 };
 
+async function sha256(value: string): Promise<`sha256:${string}`> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return `sha256:${[...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+async function v4ReviewContext(caseId = `0x${"d".repeat(64)}`) {
+  const contextJson = JSON.stringify({
+    schemaVersion: "accessseal-review-context/1",
+    binding: {
+      chainId: 61999,
+      contractAddress: address,
+      caseId,
+      epoch: 0,
+      profileHash: digest,
+      releaseDigest: `sha256:${"a".repeat(64)}`,
+      subjectOrigin: "https://product.example",
+    },
+    evidence: [],
+    dom: { pages: [] },
+    scanner: { tool: "scanner", scans: [] },
+    criticalFlows: { flowsHash: digest, flows: [], materialBlockers: {} },
+    screenshot: {
+      uri: "https://product.example/screenshot.png",
+      sha256: `sha256:${"b".repeat(64)}`,
+      mediaType: "image/png",
+      byteLength: 8,
+    },
+    observedAt: 1,
+    expiresAt: 2,
+  });
+  return {
+    caseId,
+    epoch: 0,
+    schemaVersion: "accessseal-review-context/1",
+    ready: true,
+    contextJson,
+    contextHash: await sha256(contextJson),
+    imageUri: "https://product.example/screenshot.png",
+    imageSha256: `sha256:${"b".repeat(64)}`,
+  };
+}
+
 describe("AccessSeal contract adapter", () => {
+  it("accepts an exact bound V4 review context", async () => {
+    const context = await v4ReviewContext();
+    const readContract = vi.fn(async ({ functionName }: { functionName: string }) =>
+      functionName === "get_case" ? caseJson({
+        reviewContextReady: true,
+        reviewContextHash: context.contextHash,
+      }) : JSON.stringify(context),
+    );
+    const client = new AccessSealClient({ readContract } as never, address);
+
+    const result = await client.readReviewContext(`0x${"d".repeat(64)}`, 0);
+
+    expect(result.ready).toBe(true);
+    expect(result.schemaVersion).toBe("accessseal-review-context/1");
+    expect(result.contextHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(new TextEncoder().encode(result.contextJson).byteLength).toBeLessThanOrEqual(16_384);
+  });
+
+  it("rejects a ready context whose parsed binding disagrees", async () => {
+    const context = await v4ReviewContext();
+    const tampered = JSON.parse(context.contextJson) as Record<string, unknown>;
+    (tampered.binding as Record<string, unknown>).caseId = `0x${"e".repeat(64)}`;
+    const contextJson = JSON.stringify(tampered);
+    const readContract = vi.fn(async ({ functionName }: { functionName: string }) =>
+      functionName === "get_case" ? caseJson({
+        reviewContextReady: true,
+        reviewContextHash: await sha256(contextJson),
+      }) : JSON.stringify({ ...context, contextJson, contextHash: await sha256(contextJson) }),
+    );
+    const client = new AccessSealClient({ readContract } as never, address);
+
+    await expect(client.readReviewContext(`0x${"d".repeat(64)}`, 0)).rejects.toThrow(
+      "Review context binding is invalid.",
+    );
+  });
+
+  it("rejects review contexts with malicious extra fields or ready=false", async () => {
+    const context = await v4ReviewContext();
+    for (const malformed of [
+      { ...context, injected: true },
+      { ...context, ready: false },
+    ]) {
+      const readContract = vi.fn(async ({ functionName }: { functionName: string }) =>
+        functionName === "get_case"
+          ? caseJson({
+              reviewContextReady: true,
+              reviewContextHash: context.contextHash,
+            })
+          : JSON.stringify(malformed),
+      );
+      const client = new AccessSealClient({ readContract } as never, address);
+      await expect(
+        client.readReviewContext(`0x${"d".repeat(64)}`, 0),
+      ).rejects.toThrow(/schema|binding/i);
+    }
+  });
+
+  it("enforces the UTF-8 review-context limit at the Unicode byte boundary", async () => {
+    const original = await v4ReviewContext();
+    const parsed = JSON.parse(original.contextJson) as Record<string, unknown>;
+    const base = (payload: string) =>
+      JSON.stringify({ ...parsed, dom: { pages: [`${"😀".repeat(64)}${payload}`] } });
+    const target = 16_384;
+    const exactContextJson = base(
+      "x".repeat(target - new TextEncoder().encode(base("")).byteLength),
+    );
+    expect(new TextEncoder().encode(exactContextJson).byteLength).toBe(target);
+    for (const [contextJson, expected] of [
+      [exactContextJson, true],
+      [
+        base(
+          "x".repeat(
+            target + 1 - new TextEncoder().encode(base("")).byteLength,
+          ),
+        ),
+        false,
+      ],
+    ] as const) {
+      const context = {
+        ...original,
+        contextJson,
+        contextHash: await sha256(contextJson),
+      };
+      const client = new AccessSealClient(
+        {
+          readContract: vi.fn(async ({ functionName }: { functionName: string }) =>
+            functionName === "get_case"
+              ? caseJson({
+                  reviewContextReady: true,
+                  reviewContextHash: context.contextHash,
+                })
+              : JSON.stringify(context),
+          ),
+        } as never,
+        address,
+      );
+      const outcome = client.readReviewContext(`0x${"d".repeat(64)}`, 0);
+      if (expected) await expect(outcome).resolves.toMatchObject({ contextJson });
+      else await expect(outcome).rejects.toThrow("Review context binding is invalid.");
+    }
+  });
+
+  it("rejects unavailable browser crypto and unsafe numeric or string review-context representations", async () => {
+    const context = await v4ReviewContext();
+    const makeClient = (value: Record<string, unknown>) =>
+      new AccessSealClient(
+        {
+          readContract: vi.fn(async ({ functionName }: { functionName: string }) =>
+            functionName === "get_case"
+              ? caseJson({
+                  reviewContextReady: true,
+                  reviewContextHash: context.contextHash,
+                })
+              : JSON.stringify(value),
+          ),
+        } as never,
+        address,
+      );
+    await expect(
+      makeClient({ ...context, epoch: "0" }).readReviewContext(
+        `0x${"d".repeat(64)}`,
+        0,
+      ),
+    ).rejects.toThrow(/counter/i);
+    await expect(
+      makeClient({ ...context, epoch: 9_007_199_254_740_992 }).readReviewContext(
+        `0x${"d".repeat(64)}`,
+        0,
+      ),
+    ).rejects.toThrow(/counter/i);
+    const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: undefined });
+    await expect(
+      makeClient(context).readReviewContext(`0x${"d".repeat(64)}`, 0),
+    ).rejects.toThrow("Browser SHA-256 is unavailable");
+    if (cryptoDescriptor) Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+  });
   it("requires an exact epoch-bound pending seal record and rejects legacy unbound records", () => {
     const binding = {
       action: "close_evidence" as const,
@@ -413,7 +602,233 @@ describe("AccessSeal contract adapter", () => {
     ).resolves.toBe(false);
   });
 
-  it("uses seven consensus rotations only for intelligent review", async () => {
+  it("accepts the exact Studio/localnet close_evidence response shape", async () => {
+    const txId = `0x${"c".repeat(64)}` as const;
+    const caseId = `0x${"d".repeat(64)}`;
+    const expected = {
+      account: buyer as `0x${string}`,
+      caseId,
+      chainId: 61999,
+      contract: address,
+      epoch: 0,
+    };
+    const receiptContext = {
+      binding: {
+        caseId,
+        chainId: 61999,
+        contractAddress: address,
+        epoch: 0,
+        profileHash: digest,
+        releaseDigest: `sha256:${"a".repeat(64)}`,
+        subjectOrigin: "https://product.example",
+      },
+    };
+    const receiptBytes = abi.calldata.encode(
+      new Map<string, TestCalldataValue>([
+        ["contextJson", JSON.stringify(receiptContext)],
+      ]),
+    );
+    const receiptBase64 = btoa(String.fromCharCode(...receiptBytes));
+    const callBytes = abi.calldata.encode(
+      new Map<string, TestCalldataValue>([
+        ["method", "close_evidence"],
+        ["args", [caseId]],
+        ["kwargs", new Map()],
+      ]),
+    );
+    const studioTransaction = {
+      hash: txId,
+      sender: buyer,
+      recipient: address,
+      data: {
+        calldata: {
+          raw: Array.from(callBytes),
+          base64: btoa(String.fromCharCode(...callBytes)),
+          readable: abi.calldata.toString(abi.calldata.decode(callBytes)),
+        },
+      },
+      consensus_data: {
+        leader_receipt: [{ calldata: { base64: receiptBase64 } }],
+      },
+    };
+    const getTransaction = vi.fn().mockResolvedValue(studioTransaction);
+    const client = new AccessSealClient({ getTransaction } as never, address);
+
+    await expect(
+      client.verifyCloseEvidenceTransaction(txId, expected),
+    ).resolves.toBe(true);
+  });
+
+  it("fails closed for the realistic Bradbury shape because it cannot prove chain and epoch", async () => {
+    const txId = `0x${"c".repeat(64)}` as const;
+    const caseId = `0x${"d".repeat(64)}`;
+    const client = new AccessSealClient(
+      {
+        getTransaction: vi.fn().mockResolvedValue({
+          txId,
+          from_address: buyer,
+          to_address: address,
+          txDataDecoded: {
+            type: "call",
+            callData: new Map<string, unknown>([
+              ["method", "close_evidence"],
+              ["args", [caseId]],
+              ["kwargs", new Map()],
+            ]),
+          },
+        }),
+      } as never,
+      address,
+    );
+
+    await expect(
+      client.verifyCloseEvidenceTransaction(txId, {
+        account: buyer as `0x${string}`,
+        caseId,
+        chainId: 61999,
+        contract: address,
+        epoch: 0,
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects missing, conflicting, mixed, and fabricated recovery proof aliases", async () => {
+    const txId = `0x${"c".repeat(64)}` as const;
+    const caseId = `0x${"d".repeat(64)}`;
+    const expected = {
+      account: buyer as `0x${string}`,
+      caseId,
+      chainId: 61999,
+      contract: address,
+      epoch: 0,
+    };
+    const receiptContext = {
+      binding: {
+        caseId,
+        chainId: 61999,
+        contractAddress: address,
+        epoch: 0,
+        profileHash: digest,
+        releaseDigest: `sha256:${"a".repeat(64)}`,
+        subjectOrigin: "https://product.example",
+      },
+    };
+    const receiptBytes = abi.calldata.encode(
+      new Map([["contextJson", JSON.stringify(receiptContext)]]),
+    );
+    const callBytes = abi.calldata.encode(
+      new Map<string, TestCalldataValue>([
+        ["method", "close_evidence"],
+        ["args", [caseId]],
+        ["kwargs", new Map()],
+      ]),
+    );
+    const studioTransaction = {
+      hash: txId,
+      sender: buyer,
+      recipient: address,
+      data: { calldata: { raw: Array.from(callBytes) } },
+      consensus_data: {
+        leader_receipt: [
+          { calldata: { base64: btoa(String.fromCharCode(...receiptBytes)) } },
+        ],
+      },
+    };
+    const bradburyCall = {
+      type: "call",
+      callData: new Map<string, unknown>([
+        ["method", "close_evidence"],
+        ["args", [caseId]],
+        ["kwargs", new Map()],
+      ]),
+    };
+    const wrongCallBytes = abi.calldata.encode(
+      new Map<string, TestCalldataValue>([
+        ["method", "request_review"],
+        ["args", [caseId]],
+        ["kwargs", new Map()],
+      ]),
+    );
+    const getTransaction = vi.fn();
+    const client = new AccessSealClient({ getTransaction } as never, address);
+
+    for (const transaction of [
+      { ...studioTransaction, hash: undefined },
+      { ...studioTransaction, hash: `0x${"e".repeat(64)}` },
+      { ...studioTransaction, txId: `0x${"e".repeat(64)}` },
+      { ...studioTransaction, sender: undefined },
+      { ...studioTransaction, sender: `0x${"e".repeat(40)}`, from_address: buyer },
+      { ...studioTransaction, recipient: undefined },
+      { ...studioTransaction, recipient: address, to_address: `0x${"e".repeat(40)}` },
+      {
+        ...studioTransaction,
+        txDataDecoded: bradburyCall,
+      },
+      {
+        txId,
+        from_address: buyer,
+        to_address: address,
+        txDataDecoded: bradburyCall,
+        consensus_data: studioTransaction.consensus_data,
+      },
+      {
+        ...studioTransaction,
+        data: { calldata: { raw: Array.from(wrongCallBytes) } },
+      },
+      {
+        ...studioTransaction,
+        data: {
+          calldata: {
+            raw: Array.from(callBytes),
+            base64: btoa(String.fromCharCode(...wrongCallBytes)),
+          },
+        },
+      },
+      {
+        ...studioTransaction,
+        data: {
+          calldata: {
+            raw: Array.from(callBytes),
+            readable: "request_review(...)"
+          },
+        },
+      },
+      { ...studioTransaction, data: undefined },
+      { ...studioTransaction, consensus_data: undefined },
+      {
+        ...studioTransaction,
+        consensus_data: {
+          leader_receipt: [
+            {
+              calldata: {
+                base64: btoa(
+                  String.fromCharCode(
+                    ...abi.calldata.encode(
+                      new Map([
+                        [
+                          "contextJson",
+                          JSON.stringify({
+                            binding: { ...receiptContext.binding, epoch: 1 },
+                          }),
+                        ],
+                      ]),
+                    ),
+                  ),
+                ),
+              },
+            },
+          ],
+        },
+      },
+    ]) {
+      getTransaction.mockResolvedValueOnce(transaction);
+      await expect(
+        client.verifyCloseEvidenceTransaction(txId, expected),
+      ).resolves.toBe(false);
+    }
+  });
+
+  it("uses the normal consensus default for intelligent review", async () => {
     const connect = vi.fn();
     const writeContract = vi.fn().mockResolvedValue(`0x${"d".repeat(64)}`);
     const client = new AccessSealClient(
@@ -435,9 +850,8 @@ describe("AccessSeal contract adapter", () => {
       functionName: "request_review",
       args: ["case-1"],
       value: 0n,
-      consensusMaxRotations: 7,
     });
-    expect(writeContract.mock.calls[0]?.[0]).not.toHaveProperty(
+    expect(writeContract.mock.calls[1]?.[0]).not.toHaveProperty(
       "consensusMaxRotations",
     );
   });
@@ -487,6 +901,28 @@ describe("AccessSeal contract adapter", () => {
       } as never,
       address,
     );
+    await expect(client.readReview("case-1", 0)).resolves.toEqual(review);
+  });
+
+  it("parses the exact V4 bounded-context review schema and preserves its context binding", async () => {
+    const review = {
+      schemaVersion: "accessseal-review/2",
+      verdict: "APPROVED",
+      releaseDigest: `sha256:${"a".repeat(64)}`,
+      profileHash: digest,
+      materialBlockers: [],
+      missingEvidence: [],
+      evidenceRefs: [`sha256:${"b".repeat(64)}`],
+      contextHash: `sha256:${"c".repeat(64)}`,
+      rationaleHash: `sha256:${"d".repeat(64)}`,
+    };
+    const client = new AccessSealClient(
+      {
+        readContract: vi.fn().mockResolvedValue(JSON.stringify(review)),
+      } as never,
+      address,
+    );
+
     await expect(client.readReview("case-1", 0)).resolves.toEqual(review);
   });
 

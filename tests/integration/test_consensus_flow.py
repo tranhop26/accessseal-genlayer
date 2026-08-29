@@ -24,7 +24,6 @@ from conftest import (
     read_json,
     record_evidence,
     rpc,
-    submit_complete_evidence,
 )
 from scripts.glsim_support import GenLayerSettlementReader, read_and_verify_settlement_proof
 
@@ -200,7 +199,6 @@ def test_five_validators_finalize_semantic_approval_and_contract_finality(
         "response"
     ]
     assert llm_routes == {
-        r"[\s\S]*LEADER_REVIEW_JSON=[\s\S]*": '{"supported":true}',
         r"[\s\S]*UNTRUSTED_BINDING_AND_DATA_JSON=[\s\S]*": (
             '{"verdict":"APPROVED","materialBlockers":[],"missingEvidence":[],'
             '"rationale":"Bound artifact content establishes no material blocker."}'
@@ -236,6 +234,44 @@ def test_five_validators_finalize_semantic_approval_and_contract_finality(
     )
 
 
+def test_v4_five_validators_finalize_approval_from_stored_context(v4_context):
+    """Fails if reviews rebuild evidence or bypass real validator callbacks."""
+    receipt, telemetry, readback = v4_context.run_happy_path()
+
+    assert receipt["status"] == "FINALIZED"
+    assert receipt["tx_execution_result"] == "FINISHED_WITH_RETURN"
+    assert telemetry["validatorCallbackInvocations"] >= 4
+    assert telemetry["reviewImageFetches"] == 6
+    assert telemetry["reviewAiCalls"] == 6
+    assert telemetry["reviewArtifactRefetches"] == 0
+    review_nodes = next(
+        nodes
+        for nodes in telemetry["nodes"]
+        if any(node["reviewAiCalls"] for node in nodes.values())
+    )
+    assert set(review_nodes) == {"leader", "0", "1", "2", "3", "4"}
+    assert all(
+        node["reviewImageFetches"] == node["reviewAiCalls"] == 1
+        and node["reviewArtifactRefetches"] == 0
+        for node in review_nodes.values()
+    )
+    assert readback["review"]["verdict"] == "APPROVED"
+    assert readback["attempt"]["status"] == "FINALIZED"
+    assert readback["attempt"]["epoch"] == readback["finality"]["epoch"]
+    assert readback["attempt"]["attempt"] == readback["finality"]["attempt"]
+    assert readback["attempt"]["proofId"] == readback["finality"]["proofId"]
+    assert readback["finality"]["status"] == "FINALIZED"
+    assert readback["caseAfterReview"]["lifecycle"] == "DECIDED"
+    assert readback["settlement"]["recipient"] == readback["vendor"]
+    assert readback["settlement"]["executor"] == readback["outsider"]
+    assert readback["accounting"]["totalDeposits"] == (
+        readback["accounting"]["reserved"]
+        + readback["accounting"]["pendingDispatch"]
+        + readback["accounting"]["dispatchedPayouts"]
+        + readback["accounting"]["dispatchedRefunds"]
+    )
+
+
 def test_early_seal_reviews_complete_evidence_before_cutoff_from_deployed_source(
     deployed_contract, actors, fixture_site
 ):
@@ -250,10 +286,9 @@ def test_early_seal_reviews_complete_evidence_before_cutoff_from_deployed_source
     deployed_source = base64.b64decode(
         rpc("gen_getContractCode", [case["contractAddress"]])
     )
-    tracked_artifact = (PROJECT_ROOT / "contracts/access_seal_deploy.py").read_bytes()
+    tracked_artifact = (PROJECT_ROOT / "contracts/access_seal.py").read_bytes()
 
     assert deployed_source == tracked_artifact
-    submit_complete_evidence(deployed_contract, case_id, buyer, vendor)
     sealed = read_json(deployed_contract, "get_case", [case_id])
     created_at = int(datetime.fromisoformat(BASE_TIME).timestamp())
     evidence_cutoff = created_at + case["evidenceDeadline"]
