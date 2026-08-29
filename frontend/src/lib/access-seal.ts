@@ -352,6 +352,65 @@ async function browserSha256(value: string): Promise<`sha256:${string}`> {
     .join("")}`;
 }
 
+function decodedCloseEvidenceReceiptMatches(
+  transaction: Record<string, unknown>,
+  expected: {
+    chainId: number;
+    contract: string;
+    caseId: string;
+    epoch: number;
+  },
+): boolean {
+  const consensus = transaction.consensus_data;
+  if (!consensus || typeof consensus !== "object" || Array.isArray(consensus))
+    return false;
+  const leaders = (consensus as { leader_receipt?: unknown }).leader_receipt;
+  if (!Array.isArray(leaders) || typeof globalThis.atob !== "function")
+    return false;
+  return leaders.some((leader) => {
+    if (!leader || typeof leader !== "object" || Array.isArray(leader)) return false;
+    const calldata = (leader as { calldata?: unknown }).calldata;
+    const base64 =
+      typeof calldata === "string"
+        ? calldata
+        : calldata && typeof calldata === "object" && !Array.isArray(calldata)
+          ? (calldata as { base64?: unknown }).base64
+          : undefined;
+    if (typeof base64 !== "string") return false;
+    try {
+      const binary = globalThis.atob(base64);
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      const result = abi.calldata.decode(bytes);
+      if (!(result instanceof Map)) return false;
+      const contextJson = result.get("contextJson");
+      if (typeof contextJson !== "string") return false;
+      const context = object(parseJson(contextJson, "Receipt review context"), "Receipt review context");
+      const binding = object(context.binding, "Receipt review context binding");
+      exact(
+        binding,
+        [
+          "chainId",
+          "contractAddress",
+          "caseId",
+          "epoch",
+          "profileHash",
+          "releaseDigest",
+          "subjectOrigin",
+        ].sort(),
+        "Receipt review context binding",
+      );
+      return (
+        binding.caseId === expected.caseId &&
+        count(binding.chainId, "Receipt review context chain ID") === expected.chainId &&
+        binding.contractAddress === expected.contract &&
+        count(binding.epoch, "Receipt review context epoch") === expected.epoch
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
 export class AccessSealClient {
   constructor(
     private readonly sdk: SdkClient,
@@ -812,6 +871,50 @@ export class AccessSealClient {
       args.length === 1 &&
       args[0] === caseId
     );
+  }
+  async verifyCloseEvidenceTransaction(
+    txId: Hash,
+    expected: {
+      account: Address;
+      caseId: string;
+      chainId: number;
+      contract: string;
+      epoch: number;
+    },
+  ): Promise<boolean> {
+    if (!this.sdk.getTransaction) return false;
+    try {
+      const tx = object(
+        await this.sdk.getTransaction({ hash: txId }),
+        "Transaction",
+      );
+      const recipient = String(tx.to_address ?? tx.recipient ?? "").toLowerCase();
+      const sender = String(tx.from_address ?? tx.sender ?? "").toLowerCase();
+      const decoded = tx.txDataDecoded as
+        { type?: unknown; callData?: unknown } | undefined;
+      const call = decoded?.callData;
+      const method =
+        call instanceof Map
+          ? call.get("method")
+          : (call as Record<string, unknown> | undefined)?.method;
+      const args =
+        call instanceof Map
+          ? call.get("args")
+          : (call as Record<string, unknown> | undefined)?.args;
+      return (
+        recipient === this.address.toLowerCase() &&
+        recipient === expected.contract.toLowerCase() &&
+        sender === expected.account.toLowerCase() &&
+        decoded?.type === "call" &&
+        method === "close_evidence" &&
+        Array.isArray(args) &&
+        args.length === 1 &&
+        args[0] === expected.caseId &&
+        decodedCloseEvidenceReceiptMatches(tx, expected)
+      );
+    } catch {
+      return false;
+    }
   }
   async appeal(txId: Hash, bond: bigint) {
     if (!this.network)

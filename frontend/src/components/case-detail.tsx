@@ -511,12 +511,25 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     try {
       if (!data) return;
       if (!isPendingSealForCurrentEpoch(hash, data.case)) return;
+      const configuredRecoveryProof =
+        data.case.evidenceSealed &&
+        wallet.config?.chainId === data.case.chainId &&
+        wallet.config.contractAddress.toLowerCase() ===
+          data.case.contractAddress.toLowerCase() &&
+        wallet.address?.toLowerCase() === data.case.buyer.toLowerCase() &&
+        (await wallet.readContract?.verifyCloseEvidenceTransaction(hash, {
+          account: wallet.address,
+          caseId,
+          chainId: data.case.chainId,
+          contract: data.case.contractAddress,
+          epoch: data.case.epoch,
+        })) === true;
       await monitorTransaction(
         hash,
         false,
         "close_evidence",
         actionReadback(data, evidence, eligibility.round),
-        true,
+        configuredRecoveryProof,
       );
     } catch (cause) {
       setError(

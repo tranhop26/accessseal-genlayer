@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { abi } from "genlayer-js";
 import {
   AccessSealClient,
   deriveCaseBindings,
@@ -595,6 +596,111 @@ describe("AccessSeal contract adapter", () => {
     await expect(
       client.verifyReviewTransaction(txId, `0x${"e".repeat(64)}`),
     ).resolves.toBe(false);
+  });
+
+  it("proves only an exact pinned SDK close_evidence transaction", async () => {
+    const txId = `0x${"c".repeat(64)}` as const;
+    const caseId = `0x${"d".repeat(64)}`;
+    const expected = {
+      account: buyer as `0x${string}`,
+      caseId,
+      chainId: 61999,
+      contract: address,
+      epoch: 0,
+    };
+    const receiptContext = {
+      binding: {
+        caseId,
+        chainId: 61999,
+        contractAddress: address,
+        epoch: 0,
+        profileHash: digest,
+        releaseDigest: `sha256:${"a".repeat(64)}`,
+        subjectOrigin: "https://product.example",
+      },
+    };
+    const receiptBytes = abi.calldata.encode(
+      new Map([
+        ["contextJson", JSON.stringify(receiptContext)],
+      ]),
+    );
+    const receiptBase64 = btoa(String.fromCharCode(...receiptBytes));
+    const actualTransaction = {
+      from_address: buyer,
+      to_address: address,
+      txDataDecoded: {
+        type: "call",
+        callData: new Map<string, unknown>([
+          ["method", "close_evidence"],
+          ["args", [caseId]],
+        ]),
+      },
+      consensus_data: {
+        leader_receipt: [{ calldata: { base64: receiptBase64 } }],
+      },
+    };
+    const getTransaction = vi.fn().mockResolvedValue(actualTransaction);
+    const client = new AccessSealClient({ getTransaction } as never, address);
+
+    await expect(
+      client.verifyCloseEvidenceTransaction(txId, expected),
+    ).resolves.toBe(true);
+
+    for (const transaction of [
+      {
+        ...actualTransaction,
+        txDataDecoded: {
+          ...actualTransaction.txDataDecoded,
+          callData: new Map<string, unknown>([
+            ["method", "request_review"],
+            ["args", [caseId]],
+          ]),
+        },
+      },
+      {
+        ...actualTransaction,
+        txDataDecoded: {
+          ...actualTransaction.txDataDecoded,
+          callData: new Map<string, unknown>([
+            ["method", "close_evidence"],
+            ["args", [`0x${"e".repeat(64)}`]],
+          ]),
+        },
+      },
+      { ...actualTransaction, to_address: `0x${"f".repeat(40)}` },
+      { ...actualTransaction, from_address: `0x${"f".repeat(40)}` },
+      { ...actualTransaction, txDataDecoded: undefined },
+      {
+        ...actualTransaction,
+        consensus_data: {
+          leader_receipt: [
+            {
+              calldata: {
+                base64: btoa(
+                  String.fromCharCode(
+                    ...abi.calldata.encode(
+                      new Map([
+                        [
+                          "contextJson",
+                          JSON.stringify({
+                            binding: { ...receiptContext.binding, epoch: 1 },
+                          }),
+                        ],
+                      ]),
+                    ),
+                  ),
+                ),
+              },
+            },
+          ],
+        },
+      },
+    ]) {
+      getTransaction.mockResolvedValueOnce(transaction);
+      await expect(
+        client.verifyCloseEvidenceTransaction(txId, expected),
+      ).resolves.toBe(false);
+    }
   });
 
   it("uses the normal consensus default for intelligent review", async () => {

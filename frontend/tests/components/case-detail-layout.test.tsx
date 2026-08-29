@@ -1,12 +1,13 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { abi } from "genlayer-js";
 import { CaseDetail } from "@/components/case-detail";
 import { StatusPanel } from "@/components/status-panel";
 import { useWallet } from "@/providers/wallet-provider";
 import type { ReconciledCase } from "@/lib/transactions";
 import type { EvidenceEnvelopeV1, EvidenceType } from "@/lib/evidence";
-import type { EvidenceRecord, Hash } from "@/lib/access-seal";
+import { AccessSealClient, type EvidenceRecord, type Hash } from "@/lib/access-seal";
 
 vi.mock("@/providers/wallet-provider", () => ({ useWallet: vi.fn() }));
 
@@ -56,6 +57,44 @@ function persistPendingSeal(
       hash,
     }),
   );
+}
+
+function actualCloseEvidenceTransaction(
+  caseId = CASE_ID,
+  contract = `0x${"4".repeat(40)}`,
+  sender = BUYER,
+  epoch = 0,
+) {
+  const receiptContext = JSON.stringify({
+    binding: {
+      chainId: 61999,
+      contractAddress: contract,
+      caseId,
+      epoch,
+      profileHash: `0x${"6".repeat(64)}`,
+      releaseDigest: `sha256:${"8".repeat(64)}`,
+      subjectOrigin: "https://audit.example",
+    },
+  });
+  const receiptBytes = abi.calldata.encode(
+    new Map([["contextJson", receiptContext]]),
+  );
+  return {
+    from_address: sender,
+    to_address: contract,
+    txDataDecoded: {
+      type: "call",
+      callData: new Map<string, unknown>([
+        ["method", "close_evidence"],
+        ["args", [caseId]],
+      ]),
+    },
+    consensus_data: {
+      leader_receipt: [
+        { calldata: { base64: btoa(String.fromCharCode(...receiptBytes)) } },
+      ],
+    },
+  };
 }
 
 function finalizedReadback(): ReconciledCase {
@@ -192,6 +231,8 @@ function mockWallet(
     contract?: Record<string, unknown> | null;
     evidence?: EvidenceRecord | null;
     sdk?: Record<string, unknown> | null;
+    config?: Record<string, unknown> | null;
+    recoveryTransaction?: unknown;
   } = {},
 ) {
   const readContract = {
@@ -217,6 +258,19 @@ function mockWallet(
       roundData: null,
     }),
     verifyReviewTransaction: vi.fn().mockResolvedValue(false),
+    verifyCloseEvidenceTransaction: (
+      hash: Hash,
+      input: { account: `0x${string}`; caseId: string },
+    ) =>
+      new AccessSealClient(
+        {
+          getTransaction: vi
+            .fn()
+            .mockResolvedValue(options.recoveryTransaction),
+        } as never,
+        (options.config?.contractAddress as `0x${string}` | undefined) ??
+          (`0x${"4".repeat(40)}` as `0x${string}`),
+      ).verifyCloseEvidenceTransaction(hash, input as never),
   };
   vi.mocked(useWallet).mockReturnValue({
     status: "connected",
@@ -225,7 +279,7 @@ function mockWallet(
     contract: options.contract ?? null,
     readContract,
     sdk: options.sdk ?? null,
-    config: null,
+    config: options.config ?? null,
     connect: vi.fn(),
     changeAccount: options.changeAccount ?? vi.fn(),
     disconnect: vi.fn(),
@@ -850,7 +904,7 @@ describe("case detail document layout", () => {
     );
   });
 
-  it("confirms and clears a restored finalized seal hash without a duplicate send", async () => {
+  it("does not confirm an arbitrary persisted finalized-success hash for an already sealed case", async () => {
     const hash = `0x${"c".repeat(64)}` as Hash;
     const sealed = evidenceOpenReadback(true);
     const closeEvidence = vi.fn();
@@ -858,6 +912,50 @@ describe("case detail document layout", () => {
     mockWallet(sealed, {
       contract: { closeEvidence },
       evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      config: {
+        network: "studionet",
+        chainId: 61999,
+        contractChainId: 1,
+        contractAddress: `0x${"4".repeat(40)}`,
+        explorerBaseUrl: "https://studio.genlayer.com",
+      },
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback mismatch",
+      }),
+    ).toBeVisible();
+    expect(closeEvidence).not.toHaveBeenCalled();
+    expect(
+      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+    ).toContain(hash);
+  });
+
+  it("confirms a persisted sealed recovery only with configured-chain close evidence proof", async () => {
+    const hash = `0x${"c".repeat(64)}` as Hash;
+    const sealed = evidenceOpenReadback(true);
+    const closeEvidence = vi.fn();
+    persistPendingSeal(hash);
+    mockWallet(sealed, {
+      contract: { closeEvidence },
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      config: {
+        network: "studionet",
+        chainId: 61999,
+        contractChainId: 1,
+        contractAddress: `0x${"4".repeat(40)}`,
+        explorerBaseUrl: "https://studio.genlayer.com",
+      },
+      recoveryTransaction: actualCloseEvidenceTransaction(),
       sdk: {
         waitForTransactionReceipt: vi.fn().mockResolvedValue({
           statusName: "FINALIZED",
@@ -875,12 +973,39 @@ describe("case detail document layout", () => {
     ).toBeVisible();
     expect(closeEvidence).not.toHaveBeenCalled();
     expect(
-      screen.queryByRole("button", { name: "Close evidence & enable review" }),
-    ).not.toBeInTheDocument();
-    expect(closeEvidence).not.toHaveBeenCalled();
-    expect(
       localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
     ).toBeNull();
+  });
+
+  it("does not bypass a persisted sealed recovery on the wrong configured chain", async () => {
+    const hash = `0x${"d".repeat(64)}` as Hash;
+    persistPendingSeal(hash);
+    mockWallet(evidenceOpenReadback(true), {
+      evidence: evidenceReadback(REQUIRED_EVIDENCE_TYPES),
+      config: {
+        network: "localnet",
+        chainId: 61127,
+        contractChainId: 1,
+        contractAddress: `0x${"4".repeat(40)}`,
+        explorerBaseUrl: null,
+      },
+      recoveryTransaction: actualCloseEvidenceTransaction(),
+      sdk: {
+        waitForTransactionReceipt: vi.fn().mockResolvedValue({
+          statusName: "FINALIZED",
+          txExecutionResultName: "FINISHED_WITH_RETURN",
+        }),
+      },
+    });
+
+    render(<CaseDetail caseId={CASE_ID} />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Transaction readback mismatch",
+      }),
+    ).toBeVisible();
+    expect(localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`)).toContain(hash);
   });
 
   it("keeps a persisted seal hash recoverable when its authoritative state is not sealed", async () => {
