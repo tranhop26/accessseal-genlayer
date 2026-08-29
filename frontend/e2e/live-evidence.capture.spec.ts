@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, s
 import { resolve } from "node:path";
 import {
   LIVE_EVIDENCE_BINDING,
+  MAX_SCREENSHOT_BYTES,
   type LiveCapture,
   validateLiveCapture,
 } from "../../scripts/live-evidence-schema";
@@ -415,7 +416,7 @@ test("captures the approved production accessibility evidence without wallet wri
   const transientScreenshot = testInfo.outputPath("sanitized-case-evidence.png");
   await page.screenshot({ path: transientScreenshot });
   expect(Buffer.byteLength(releaseHtml)).toBeLessThan(32_768);
-  expect(statSync(transientScreenshot).size).toBeLessThan(65_536);
+  expect(statSync(transientScreenshot).size).toBeLessThan(MAX_SCREENSHOT_BYTES);
   expect(
     Buffer.byteLength(domFactsJson) +
       Buffer.byteLength(scannerReportJson) +
@@ -434,7 +435,7 @@ test("captures the approved production accessibility evidence without wallet wri
   for (const name of outputNames)
     expect(existsSync(resolve(stagingDirectory, name))).toBe(true);
   expect(statSync(resolve(stagingDirectory, "release.html")).size).toBeLessThan(32_768);
-  expect(statSync(resolve(stagingDirectory, "screenshot.png")).size).toBeLessThan(65_536);
+  expect(statSync(resolve(stagingDirectory, "screenshot.png")).size).toBeLessThan(MAX_SCREENSHOT_BYTES);
   for (const name of outputNames.slice(2))
     expect(statSync(resolve(stagingDirectory, name)).size).toBeLessThan(16_384);
   expect(outputNames.reduce((total, name) => total + statSync(resolve(stagingDirectory, name)).size, 0)).toBeLessThan(131_072);
