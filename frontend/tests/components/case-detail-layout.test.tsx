@@ -336,7 +336,7 @@ describe("case detail document layout", () => {
     const status = screen.getByRole("status");
     expect(status).toHaveAttribute("data-tone", "warning");
     expect(status).not.toHaveAttribute("data-tone", "success");
-    expect(screen.getByText("Accepted")).toHaveAttribute(
+    expect(screen.getByText("Consensus pending")).toHaveAttribute(
       "aria-current",
       "step",
     );
@@ -658,7 +658,7 @@ describe("case detail document layout", () => {
       statusName: "ACCEPTED",
       txExecutionResultName: "FINISHED_WITH_RETURN",
     });
-    expect(await screen.findByText(/accepted by validators/i)).toBeVisible();
+    expect(await screen.findByText(/validators accepted the transaction/i)).toBeVisible();
   });
 
   it("restores a bound persisted seal hash through submitted and consensus states without sending again", async () => {
@@ -694,7 +694,7 @@ describe("case detail document layout", () => {
         txExecutionResultName: "FINISHED_WITH_RETURN",
       });
     });
-    expect(await screen.findByText(/accepted by validators/i)).toBeVisible();
+    expect(await screen.findByText(/validators accepted the transaction/i)).toBeVisible();
     expect(closeEvidence).not.toHaveBeenCalled();
   });
 
@@ -721,7 +721,7 @@ describe("case detail document layout", () => {
     render(<CaseDetail caseId={CASE_ID} />);
 
     expect(
-      await screen.findByRole("heading", { name: "Transaction undetermined" }),
+      await screen.findByRole("heading", { name: "Transaction validators timeout" }),
     ).toBeVisible();
     expect(
       screen.getByRole("button", { name: "Retry transaction status" }),
@@ -774,7 +774,9 @@ describe("case detail document layout", () => {
     expect(
       await screen.findByRole("button", { name: "Retry transaction status" }),
     ).toBeEnabled();
-    expect(screen.getByText(/receipt rpc unavailable/i)).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "Transaction rpc error" }),
+    ).toBeVisible();
     expect(closeEvidence).toHaveBeenCalledTimes(1);
     expect(
       JSON.parse(
@@ -871,7 +873,9 @@ describe("case detail document layout", () => {
     render(<CaseDetail caseId={CASE_ID} />);
 
     expect(
-      await screen.findByText(/waiting for sealed evidence readback/i),
+      await screen.findByRole("heading", {
+        name: "Transaction readback mismatch",
+      }),
     ).toBeVisible();
     expect(closeEvidence).not.toHaveBeenCalled();
     expect(
@@ -987,16 +991,20 @@ describe("case detail document layout", () => {
     );
 
     expect(
-      await screen.findByText(/waiting for sealed evidence readback/i),
-    ).toBeVisible();
-    expect(
-      screen
-        .getByRole("heading", { name: "Transaction finalized" })
+      (await screen.findByRole("heading", {
+        name: "Transaction readback mismatch",
+      }))
         .closest("[role='status']"),
-    ).not.toHaveAttribute("data-tone", "success");
+    ).toHaveAttribute("data-tone", "danger");
     expect(
       screen.getByRole("button", { name: "Close evidence & enable review" }),
     ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Retry transaction status" }),
+    ).toBeEnabled();
+    expect(
+      localStorage.getItem(`${PENDING_CLOSE_EVIDENCE_PREFIX}${CASE_ID}`),
+    ).toContain(`0x${"b".repeat(64)}`);
     expect(
       screen.getByRole("button", { name: "Refresh readback" }),
     ).toBeEnabled();
@@ -1072,12 +1080,16 @@ describe("case detail document layout", () => {
         name: "Close evidence & enable review",
       }),
     );
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Finalized seal readback offline",
-    );
+    expect(
+      await screen.findByRole("heading", { name: "Transaction rpc error" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Retry transaction status" }),
+    ).toBeEnabled();
 
-    await user.click(screen.getByRole("button", { name: "Retry readback" }));
-    await waitFor(() => expect(reader.readCase).toHaveBeenCalledTimes(3));
+    await user.click(
+      screen.getByRole("button", { name: "Retry transaction status" }),
+    );
     expect(closeEvidence).toHaveBeenCalledTimes(1);
     expect(
       await screen.findByRole("heading", {
@@ -1188,7 +1200,9 @@ describe("case detail document layout", () => {
     expect(button).toBeEnabled();
 
     await user.click(button);
-    expect(await screen.findByText(/execution error/i)).toBeVisible();
+    expect(
+      await screen.findByRole("heading", { name: "Transaction execution error" }),
+    ).toBeVisible();
     expect(button).toBeEnabled();
   });
 });

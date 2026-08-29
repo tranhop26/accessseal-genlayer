@@ -37,12 +37,30 @@ export type TransactionState = {
   hash: `0x${string}` | null;
   message: string;
 };
-export type PendingAction = "close_evidence";
+export type PendingAction =
+  | "accept_terms"
+  | "fund"
+  | "open_evidence"
+  | "append_evidence"
+  | "close_evidence"
+  | "request_review"
+  | "start_cure"
+  | "retry_review"
+  | "expire_unresolved"
+  | "timeout_refund"
+  | "prepare_settlement"
+  | "execute_settlement"
+  | "appeal";
 type Receipt = {
   statusName?: string;
   status_name?: string;
   status?: string | number;
+  resultName?: string;
   txExecutionResultName?: string;
+  error?: unknown;
+  executionError?: unknown;
+  data?: { error?: unknown; executionError?: unknown };
+  messages?: unknown[];
 };
 type ReceiptClient = {
   waitForTransactionReceipt(args: {
@@ -53,6 +71,51 @@ type ReceiptClient = {
 
 function normalizedStatus(receipt: Receipt): string {
   return String(receipt.statusName ?? receipt.status_name ?? receipt.status ?? "");
+}
+const VALIDATOR_TIMEOUT_STATUSES = new Set([
+  "VALIDATORS_TIMEOUT",
+  "LEADER_TIMEOUT",
+  "CANCELED",
+  "UNDETERMINED",
+]);
+const DETERMINISTIC_RESULT_NAMES = new Set(["DISAGREE", "MAJORITY_DISAGREE"]);
+const ACCESS_SEAL_ROLE_ERRORS = [
+  "only the vendor can accept terms",
+  "only the buyer can fund",
+  "only the vendor can open evidence",
+  "only the vendor can append evidence",
+  "only the buyer can close evidence",
+  "only the vendor can start a cure",
+] as const;
+
+function matchesExactRoleError(value: unknown, expected: string): boolean {
+  let current = value;
+  const seen = new Set<unknown>();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (matchesExactUserError(current, expected)) return true;
+    if (current instanceof Error) {
+      if (current.message === `gen_call failed: ${expected}`) return true;
+      current = current.cause;
+    } else if (typeof current === "object" && "cause" in current)
+      current = (current as { cause?: unknown }).cause;
+    else break;
+  }
+  return false;
+}
+function isKnownRoleFailure(value: unknown): boolean {
+  return ACCESS_SEAL_ROLE_ERRORS.some((expected) =>
+    matchesExactRoleError(value, expected),
+  );
+}
+function receiptRoleFailure(receipt: Receipt): boolean {
+  return [
+    receipt.error,
+    receipt.executionError,
+    receipt.data?.error,
+    receipt.data?.executionError,
+    ...(receipt.messages ?? []),
+  ].some(isKnownRoleFailure);
 }
 function state(
   hash: `0x${string}` | null,
@@ -83,10 +146,10 @@ export function classifyTransactionFailure(
   error: unknown,
   hash: `0x${string}` | null = null,
 ): TransactionState {
+  if (isKnownRoleFailure(error)) return failureFor(hash, "WRONG_ROLE");
   if (error && typeof error === "object" && "code" in error) {
     const code = (error as { code?: unknown }).code;
     if (code === 4001) return failureFor(hash, "WALLET_REJECTED");
-    if (code === "WRONG_ROLE") return failureFor(hash, "WRONG_ROLE");
   }
   return failureFor(hash, "RPC_ERROR");
 }
@@ -108,17 +171,18 @@ export async function trackTransaction(
     return result;
   }
   const acceptedStatus = normalizedStatus(accepted);
-  if (acceptedStatus === "UNDETERMINED") {
-    const result = state(
-      hash,
-      "VALIDATORS_TIMEOUT",
-      "Validators reported an undetermined transaction status.",
-    );
+  if (VALIDATOR_TIMEOUT_STATUSES.has(acceptedStatus)) {
+    const result = failureFor(hash, "VALIDATORS_TIMEOUT");
     onState(result);
     return result;
   }
-  if (acceptedStatus === "WRONG_ROLE") {
+  if (receiptRoleFailure(accepted)) {
     const result = failureFor(hash, "WRONG_ROLE");
+    onState(result);
+    return result;
+  }
+  if (DETERMINISTIC_RESULT_NAMES.has(String(accepted.resultName ?? ""))) {
+    const result = failureFor(hash, "DETERMINISTIC_VIOLATION");
     onState(result);
     return result;
   }
@@ -132,7 +196,7 @@ export async function trackTransaction(
     return result;
   }
   if (acceptedStatus !== "ACCEPTED" && acceptedStatus !== "FINALIZED") {
-    const result = failureFor(hash, "DETERMINISTIC_VIOLATION");
+    const result = failureFor(hash, "RPC_ERROR");
     onState(result);
     return result;
   }
@@ -145,17 +209,23 @@ export async function trackTransaction(
     onState(result);
     return result;
   }
-  if (normalizedStatus(finalized) === "UNDETERMINED") {
-    const result = state(
-      hash,
-      "VALIDATORS_TIMEOUT",
-      "Validators reported an undetermined finality status.",
-    );
+  if (VALIDATOR_TIMEOUT_STATUSES.has(normalizedStatus(finalized))) {
+    const result = failureFor(hash, "VALIDATORS_TIMEOUT");
+    onState(result);
+    return result;
+  }
+  if (receiptRoleFailure(finalized)) {
+    const result = failureFor(hash, "WRONG_ROLE");
+    onState(result);
+    return result;
+  }
+  if (DETERMINISTIC_RESULT_NAMES.has(String(finalized.resultName ?? ""))) {
+    const result = failureFor(hash, "DETERMINISTIC_VIOLATION");
     onState(result);
     return result;
   }
   if (normalizedStatus(finalized) !== "FINALIZED") {
-    const result = failureFor(hash, "DETERMINISTIC_VIOLATION");
+    const result = failureFor(hash, "RPC_ERROR");
     onState(result);
     return result;
   }
@@ -194,6 +264,114 @@ type ReconcileSource = {
   readAccounting(): Promise<Accounting>;
   readSettlement(caseId: string): Promise<Settlement>;
 };
+export type ActionReadback = {
+  case: Pick<
+    CaseRecord,
+    | "lifecycle"
+    | "epoch"
+    | "vendorAccepted"
+    | "escrowAmount"
+    | "reserved"
+    | "evidenceSealed"
+  >;
+  review: Pick<ReviewRecord, "verdict"> | null;
+  reviewFinality: Pick<ReviewFinality, "epoch" | "attempt" | "status"> | null;
+  reviewAttempt: Pick<ReviewAttempt, "epoch" | "attempt"> | null;
+  settlement: Pick<Settlement, "kind" | "reason" | "status"> | null;
+  accounting: Accounting;
+  evidence: { epoch: number; envelopes: unknown[] } | null;
+  appealRound: bigint | null;
+};
+
+export function actionReadbackConfirmed(
+  action: PendingAction | undefined,
+  before: ActionReadback,
+  after: ActionReadback,
+): boolean {
+  switch (action) {
+    case "accept_terms":
+      return !before.case.vendorAccepted && after.case.vendorAccepted;
+    case "fund":
+      return (
+        before.case.lifecycle === "DRAFT" &&
+        after.case.lifecycle === "FUNDED" &&
+        after.case.reserved === after.case.escrowAmount
+      );
+    case "open_evidence":
+    case "append_evidence":
+      return (
+        after.case.lifecycle === "EVIDENCE_OPEN" &&
+        after.evidence !== null &&
+        after.evidence.epoch === after.case.epoch &&
+        after.evidence.envelopes.length > (before.evidence?.envelopes.length ?? 0)
+      );
+    case "close_evidence":
+      return !before.case.evidenceSealed && after.case.evidenceSealed;
+    case "request_review":
+      return (
+        before.review === null &&
+        before.reviewFinality === null &&
+        after.review !== null &&
+        after.reviewFinality !== null &&
+        after.reviewFinality.epoch === after.case.epoch
+      );
+    case "start_cure":
+      return (
+        after.case.lifecycle === "EVIDENCE_OPEN" &&
+        after.case.epoch === before.case.epoch + 1 &&
+        after.review === null &&
+        after.reviewFinality === null
+      );
+    case "retry_review":
+      return (
+        before.reviewFinality !== null &&
+        after.review !== null &&
+        after.reviewFinality !== null &&
+        after.reviewFinality.epoch === before.reviewFinality.epoch &&
+        after.reviewFinality.attempt === before.reviewFinality.attempt + 1
+      );
+    case "expire_unresolved":
+      return (
+        before.settlement === null &&
+        after.case.lifecycle === "SETTLEMENT_PENDING" &&
+        after.settlement !== null &&
+        after.settlement.kind === "REFUND" &&
+        after.settlement.status === "PREPARED" &&
+        ["UNRESOLVED_EXHAUSTED", "CURE_EXHAUSTED"].includes(
+          after.settlement.reason,
+        )
+      );
+    case "timeout_refund":
+      return (
+        before.settlement === null &&
+        after.case.lifecycle === "SETTLEMENT_PENDING" &&
+        after.settlement?.kind === "REFUND" &&
+        after.settlement.reason === "HARD_TIMEOUT" &&
+        after.settlement.status === "PREPARED"
+      );
+    case "prepare_settlement":
+      return (
+        before.settlement === null &&
+        after.case.lifecycle === "SETTLEMENT_PENDING" &&
+        after.settlement?.status === "PREPARED" &&
+        ((before.review?.verdict === "APPROVED" && after.settlement.kind === "PAYOUT") ||
+          (before.review?.verdict === "REJECTED" && after.settlement.kind === "REFUND"))
+      );
+    case "execute_settlement":
+      return (
+        before.settlement?.status === "PREPARED" &&
+        after.case.lifecycle === "DISPATCHED_FINALIZED" &&
+        after.settlement?.status === "DISPATCHED_FINALIZED"
+      );
+    case "appeal":
+      return (
+        before.appealRound !== null &&
+        after.appealRound === before.appealRound + 1n
+      );
+    default:
+      return false;
+  }
+}
 export type ReconciledCase = {
   case: CaseRecord;
   review: ReviewRecord | null;

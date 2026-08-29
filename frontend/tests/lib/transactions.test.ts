@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  actionReadbackConfirmed,
   classifyTransactionFailure,
   reconcileCase,
   trackTransaction,
@@ -7,6 +8,176 @@ import {
 } from "@/lib/transactions";
 
 describe("transaction truth", () => {
+  const readback = (overrides: Record<string, unknown> = {}) => ({
+    case: {
+      caseId: "case-1",
+      lifecycle: "DRAFT",
+      epoch: 0,
+      vendorAccepted: false,
+      escrowAmount: 10n,
+      reserved: 0n,
+      evidenceSealed: false,
+      ...overrides,
+    },
+    review: null,
+    reviewFinality: null,
+    reviewAttempt: null,
+    settlement: null,
+    accounting: {
+      totalDeposits: 0n,
+      reserved: 0n,
+      pendingDispatch: 0n,
+      dispatchedPayouts: 0n,
+      dispatchedRefunds: 0n,
+    },
+    evidence: null,
+  });
+
+  it.each([
+    ["accept_terms", readback(), readback({ vendorAccepted: true })],
+    ["fund", readback(), readback({ lifecycle: "FUNDED", reserved: 10n })],
+    [
+      "open_evidence",
+      readback({ lifecycle: "FUNDED" }),
+      { ...readback({ lifecycle: "EVIDENCE_OPEN" }), evidence: { epoch: 0, envelopes: [{}] } },
+    ],
+    [
+      "append_evidence",
+      { ...readback({ lifecycle: "EVIDENCE_OPEN" }), evidence: { epoch: 0, envelopes: [{}] } },
+      { ...readback({ lifecycle: "EVIDENCE_OPEN" }), evidence: { epoch: 0, envelopes: [{}, {}] } },
+    ],
+    [
+      "close_evidence",
+      readback({ lifecycle: "EVIDENCE_OPEN" }),
+      readback({ lifecycle: "EVIDENCE_SEALED", evidenceSealed: true }),
+    ],
+    [
+      "request_review",
+      readback({ lifecycle: "EVIDENCE_SEALED", evidenceSealed: true }),
+      {
+        ...readback({ lifecycle: "REVIEW_PENDING", evidenceSealed: true }),
+        review: { verdict: "APPROVED" },
+        reviewFinality: { epoch: 0, attempt: 0, status: "PENDING_PROTOCOL_FINALITY" },
+      },
+    ],
+    [
+      "start_cure",
+      {
+        ...readback({ lifecycle: "DECIDED" }),
+        review: { verdict: "REQUEST_MORE_INFO" },
+        reviewFinality: { epoch: 0, attempt: 0, status: "FINALIZED" },
+      },
+      readback({ lifecycle: "EVIDENCE_OPEN", epoch: 1 }),
+    ],
+    [
+      "retry_review",
+      {
+        ...readback({ lifecycle: "DECIDED", evidenceSealed: true }),
+        review: { verdict: "UNRESOLVED" },
+        reviewFinality: { epoch: 0, attempt: 0, status: "FINALIZED" },
+      },
+      {
+        ...readback({ lifecycle: "REVIEW_PENDING", evidenceSealed: true }),
+        review: { verdict: "APPROVED" },
+        reviewFinality: { epoch: 0, attempt: 1, status: "PENDING_PROTOCOL_FINALITY" },
+      },
+    ],
+    [
+      "expire_unresolved",
+      readback({ lifecycle: "DECIDED" }),
+      {
+        ...readback({ lifecycle: "SETTLEMENT_PENDING" }),
+        settlement: { kind: "REFUND", reason: "UNRESOLVED_EXHAUSTED", status: "PREPARED" },
+      },
+    ],
+    [
+      "timeout_refund",
+      readback({ lifecycle: "EVIDENCE_OPEN" }),
+      {
+        ...readback({ lifecycle: "SETTLEMENT_PENDING" }),
+        settlement: { kind: "REFUND", reason: "HARD_TIMEOUT", status: "PREPARED" },
+      },
+    ],
+    [
+      "prepare_settlement",
+      {
+        ...readback({ lifecycle: "DECIDED" }),
+        review: { verdict: "APPROVED" },
+      },
+      {
+        ...readback({ lifecycle: "SETTLEMENT_PENDING" }),
+        review: { verdict: "APPROVED" },
+        settlement: { kind: "PAYOUT", status: "PREPARED" },
+      },
+    ],
+    [
+      "execute_settlement",
+      {
+        ...readback({ lifecycle: "SETTLEMENT_PENDING" }),
+        settlement: { status: "PREPARED" },
+      },
+      {
+        ...readback({ lifecycle: "DISPATCHED_FINALIZED" }),
+        settlement: { status: "DISPATCHED_FINALIZED" },
+      },
+    ],
+    [
+      "appeal",
+      { ...readback(), appealRound: 0n },
+      { ...readback(), appealRound: 1n },
+    ],
+  ] as const)("confirms only the authoritative %s action effect", (action, before, after) => {
+    expect(actionReadbackConfirmed(action, before as never, after as never)).toBe(true);
+    expect(actionReadbackConfirmed(action, before as never, before as never)).toBe(false);
+  });
+
+  it("uses real pinned SDK receipt names instead of a fictional rejected status", async () => {
+    for (const statusName of [
+      "VALIDATORS_TIMEOUT",
+      "LEADER_TIMEOUT",
+      "CANCELED",
+      "UNDETERMINED",
+    ]) {
+      await expect(
+        trackTransaction(
+          { waitForTransactionReceipt: vi.fn().mockResolvedValue({ statusName }) } as never,
+          `0x${"4".repeat(64)}`,
+          () => undefined,
+        ),
+      ).resolves.toMatchObject({ phase: "VALIDATORS_TIMEOUT" });
+    }
+    await expect(
+      trackTransaction(
+        {
+          waitForTransactionReceipt: vi.fn().mockResolvedValue({
+            statusName: "FINALIZED",
+            resultName: "DISAGREE",
+            txExecutionResultName: "FINISHED_WITH_RETURN",
+          }),
+        } as never,
+        `0x${"5".repeat(64)}`,
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({ phase: "DETERMINISTIC_VIOLATION" });
+  });
+
+  it("classifies only exact AccessSeal buyer and vendor role errors", () => {
+    expect(
+      classifyTransactionFailure(
+        new Error("gen_call failed: only the buyer can close evidence"),
+      ).phase,
+    ).toBe("WRONG_ROLE");
+    expect(
+      classifyTransactionFailure(
+        new Error("gen_call failed: only the vendor can start a cure"),
+      ).phase,
+    ).toBe("WRONG_ROLE");
+    expect(
+      classifyTransactionFailure(
+        new Error("gen_call failed: only the buyer can close evidence now"),
+      ).phase,
+    ).toBe("RPC_ERROR");
+  });
   it("classifies a wallet rejection before any submission", () => {
     expect(waitingForWallet()).toMatchObject({
       phase: "WAITING_FOR_WALLET",
@@ -46,7 +217,7 @@ describe("transaction truth", () => {
 
   it.each([
     [{ statusName: "UNDETERMINED" }, "VALIDATORS_TIMEOUT"],
-    [{ statusName: "REJECTED" }, "DETERMINISTIC_VIOLATION"],
+    [{ statusName: "FINALIZED", resultName: "DISAGREE" }, "DETERMINISTIC_VIOLATION"],
     [{ statusName: "FINALIZED", txExecutionResultName: "FINISHED_WITH_ERROR" }, "EXECUTION_ERROR"],
   ] as const)("classifies terminal receipt failure %s", async (receipt, expected) => {
     const events: string[] = [];

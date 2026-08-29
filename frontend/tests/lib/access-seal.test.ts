@@ -140,6 +140,108 @@ describe("AccessSeal contract adapter", () => {
       "Review context binding is invalid.",
     );
   });
+
+  it("rejects review contexts with malicious extra fields or ready=false", async () => {
+    const context = await v4ReviewContext();
+    for (const malformed of [
+      { ...context, injected: true },
+      { ...context, ready: false },
+    ]) {
+      const readContract = vi.fn(async ({ functionName }: { functionName: string }) =>
+        functionName === "get_case"
+          ? caseJson({
+              reviewContextReady: true,
+              reviewContextHash: context.contextHash,
+            })
+          : JSON.stringify(malformed),
+      );
+      const client = new AccessSealClient({ readContract } as never, address);
+      await expect(
+        client.readReviewContext(`0x${"d".repeat(64)}`, 0),
+      ).rejects.toThrow(/schema|binding/i);
+    }
+  });
+
+  it("enforces the UTF-8 review-context limit at the Unicode byte boundary", async () => {
+    const original = await v4ReviewContext();
+    const parsed = JSON.parse(original.contextJson) as Record<string, unknown>;
+    const base = (payload: string) =>
+      JSON.stringify({ ...parsed, dom: { pages: [`${"😀".repeat(64)}${payload}`] } });
+    const target = 16_384;
+    const exactContextJson = base(
+      "x".repeat(target - new TextEncoder().encode(base("")).byteLength),
+    );
+    expect(new TextEncoder().encode(exactContextJson).byteLength).toBe(target);
+    for (const [contextJson, expected] of [
+      [exactContextJson, true],
+      [
+        base(
+          "x".repeat(
+            target + 1 - new TextEncoder().encode(base("")).byteLength,
+          ),
+        ),
+        false,
+      ],
+    ] as const) {
+      const context = {
+        ...original,
+        contextJson,
+        contextHash: await sha256(contextJson),
+      };
+      const client = new AccessSealClient(
+        {
+          readContract: vi.fn(async ({ functionName }: { functionName: string }) =>
+            functionName === "get_case"
+              ? caseJson({
+                  reviewContextReady: true,
+                  reviewContextHash: context.contextHash,
+                })
+              : JSON.stringify(context),
+          ),
+        } as never,
+        address,
+      );
+      const outcome = client.readReviewContext(`0x${"d".repeat(64)}`, 0);
+      if (expected) await expect(outcome).resolves.toMatchObject({ contextJson });
+      else await expect(outcome).rejects.toThrow("Review context binding is invalid.");
+    }
+  });
+
+  it("rejects unavailable browser crypto and unsafe numeric or string review-context representations", async () => {
+    const context = await v4ReviewContext();
+    const makeClient = (value: Record<string, unknown>) =>
+      new AccessSealClient(
+        {
+          readContract: vi.fn(async ({ functionName }: { functionName: string }) =>
+            functionName === "get_case"
+              ? caseJson({
+                  reviewContextReady: true,
+                  reviewContextHash: context.contextHash,
+                })
+              : JSON.stringify(value),
+          ),
+        } as never,
+        address,
+      );
+    await expect(
+      makeClient({ ...context, epoch: "0" }).readReviewContext(
+        `0x${"d".repeat(64)}`,
+        0,
+      ),
+    ).rejects.toThrow(/counter/i);
+    await expect(
+      makeClient({ ...context, epoch: 9_007_199_254_740_992 }).readReviewContext(
+        `0x${"d".repeat(64)}`,
+        0,
+      ),
+    ).rejects.toThrow(/counter/i);
+    const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: undefined });
+    await expect(
+      makeClient(context).readReviewContext(`0x${"d".repeat(64)}`, 0),
+    ).rejects.toThrow("Browser SHA-256 is unavailable");
+    if (cryptoDescriptor) Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+  });
   it("requires an exact epoch-bound pending seal record and rejects legacy unbound records", () => {
     const binding = {
       action: "close_evidence" as const,

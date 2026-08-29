@@ -12,8 +12,10 @@ import { useWallet } from "@/providers/wallet-provider";
 import {
   reconcileCase,
   trackTransaction,
+  actionReadbackConfirmed,
   classifyTransactionFailure,
   waitingForWallet,
+  type ActionReadback,
   type PendingAction,
   type ReconciledCase,
   type TransactionState,
@@ -64,6 +66,23 @@ const REQUIRED_EARLY_SEAL_EVIDENCE_TYPES: readonly EvidenceType[] = [
   "SCANNER_REPORT",
   "CRITICAL_FLOW_TRACE",
 ];
+
+function actionReadback(
+  value: ReconciledCase,
+  evidence: EvidenceRecord | null,
+  appealRound: bigint | null,
+): ActionReadback {
+  return {
+    case: value.case,
+    review: value.review,
+    reviewFinality: value.reviewFinality,
+    reviewAttempt: value.reviewAttempt,
+    settlement: value.settlement,
+    accounting: value.accounting,
+    evidence,
+    appealRound,
+  };
+}
 
 function currentUnixTimestamp() {
   return Math.floor(Date.now() / 1000);
@@ -362,16 +381,15 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     hash: Hash,
     rememberReview: boolean,
     action?: PendingAction,
+    before?: ActionReadback,
   ) {
     const reconciled: { value: ReconciledCase | null } = { value: null };
-    let startedReconciliation = false;
     let result: TransactionState;
     try {
       result = await trackTransaction(
         wallet.sdk as never,
         hash,
         (nextState) => {
-          if (nextState.phase === "EXECUTION_SUCCESS") startedReconciliation = true;
           setTx(nextState);
         },
         async () => {
@@ -385,6 +403,47 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           reconciled.value = await reconcileCase(wallet.readContract, caseId);
           if (generation !== refreshGeneration.current) return false;
           setData(reconciled.value);
+          let readbackEvidence = evidence;
+          if (action === "open_evidence" || action === "append_evidence") {
+            try {
+              readbackEvidence = await wallet.readContract.readEvidence(
+                caseId,
+                reconciled.value.case.epoch,
+              );
+            } catch (cause) {
+              if (!matchesExactUserError(cause, "evidence epoch does not exist"))
+                throw cause;
+              readbackEvidence = null;
+            }
+            if (generation !== refreshGeneration.current) return false;
+            setEvidence(readbackEvidence);
+          }
+          let readbackAppealRound = eligibility.round;
+          if (action === "appeal") {
+            const reviewTx = parseReviewTxBinding(
+              localStorage.getItem(`${REVIEW_TX_PREFIX}${caseId}`),
+            )?.txId;
+            if (!reviewTx) return false;
+            const nextEligibility = await wallet.readContract.appealEligibility(
+              reviewTx,
+            );
+            if (generation !== refreshGeneration.current) return false;
+            setEligibility(nextEligibility);
+            readbackAppealRound = nextEligibility.round;
+          }
+          if (
+            !before ||
+            !actionReadbackConfirmed(
+              action,
+              before,
+              actionReadback(
+                reconciled.value,
+                readbackEvidence,
+                readbackAppealRound,
+              ),
+            )
+          )
+            return false;
           if (
             action === "close_evidence" &&
             (!isPendingSealForCurrentEpoch(hash, reconciled.value.case) ||
@@ -397,16 +456,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
         action,
       );
     } catch (cause) {
-      if (action !== "close_evidence" || startedReconciliation) throw cause;
-      const detail =
-        cause instanceof Error
-          ? cause.message
-          : "The receipt RPC did not respond.";
-      result = {
-        hash,
-        phase: "UNDETERMINED",
-        message: `Transaction receipt status could not be read: ${detail}. Retry transaction status to monitor the original hash; no transaction was resent.`,
-      };
+      result = classifyTransactionFailure(cause, hash);
       setTx(result);
     }
     const current = reconciled.value;
@@ -437,11 +487,8 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       [
         "WALLET_REJECTED",
         "WRONG_ROLE",
-        "RPC_ERROR",
-        "VALIDATORS_TIMEOUT",
         "DETERMINISTIC_VIOLATION",
         "EXECUTION_ERROR",
-        "READBACK_MISMATCH",
       ].includes(result.phase)
     )
       clearPendingSeal(hash);
@@ -460,7 +507,13 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     setWriteBusy(true);
     setError("");
     try {
-      await monitorTransaction(hash, false, "close_evidence");
+      if (!data) return;
+      await monitorTransaction(
+        hash,
+        false,
+        "close_evidence",
+        actionReadback(data, evidence, eligibility.round),
+      );
     } catch (cause) {
       setError(
         cause instanceof Error ? cause.message : "Finalized readback failed.",
@@ -493,7 +546,13 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       const hash = await operation();
       if (action === "close_evidence") persistPendingSeal(hash);
       monitoredSealHashRef.current = action === "close_evidence" ? hash : null;
-      await monitorTransaction(hash, rememberReview, action);
+      if (!data) throw new Error("Authoritative case readback is unavailable.");
+      await monitorTransaction(
+        hash,
+        rememberReview,
+        action,
+        actionReadback(data, evidence, eligibility.round),
+      );
     } catch (cause) {
       setTx(classifyTransactionFailure(cause));
       setError(
@@ -570,7 +629,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     const operation = !evidence
       ? () => wallet.contract!.openEvidence(caseId, envelope)
       : () => wallet.contract!.appendEvidence(caseId, envelope);
-    await run(operation);
+    await run(operation, false, evidence ? "append_evidence" : "open_evidence");
   }
   const canAcceptTerms =
     !!isVendor && data?.case.lifecycle === "DRAFT" && !data.case.vendorAccepted;
@@ -627,10 +686,12 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       pendingSealExpected,
     );
   const canRetryPendingSeal =
-    tx?.phase === "UNDETERMINED" &&
+    ["UNDETERMINED", "RPC_ERROR", "VALIDATORS_TIMEOUT", "READBACK_MISMATCH"].includes(
+      tx?.phase ?? "",
+    ) &&
     !!pendingSealExpected &&
     hasMatchingPendingSeal &&
-    pendingSealInStorage?.hash === tx.hash;
+    pendingSealInStorage?.hash === tx?.hash;
   const canCloseEvidence =
     buyerCanSeeSealAction &&
     hasCompleteSealEvidence &&
@@ -732,17 +793,23 @@ export function CaseDetail({ caseId }: { caseId: string }) {
 
   function acceptTerms() {
     if (wallet.contract && data)
-      void run(() => wallet.contract!.acceptTerms(caseId, data.case.termsHash));
+      void run(
+        () => wallet.contract!.acceptTerms(caseId, data.case.termsHash),
+        false,
+        "accept_terms",
+      );
   }
   function fundCase() {
     if (wallet.contract && data)
-      void run(() =>
-        wallet.contract!.fund(caseId, BigInt(data.case.escrowAmount)),
+      void run(
+        () => wallet.contract!.fund(caseId, BigInt(data.case.escrowAmount)),
+        false,
+        "fund",
       );
   }
   function requestReview() {
     if (wallet.contract && canRequestReview)
-      void run(() => wallet.contract!.requestReview(caseId), true);
+      void run(() => wallet.contract!.requestReview(caseId), true, "request_review");
   }
   function closeEvidence() {
     if (hasMatchingPendingSeal || pendingSealHashRef.current) return;
@@ -771,18 +838,24 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     void resumePendingSeal(pendingSealInStorage.hash);
   }
   function startCure() {
-    if (wallet.contract) void run(() => wallet.contract!.startCure(caseId));
+    if (wallet.contract)
+      void run(() => wallet.contract!.startCure(caseId), false, "start_cure");
   }
   function retryReview() {
     if (wallet.contract)
-      void run(() => wallet.contract!.retryReview(caseId, crypto.randomUUID()));
+      void run(
+        () => wallet.contract!.retryReview(caseId, crypto.randomUUID()),
+        false,
+        "retry_review",
+      );
   }
   function expireUnresolved() {
     if (wallet.contract)
-      void run(() => wallet.contract!.expireUnresolved(caseId));
+      void run(() => wallet.contract!.expireUnresolved(caseId), false, "expire_unresolved");
   }
   function timeoutRefund() {
-    if (wallet.contract) void run(() => wallet.contract!.timeoutRefund(caseId));
+    if (wallet.contract)
+      void run(() => wallet.contract!.timeoutRefund(caseId), false, "timeout_refund");
   }
   function prepareSettlement() {
     if (!wallet.contract || !data?.review) return;
@@ -790,6 +863,8 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       data.review.verdict === "APPROVED"
         ? () => wallet.contract!.preparePayout(caseId)
         : () => wallet.contract!.prepareRefund(caseId),
+      false,
+      "prepare_settlement",
     );
   }
   function executeSettlement() {
@@ -799,6 +874,8 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           caseId,
           data.settlement!.settlementId,
         ),
+        false,
+        "execute_settlement",
       );
   }
   function runPriorityAction() {
@@ -1356,8 +1433,10 @@ export function CaseDetail({ caseId }: { caseId: string }) {
                     localStorage.getItem(`${REVIEW_TX_PREFIX}${caseId}`),
                   )?.txId;
                   if (wallet.contract && reviewTx && eligibility.bond !== null)
-                    void run(() =>
-                      wallet.contract!.appeal(reviewTx, eligibility.bond!),
+                    void run(
+                      () => wallet.contract!.appeal(reviewTx, eligibility.bond!),
+                      false,
+                      "appeal",
                     );
                 }}
               />
