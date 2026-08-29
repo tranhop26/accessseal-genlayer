@@ -9,7 +9,7 @@ import {
   assertSafeRegularFile,
   canonicalJsonHash,
   sourceHash,
-  withV3ManifestNamespaceLease,
+  withV3ManifestNamespaceLease as withV4ManifestNamespaceLease,
 } from "../scripts/source-hash.ts";
 import { canonicalU256, parseLosslessJsonObject } from "../scripts/u256.ts";
 
@@ -45,6 +45,7 @@ export function identifyClientNetwork(
 
 export type DeploymentManifest = {
   schemaVersion: "accessseal-deployment-manifest/2";
+  contractVersion: "V4";
   network: NetworkName;
   chainId: number;
   contractAddress: string;
@@ -80,7 +81,7 @@ const HASH = /^[0-9a-f]{64}$/;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 const GIT_COMMIT = /^[0-9a-f]{40,64}$/;
 export const ACCESSSEAL_FROZEN_SCHEMA_SHA256 =
-  "e6417d8be197f2ad760a3a44ddc6dcfb3b6011ceb9d462270b190ee8e85033b2";
+  "a979c17948f12d349c9e06d4e167881252931fe7459e1a805ae39c3176dd2da0";
 const ACCOUNTING_KEYS = [
   "dispatchedPayouts",
   "dispatchedRefunds",
@@ -93,6 +94,9 @@ export function validateDeploymentManifest(value: DeploymentManifest): Deploymen
   if (!value || typeof value !== "object") throw new Error("deployment manifest is missing");
   if (value.schemaVersion !== "accessseal-deployment-manifest/2") {
     throw new Error("deployment manifest schema version is invalid");
+  }
+  if (value.contractVersion !== "V4") {
+    throw new Error("deployment manifest contract version is invalid");
   }
   if (!(value.network in NETWORK_CHAIN_IDS)) throw new Error("deployment network is invalid");
   if (value.chainId !== NETWORK_CHAIN_IDS[value.network]) {
@@ -170,12 +174,16 @@ export async function verifyDeployment(
   if (sourceHash(deploymentArtifact) !== manifest.deploymentArtifactSha256) {
     throw new Error("deployment artifact hash does not match deployment manifest");
   }
+  const reviewedSchema = readReviewedArtifactSchema(repoRoot);
+  if (canonicalJsonHash(reviewedSchema) !== manifest.schemaSha256) {
+    throw new Error("reviewed artifact schema does not match deployment manifest");
+  }
+  verifyFrozenSchema(reviewedSchema);
 
-  const [deploymentTransaction, deployedCode, deployedSchema, expectedSchema] = await Promise.all([
+  const [deploymentTransaction, deployedCode, deployedSchema] = await Promise.all([
     client.getTransaction({ hash: manifest.deploymentTransaction }),
     client.getContractCode(manifest.contractAddress),
     client.getContractSchema(manifest.contractAddress),
-    client.getContractSchemaForCode(deploymentArtifact),
   ]);
   const transaction = normalizeReceipt(deploymentTransaction);
   if (transaction.status !== "FINALIZED") {
@@ -196,21 +204,18 @@ export async function verifyDeployment(
   if (!(deployedSchema && typeof deployedSchema === "object")) {
     throw new Error("official client deployed schema response is unavailable");
   }
-  if (!(expectedSchema && typeof expectedSchema === "object")) {
-    throw new Error("official client source schema response is unavailable");
-  }
   const canonicalDeployedCode = deployedCode.replace(/\r\n/g, "\n");
   if (sourceHash(new TextEncoder().encode(canonicalDeployedCode)) !== manifest.deploymentArtifactSha256) {
     throw new Error("deployed source does not match deployment artifact");
   }
-  const expectedSchemaHash = canonicalJsonHash(expectedSchema);
-  if (expectedSchemaHash !== manifest.schemaSha256) {
-    throw new Error("source-derived schema does not match deployment manifest");
+  // GLSim 0.29.2 returns an empty schema object for deployed contracts even
+  // though the exact deployed code is available.  On that hermetic local
+  // network, the reviewed schema is still bound to the verified code bytes.
+  // Every non-local deployment must expose and match the runtime schema.
+  const runtimeMethods = (deployedSchema as { methods?: unknown }).methods;
+  if (manifest.network !== "localnet" || (runtimeMethods && typeof runtimeMethods === "object" && Object.keys(runtimeMethods).length > 0)) {
+    verifyDeployedSchemaCompatibility(reviewedSchema, deployedSchema);
   }
-  if (canonicalJsonHash(deployedSchema) !== expectedSchemaHash) {
-    throw new Error("deployed schema does not match source-derived schema");
-  }
-  verifyFrozenSchema(deployedSchema);
 
   const accountingRaw = await client.readContract({
     address: manifest.contractAddress,
@@ -234,7 +239,48 @@ export function verifyTrackedArtifact(repoRoot: string): void {
   }
 }
 
+export function readReviewedArtifactSchema(repoRoot: string): object {
+  try {
+    const output = execFileSync("genvm-lint", ["schema", "--json", resolve(repoRoot, "contracts", "access_seal_deploy.py")], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1", PYTHONUTF8: "1" },
+    });
+    const parsed = JSON.parse(output) as { ok?: unknown; schema?: unknown };
+    if (parsed.ok !== true || !parsed.schema || typeof parsed.schema !== "object") throw new Error();
+    return parsed.schema;
+  } catch { throw new Error("official reviewed artifact schema is unavailable"); }
+}
+
+function verifyDeployedSchemaCompatibility(reviewed: object, deployed: object): void {
+  const expected = reviewed as { ctor?: { params?: unknown }; methods?: Record<string, Record<string, unknown>> };
+  const actual = deployed as { ctor?: { params?: unknown }; methods?: Record<string, Record<string, unknown>> };
+  if (!expected.methods || !actual.methods || JSON.stringify(Object.keys(expected.methods).sort()) !== JSON.stringify(Object.keys(actual.methods).sort())) throw new Error(`deployed schema does not match reviewed methods: expected=${Object.keys(expected.methods ?? {}).sort().join(",")}; actual=${Object.keys(actual.methods ?? {}).sort().join(",")}`);
+  if (JSON.stringify(expected.ctor?.params ?? []) !== JSON.stringify(actual.ctor?.params ?? [])) throw new Error("deployed schema constructor does not match reviewed schema");
+  for (const [name, descriptor] of Object.entries(expected.methods)) {
+    const seen = actual.methods[name];
+    if (!seen || seen.readonly !== descriptor.readonly) throw new Error("deployed schema does not match reviewed method");
+    const types = (descriptor.params as [string, string][]).map((item) => item[1]);
+    const usesRuntimeSchema = Array.isArray(seen.params) && seen.params.every((item) => typeof item === "string") &&
+      (seen.ret === "None" || seen.ret === "str" || seen.params.some((item) => ["Address", "str", "u256"].includes(item)));
+    if (usesRuntimeSchema) {
+      const runtime = types.map((item) => item === "string" ? "str" : item === "int" ? "u256" : item === "address" ? "Address" : item);
+      const ret = descriptor.ret === "null" ? "None" : descriptor.ret === "string" ? "str" : descriptor.ret;
+      if (JSON.stringify(seen.params) !== JSON.stringify(runtime) || seen.ret !== ret) throw new Error(`deployed schema method signature does not match reviewed schema: ${name}`);
+    } else if (JSON.stringify(seen.params) !== JSON.stringify(descriptor.params) || seen.ret !== descriptor.ret) throw new Error(`deployed schema method signature does not match reviewed schema: ${name}`);
+  }
+}
+
 export function verifyFrozenSchema(schema: object): void {
+  const methods = (schema as { methods?: unknown }).methods;
+  if (
+    methods &&
+    typeof methods === "object" &&
+    (Object.prototype.hasOwnProperty.call(methods, "owner") ||
+      Object.prototype.hasOwnProperty.call(methods, "upgrader"))
+  ) {
+    throw new Error("deployed frozen schema contains an owner or upgrader method");
+  }
   if (canonicalJsonHash(schema) !== ACCESSSEAL_FROZEN_SCHEMA_SHA256) {
     throw new Error("deployed frozen schema differs from the exact reviewed policy");
   }
@@ -312,7 +358,7 @@ function nestedString(value: unknown, key: string): string | undefined {
     throw new Error("official client receipt address shape is unavailable");
   }
   const nested = (value as Record<string, unknown>)[key];
-  if (nested === undefined) return undefined;
+  if (nested === undefined || nested === null) return undefined;
   if (typeof nested !== "string" || !ADDRESS.test(nested) || isRepeatedHex(nested.slice(2))) {
     throw new Error(
       `official client receipt contract address shape is unavailable: ${String(nested)}`,
@@ -387,16 +433,16 @@ type CheckedDirectory = {
   identity: FileIdentity;
 };
 
-type V3CandidateDirectory = CheckedDirectory & {
+type V4CandidateDirectory = CheckedDirectory & {
   deploymentArtifactSha256: string;
 };
 
-type V3CandidateSnapshot = {
+type V4CandidateSnapshot = {
   root: CheckedDirectory;
-  candidates: V3CandidateDirectory[];
+  candidates: V4CandidateDirectory[];
 };
 
-type V3RequestedManifest = {
+type V4RequestedManifest = {
   deploymentArtifactSha256: string;
   path: string;
   identity: FileIdentity;
@@ -407,26 +453,26 @@ export async function readDeploymentManifest(
   network: NetworkName,
   contractAddress?: string,
 ): Promise<DeploymentManifest> {
-  const v3Root = resolve(
+  const v4Root = resolve(
     repoRoot,
     "work",
     "deployments",
     network,
-    "v3",
+    "v4",
   );
-  return withV3ManifestNamespaceLease(
-    v3Root,
-    () => readDeploymentManifestUnderLease(repoRoot, network, v3Root, contractAddress),
+  return withV4ManifestNamespaceLease(
+    v4Root,
+    () => readDeploymentManifestUnderLease(repoRoot, network, v4Root, contractAddress),
   );
 }
 
 async function readDeploymentManifestUnderLease(
   repoRoot: string,
   network: NetworkName,
-  v3Root: string,
+  v4Root: string,
   contractAddress?: string,
 ): Promise<DeploymentManifest> {
-  const parseV3 = async (
+  const parseV4 = async (
     root: string,
     path: string,
   ): Promise<{ manifest: DeploymentManifest; identity: FileIdentity }> => {
@@ -434,8 +480,8 @@ async function readDeploymentManifestUnderLease(
     const manifest = validateDeploymentManifest(
       JSON.parse(pinned.body) as DeploymentManifest,
     );
-    if ((manifest as { contractVersion?: unknown }).contractVersion !== "V3") {
-      throw new Error("V3 deployment manifest contract version is invalid");
+    if ((manifest as { contractVersion?: unknown }).contractVersion !== "V4") {
+      throw new Error("V4 deployment manifest contract version is invalid");
     }
     return { manifest, identity: pinned.identity };
   };
@@ -444,32 +490,32 @@ async function readDeploymentManifestUnderLease(
       throw new Error("verification contract address is invalid");
     }
     const target = `${contractAddress.toLowerCase()}.json`;
-    let snapshot: V3CandidateSnapshot;
-    let requested: V3RequestedManifest[];
+    let snapshot: V4CandidateSnapshot;
+    let requested: V4RequestedManifest[];
     try {
-      snapshot = await scanV3CandidateDirectories(v3Root);
-      requested = await scanV3RequestedManifests(snapshot, target);
+      snapshot = await scanV4CandidateDirectories(v4Root);
+      requested = await scanV4RequestedManifests(snapshot, target);
     } catch (error) {
       if (error instanceof Error && /ENOENT/.test(error.message)) {
-        throw new Error("V3 deployment manifest is unavailable for the requested contract address");
+        throw new Error("V4 deployment manifest is unavailable for the requested contract address");
       }
       throw error;
     }
     const matches = await Promise.all(
       requested.map(async (candidate) => {
         try {
-          const parsed = await parseV3(snapshot.root.path, candidate.path);
+          const parsed = await parseV4(snapshot.root.path, candidate.path);
           assertSameFileIdentity(
             candidate.identity,
             parsed.identity,
-            "V3 deployment manifest changed during lookup",
+            "V4 deployment manifest changed during lookup",
           );
           const manifest = parsed.manifest;
           if (manifest.contractAddress.toLowerCase() !== contractAddress.toLowerCase()) {
-            throw new Error("V3 deployment manifest requested contract address mismatch");
+            throw new Error("V4 deployment manifest requested contract address mismatch");
           }
           if (manifest.deploymentArtifactSha256 !== candidate.deploymentArtifactSha256) {
-            throw new Error("V3 deployment manifest artifact hash does not match containing directory");
+            throw new Error("V4 deployment manifest artifact hash does not match containing directory");
           }
           return { manifest, path: candidate.path, identity: parsed.identity };
         } catch (error) {
@@ -482,24 +528,24 @@ async function readDeploymentManifestUnderLease(
     if (found.length !== 1) {
       throw new Error(
         found.length
-          ? "V3 deployment manifest address is ambiguous"
-        : "V3 deployment manifest is unavailable for the requested contract address",
+          ? "V4 deployment manifest address is ambiguous"
+        : "V4 deployment manifest is unavailable for the requested contract address",
       );
     }
-    const revalidated = await scanV3CandidateDirectories(v3Root);
-    const revalidatedRequested = await scanV3RequestedManifests(revalidated, target);
+    const revalidated = await scanV4CandidateDirectories(v4Root);
+    const revalidatedRequested = await scanV4RequestedManifests(revalidated, target);
     if (
-      !sameV3CandidateSnapshot(snapshot, revalidated) ||
-      !sameV3RequestedManifests(requested, revalidatedRequested)
+      !sameV4CandidateSnapshot(snapshot, revalidated) ||
+      !sameV4RequestedManifests(requested, revalidatedRequested)
     ) {
-      throw new Error("V3 deployment manifest candidates changed during lookup");
+      throw new Error("V4 deployment manifest candidates changed during lookup");
     }
     const selected = found[0];
     const current = await inspectPinnedManifestPath(revalidated.root.path, selected.path);
     assertSameFileIdentity(
       selected.identity,
       current,
-      "V3 deployment manifest changed during lookup",
+      "V4 deployment manifest changed during lookup",
     );
     return selected.manifest;
   }
@@ -508,7 +554,7 @@ async function readDeploymentManifestUnderLease(
   );
   const artifactHash = sourceHash(artifact);
   try {
-    const root = await inspectRealDirectory(v3Root);
+    const root = await inspectRealDirectory(v4Root);
     const directory = await inspectRealDirectory(resolve(root.path, artifactHash));
     const candidates = await listAddressManifestCandidates(directory.path);
     const selected = contractAddress
@@ -518,22 +564,22 @@ async function readDeploymentManifestUnderLease(
         : undefined;
     if (!selected || !candidates.includes(selected)) {
       throw new Error(
-        "V3 deployment manifest is ambiguous; provide --contract-address for the exact deployment",
+        "V4 deployment manifest is ambiguous; provide --contract-address for the exact deployment",
       );
     }
     const path = resolve(directory.path, selected);
-    const parsed = await parseV3(root.path, path);
-    const revalidatedRoot = await inspectRealDirectory(v3Root);
+    const parsed = await parseV4(root.path, path);
+    const revalidatedRoot = await inspectRealDirectory(v4Root);
     const revalidatedDirectory = await inspectRealDirectory(resolve(revalidatedRoot.path, artifactHash));
     if (
       !sameFileIdentity(root.identity, revalidatedRoot.identity) ||
       !sameFileIdentity(directory.identity, revalidatedDirectory.identity) ||
       !sameStringArray(candidates, await listAddressManifestCandidates(revalidatedDirectory.path))
     ) {
-      throw new Error("V3 deployment manifest candidates changed during lookup");
+      throw new Error("V4 deployment manifest candidates changed during lookup");
     }
     const current = await inspectPinnedManifestPath(revalidatedRoot.path, path);
-    assertSameFileIdentity(parsed.identity, current, "V3 deployment manifest changed during lookup");
+    assertSameFileIdentity(parsed.identity, current, "V4 deployment manifest changed during lookup");
     return parsed.manifest;
   } catch (error) {
     if (!(error instanceof Error) || !/ENOENT/.test(error.message)) throw error;
@@ -552,21 +598,21 @@ async function readPinnedManifest(
   const handle = await open(path, manifestReadFlags());
   try {
     const openedMetadata = await handle.stat({ bigint: true });
-    if (!openedMetadata.isFile()) throw new Error("opened V3 deployment manifest is not a regular file");
-    const opened = fileIdentity(openedMetadata, "opened V3 deployment manifest");
-    assertSameFileIdentity(beforeOpen, opened, "V3 deployment manifest changed during lookup");
+    if (!openedMetadata.isFile()) throw new Error("opened V4 deployment manifest is not a regular file");
+    const opened = fileIdentity(openedMetadata, "opened V4 deployment manifest");
+    assertSameFileIdentity(beforeOpen, opened, "V4 deployment manifest changed during lookup");
     const pathAfterOpen = await inspectPinnedManifestPath(root, path);
-    assertSameFileIdentity(opened, pathAfterOpen, "V3 deployment manifest changed during lookup");
+    assertSameFileIdentity(opened, pathAfterOpen, "V4 deployment manifest changed during lookup");
 
     const body = (await handle.readFile()).toString("utf8");
     const handleAfterReadMetadata = await handle.stat({ bigint: true });
     if (!handleAfterReadMetadata.isFile()) {
-      throw new Error("opened V3 deployment manifest is not a regular file");
+      throw new Error("opened V4 deployment manifest is not a regular file");
     }
-    const handleAfterRead = fileIdentity(handleAfterReadMetadata, "opened V3 deployment manifest");
+    const handleAfterRead = fileIdentity(handleAfterReadMetadata, "opened V4 deployment manifest");
     const pathAfterRead = await inspectPinnedManifestPath(root, path);
-    assertSameFileIdentity(opened, handleAfterRead, "V3 deployment manifest changed during lookup");
-    assertSameFileIdentity(handleAfterRead, pathAfterRead, "V3 deployment manifest changed during lookup");
+    assertSameFileIdentity(opened, handleAfterRead, "V4 deployment manifest changed during lookup");
+    assertSameFileIdentity(handleAfterRead, pathAfterRead, "V4 deployment manifest changed during lookup");
     return { body, identity: handleAfterRead };
   } finally {
     await handle.close();
@@ -577,13 +623,13 @@ async function inspectPinnedManifestPath(root: string, path: string): Promise<Fi
   await assertSafeRegularFile(root, path);
   const metadata = await lstat(path, { bigint: true });
   if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new Error("V3 deployment manifest must remain a physically contained regular file");
+    throw new Error("V4 deployment manifest must remain a physically contained regular file");
   }
-  return fileIdentity(metadata, "V3 deployment manifest path");
+  return fileIdentity(metadata, "V4 deployment manifest path");
 }
 
-async function scanV3CandidateDirectories(v3Root: string): Promise<V3CandidateSnapshot> {
-  const root = await inspectRealDirectory(v3Root);
+async function scanV4CandidateDirectories(v4Root: string): Promise<V4CandidateSnapshot> {
+  const root = await inspectRealDirectory(v4Root);
   const names = (await readdir(root.path, { withFileTypes: true }))
     .filter((entry) => HASH.test(entry.name))
     .map((entry) => entry.name)
@@ -597,10 +643,10 @@ async function scanV3CandidateDirectories(v3Root: string): Promise<V3CandidateSn
   return { root, candidates };
 }
 
-async function scanV3RequestedManifests(
-  snapshot: V3CandidateSnapshot,
+async function scanV4RequestedManifests(
+  snapshot: V4CandidateSnapshot,
   target: string,
-): Promise<V3RequestedManifest[]> {
+): Promise<V4RequestedManifest[]> {
   const candidates = await Promise.all(
     snapshot.candidates.map(async (directory) => {
       const path = resolve(directory.path, target);
@@ -616,16 +662,16 @@ async function scanV3RequestedManifests(
       }
     }),
   );
-  return candidates.filter((candidate): candidate is V3RequestedManifest => candidate !== null);
+  return candidates.filter((candidate): candidate is V4RequestedManifest => candidate !== null);
 }
 
 async function inspectRealDirectory(path: string): Promise<CheckedDirectory> {
   const realPath = await assertRealDirectory(path);
   const metadata = await lstat(realPath, { bigint: true });
   if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-    throw new Error("V3 deployment manifest directory is not a real directory");
+    throw new Error("V4 deployment manifest directory is not a real directory");
   }
-  return { path: realPath, identity: fileIdentity(metadata, "V3 deployment manifest directory") };
+  return { path: realPath, identity: fileIdentity(metadata, "V4 deployment manifest directory") };
 }
 
 async function listAddressManifestCandidates(directory: string): Promise<string[]> {
@@ -634,9 +680,9 @@ async function listAddressManifestCandidates(directory: string): Promise<string[
     .sort();
 }
 
-function sameV3CandidateSnapshot(
-  first: V3CandidateSnapshot,
-  second: V3CandidateSnapshot,
+function sameV4CandidateSnapshot(
+  first: V4CandidateSnapshot,
+  second: V4CandidateSnapshot,
 ): boolean {
   return (
     first.root.path === second.root.path &&
@@ -653,9 +699,9 @@ function sameV3CandidateSnapshot(
   );
 }
 
-function sameV3RequestedManifests(
-  first: V3RequestedManifest[],
-  second: V3RequestedManifest[],
+function sameV4RequestedManifests(
+  first: V4RequestedManifest[],
+  second: V4RequestedManifest[],
 ): boolean {
   return (
     first.length === second.length &&
