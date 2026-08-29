@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { AppShell } from "@/components/app-shell";
@@ -40,10 +40,17 @@ describe("accessible core experience", () => {
       screen.getByText("Bradbury Testnet · Simulated GEN"),
     ).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveTextContent("Case content");
-    expect(screen.getByRole("link", { name: "Cases" })).toBeVisible();
-    expect(
-      screen.getAllByRole("link", { name: "Create case" }),
-    ).not.toHaveLength(0);
+    const workspace = screen.getByRole("navigation", { name: "Workspace" });
+    expect(within(workspace).getByRole("link", { name: "Overview" })).toBeVisible();
+    expect(within(workspace).getByRole("link", { name: "Cases" })).toBeVisible();
+    expect(within(workspace).getByText("Activity").parentElement).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(within(workspace).getByText("Proofs").parentElement).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
   });
 
   it("does not style ACCEPTED as terminal success", () => {

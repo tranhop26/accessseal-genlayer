@@ -5,8 +5,9 @@
 .brand { align-items: center; color: var(--as-text); display: inline-flex; font-size: 1.05rem; font-weight: 800; gap: 0.65rem; text-decoration: none; }
 .brandMark { align-items: center; background: var(--as-primary); border-radius: 7px; color: #fff; display: inline-flex; font-size: 0.9rem; height: 1.9rem; justify-content: center; width: 1.9rem; }
 .navigationLinks, .compactLinks { display: grid; gap: 0.35rem; list-style: none; margin: 0; padding: 0; }
-.navigationLink, .activeLink { align-items: center; border-radius: var(--as-radius-sm); color: var(--as-muted); display: flex; font-weight: 650; gap: 0.7rem; min-height: 2.75rem; padding: 0 0.75rem; text-decoration: none; }
+.navigationLink, .activeLink, .disabledLink { align-items: center; border-radius: var(--as-radius-sm); color: var(--as-muted); display: flex; font-weight: 650; gap: 0.7rem; min-height: 2.75rem; padding: 0 0.75rem; text-decoration: none; }
 .navigationLink:hover, .activeLink { background: #f0efff; color: var(--as-primary-hover); }
+.disabledLink { cursor: not-allowed; opacity: 0.58; }
 .icon { height: 1.2rem; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; width: 1.2rem; }
 .tabletRail, .mobileNavigation { display: none; }
 .workspaceHeader { align-items: center; background: var(--as-surface); border-bottom: 1px solid var(--as-border); display: flex; gap: 1rem; justify-content: space-between; min-height: 4.75rem; padding: 0 2rem; }
@@ -31,7 +32,7 @@
   .operationalFrame { grid-template-columns: 4.5rem minmax(0, 1fr); }
   .sidebar { display: none; }
   .tabletRail { background: var(--as-surface); border-right: 1px solid var(--as-border); display: block; padding: 1rem 0.65rem; }
-  .compactLinks .navigationLink, .compactLinks .activeLink { justify-content: center; padding: 0; }
+  .compactLinks .navigationLink, .compactLinks .activeLink, .compactLinks .disabledLink { justify-content: center; padding: 0; }
   .compactLinks span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 }
 
@@ -41,8 +42,8 @@
   .workspaceHeader { align-items: flex-start; flex-direction: column; gap: 0.75rem; padding: 1rem; }
   .walletStack { align-items: start; }
   .mobileNavigation { background: var(--as-surface); border-top: 1px solid var(--as-border); bottom: 0; display: block; left: 0; padding: 0.35rem 0.6rem env(safe-area-inset-bottom); position: fixed; right: 0; z-index: 10; }
-  .mobileNavigation .compactLinks { display: grid; grid-template-columns: repeat(3, 1fr); }
-  .mobileNavigation .navigationLink, .mobileNavigation .activeLink { flex-direction: column; font-size: 0.72rem; gap: 0.18rem; justify-content: center; min-height: 3.65rem; padding: 0.25rem; text-align: center; }
+  .mobileNavigation .compactLinks { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .mobileNavigation .navigationLink, .mobileNavigation .activeLink, .mobileNavigation .disabledLink { flex-direction: column; font-size: 0.72rem; gap: 0.18rem; justify-content: center; min-height: 3.65rem; padding: 0.25rem; text-align: center; }
   .contractIdentity { align-items: flex-start; flex-direction: column; margin-top: 1rem; padding: 1rem; }
   .marketingHeader { padding: 0 1rem; }
   .marketingNav > a:not([class]) { display: none; }

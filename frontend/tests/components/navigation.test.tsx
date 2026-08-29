@@ -47,7 +47,12 @@ describe("route-aware navigation", () => {
     );
 
     expect(screen.getByRole("navigation", { name: "Workspace" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "Cases" })).toHaveAttribute(
+    expect(
+      within(screen.getByRole("navigation", { name: "Workspace" })).getByRole(
+        "link",
+        { name: "Overview" },
+      ),
+    ).toHaveAttribute(
       "aria-current",
       "page",
     );
@@ -55,34 +60,41 @@ describe("route-aware navigation", () => {
     expect(screen.getByText("0x8147…00A7")).toBeVisible();
   });
 
-  it("provides labeled mobile navigation without duplicating current-page semantics", () => {
-    render(<AppNavigation pathname="/cases/new" contractAddress={ADDRESS} />);
+  it("provides the four labeled operational destinations on mobile", () => {
+    render(<AppNavigation pathname="/cases/case-123" contractAddress={ADDRESS} />);
 
     expect(
       screen.getByRole("navigation", { name: "Mobile workspace" }),
     ).toBeVisible();
-    expect(
-      screen
-        .getAllByRole("link", { name: "Create case" })
-        .some((link) => link.getAttribute("aria-current") === "page"),
-    ).toBe(true);
+    const mobile = within(
+      screen.getByRole("navigation", { name: "Mobile workspace" }),
+    );
+    for (const name of ["Overview", "Cases", "Activity", "Proofs"])
+      expect(mobile.getByRole("link", { name })).toBeVisible();
+    expect(mobile.getByRole("link", { name: "Activity" })).toHaveAttribute(
+      "href",
+      "#activity",
+    );
+    expect(mobile.getByRole("link", { name: "Proofs" })).toHaveAttribute(
+      "href",
+      "#proofs",
+    );
   });
 
   it("marks the current tablet-rail destination with the caller pathname", () => {
-    render(<AppNavigation pathname="/cases/new" contractAddress={ADDRESS} />);
+    render(<AppNavigation pathname="/cases/case-123" contractAddress={ADDRESS} />);
 
     expect(
       within(screen.getByRole("navigation", { name: "Workspace shortcuts" })).getByRole(
         "link",
-        { name: "Open Create case" },
+        { name: "Open Cases" },
       ),
     ).toHaveAttribute("aria-current", "page");
   });
 
   it.each([
     ["/cases", "Overview"],
-    ["/cases/case-123", "Overview"],
-    ["/cases/new", "Create case"],
+    ["/cases/case-123", "Cases"],
   ])("marks %s with an active mobile %s destination", (pathname, label) => {
     render(<AppNavigation pathname={pathname} contractAddress={ADDRESS} />);
 

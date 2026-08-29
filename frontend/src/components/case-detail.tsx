@@ -1,10 +1,8 @@
 "use client";
 import {
-  type MouseEvent,
   useCallback,
   useEffect,
   useEffectEvent,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -29,22 +27,17 @@ import {
 } from "@/lib/evidence";
 import { CaseSkeleton, ErrorState } from "./skeletons";
 import { StatusPanel } from "./status-panel";
-import { EvidenceInspector } from "./evidence-inspector";
-import { ReviewTracker } from "./review-tracker";
-import { VerdictExplorer } from "./verdict-explorer";
-import { RecoveryPanel } from "./recovery-panel";
 import { AppealPanel, type AppealEligibility } from "./appeal-panel";
-import {
-  isSettlementExecutable,
-  SettlementPanel,
-  type DispatchConfirmation,
-} from "./settlement-panel";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import styles from "./cases/case-detail.module.css";
+import { deriveCaseWorkspaceModel } from "./cases/case-dashboard-model";
+import { CaseWorkflowStepper } from "./cases/case-workflow-stepper";
+import { EvidenceWorkspace } from "./cases/evidence-workspace";
+import { IntelligentReviewPanel } from "./cases/intelligent-review-panel";
+import { CaseActivity } from "./cases/case-activity";
 import {
   hasAuthoritativeEvidenceSeal,
-  isImmediatelyReviewableEvidenceSeal,
   matchesPendingCloseEvidenceContext,
   parseReviewTxBinding,
   parsePendingCloseEvidenceBinding,
@@ -54,6 +47,7 @@ import {
   validateReviewTxBinding,
   type PendingCloseEvidenceBinding,
   type EvidenceRecord,
+  type ReviewContextRecord,
   type Hash,
 } from "@/lib/access-seal";
 
@@ -88,60 +82,12 @@ function currentUnixTimestamp() {
   return Math.floor(Date.now() / 1000);
 }
 
-type PriorityAction =
-  | "ACCEPT_TERMS"
-  | "FUND"
-  | "SUBMIT_EVIDENCE"
-  | "REQUEST_REVIEW"
-  | "CURE"
-  | "RETRY"
-  | "EXPIRE"
-  | "TIMEOUT"
-  | "PREPARE_SETTLEMENT"
-  | "EXECUTE_SETTLEMENT";
-
-function selectPriorityAction(flags: {
-  canAcceptTerms: boolean;
-  canFund: boolean;
-  canSubmitEvidence: boolean;
-  canRequestReview: boolean;
-  canCure: boolean;
-  canRetry: boolean;
-  canExpire: boolean;
-  canTimeout: boolean;
-  canPrepareSettlement: boolean;
-  canExecuteSettlement: boolean;
-}): PriorityAction | null {
-  if (flags.canAcceptTerms) return "ACCEPT_TERMS";
-  if (flags.canFund) return "FUND";
-  if (flags.canSubmitEvidence) return "SUBMIT_EVIDENCE";
-  if (flags.canRequestReview) return "REQUEST_REVIEW";
-  if (flags.canCure) return "CURE";
-  if (flags.canRetry) return "RETRY";
-  if (flags.canExpire) return "EXPIRE";
-  if (flags.canTimeout) return "TIMEOUT";
-  if (flags.canPrepareSettlement) return "PREPARE_SETTLEMENT";
-  if (flags.canExecuteSettlement) return "EXECUTE_SETTLEMENT";
-  return null;
-}
-
-const priorityActionLabels: Record<PriorityAction, string> = {
-  ACCEPT_TERMS: "Accept exact terms",
-  FUND: "Fund simulated escrow",
-  SUBMIT_EVIDENCE: "Submit evidence",
-  REQUEST_REVIEW: "Request intelligent review",
-  CURE: "Start cure",
-  RETRY: "Retry review",
-  EXPIRE: "Expire unresolved",
-  TIMEOUT: "Timeout refund",
-  PREPARE_SETTLEMENT: "Prepare settlement",
-  EXECUTE_SETTLEMENT: "Execute prepared settlement",
-};
-
 export function CaseDetail({ caseId }: { caseId: string }) {
   const wallet = useWallet();
   const [data, setData] = useState<ReconciledCase | null>(null);
   const [evidence, setEvidence] = useState<EvidenceRecord | null>(null);
+  const [reviewContext, setReviewContext] =
+    useState<ReviewContextRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [tx, setTx] = useState<TransactionState | null>(null);
@@ -166,11 +112,6 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     round: null,
     bond: null,
     roundData: null,
-  });
-  const [confirmation] = useState<DispatchConfirmation>({
-    status: "PENDING",
-    childTransaction: null,
-    recipientBalanceConfirmed: false,
   });
   const [now, setNow] = useState(currentUnixTimestamp);
   const pendingSealExpectedFor = useCallback(
@@ -269,6 +210,19 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           setEvidence(null);
         else throw cause;
       }
+      if (next.case.reviewContextReady) {
+        try {
+          const context = await wallet.readContract.readReviewContext(
+            caseId,
+            next.case.epoch,
+          );
+          if (generation !== refreshGeneration.current) return;
+          setReviewContext(context);
+        } catch {
+          if (generation !== refreshGeneration.current) return;
+          setReviewContext(null);
+        }
+      } else setReviewContext(null);
       const stored = parseReviewTxBinding(
         localStorage.getItem(`${REVIEW_TX_PREFIX}${caseId}`),
       );
@@ -352,10 +306,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     return () => window.clearTimeout(timer);
   }, [data, refresh]);
   const actor = wallet.address?.toLowerCase();
-  const isBuyer = actor === data?.case.buyer.toLowerCase();
-  const isConnectedBuyer = wallet.status === "connected" && isBuyer;
   const isVendor = actor === data?.case.vendor.toLowerCase();
-  const finalized = data?.reviewFinality?.status === "FINALIZED";
   function persistPendingSeal(hash: Hash) {
     if (!data || !wallet.address)
       throw new Error("Connected buyer binding is unavailable for the seal.");
@@ -648,10 +599,6 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       : () => wallet.contract!.appendEvidence(caseId, envelope);
     await run(operation, false, evidence ? "append_evidence" : "open_evidence");
   }
-  const canAcceptTerms =
-    !!isVendor && data?.case.lifecycle === "DRAFT" && !data.case.vendorAccepted;
-  const canFund =
-    !!isBuyer && data?.case.lifecycle === "DRAFT" && data.case.vendorAccepted;
   const canSubmitEvidence =
     !!isVendor &&
     !!data &&
@@ -687,8 +634,6 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           envelope.evidenceType === type && envelope.expiresAt <= now,
       ),
   );
-  const buyerCanSeeSealAction =
-    !!isConnectedBuyer && data?.case.lifecycle === "EVIDENCE_OPEN";
   const pendingSealExpected = data ? pendingSealExpectedFor(data.case) : null;
   const pendingSealInStorage =
     typeof window === "undefined"
@@ -709,105 +654,28 @@ export function CaseDetail({ caseId }: { caseId: string }) {
     !!pendingSealExpected &&
     hasMatchingPendingSeal &&
     pendingSealInStorage?.hash === tx?.hash;
-  const canCloseEvidence =
-    buyerCanSeeSealAction &&
-    hasCompleteSealEvidence &&
-    !!wallet.contract &&
-    !hasMatchingPendingSeal;
-  const historicalEvidenceSeal =
-    !!data && hasAuthoritativeEvidenceSeal(data.case);
-  const hardDeadlineReached =
-    !!data &&
-    data.case.createdAt !== null &&
-    data.case.readAt !== null &&
-    data.case.readAt >= data.case.createdAt + data.case.hardDeadline;
-  const immediateReviewEligible =
-    !!data && isImmediatelyReviewableEvidenceSeal(data.case) && !hardDeadlineReached;
-  const fallbackReviewEligible =
-    data?.case.lifecycle === "EVIDENCE_OPEN" &&
-    !data.case.evidenceSealed &&
-    data.case.evidenceCutoff !== null &&
-    data.case.readAt !== null &&
-    data.case.readAt > data.case.evidenceCutoff &&
-    !hardDeadlineReached;
-  const canRequestReview = immediateReviewEligible || fallbackReviewEligible;
-  const reviewActionAvailable =
-    (data?.case.lifecycle === "EVIDENCE_OPEN" && !data.case.evidenceSealed) ||
-    (data?.case.lifecycle === "EVIDENCE_SEALED" && historicalEvidenceSeal);
-  const fallbackReviewStatus = (() => {
-    if (hardDeadlineReached)
-      return "Finalized contract time confirms the case hard deadline has expired; review is unavailable and timeout recovery may apply.";
-    if (!data || data.case.lifecycle !== "EVIDENCE_OPEN" || data.case.evidenceSealed)
-      return null;
-    if (data.case.evidenceCutoff === null || data.case.readAt === null)
-      return "The contract did not provide an authoritative cutoff clock. Refresh finalized readback before requesting the fallback review path.";
-    const remaining = data.case.evidenceCutoff - data.case.readAt;
-    if (remaining > 0)
-      return `${remaining} second${remaining === 1 ? "" : "s"} until the evidence cutoff. Refresh readback when it elapses; the fallback review path remains disabled until a finalized contract time confirms time after the cutoff.`;
-    if (remaining === 0)
-      return "Evidence cutoff reached; confirming with a finalized contract time after the cutoff before enabling the fallback review path.";
-    return "Finalized contract time confirms the evidence cutoff has passed; the fallback review path is available.";
-  })();
-  const canCure =
-    !!isVendor &&
-    finalized &&
-    data?.review?.verdict === "REQUEST_MORE_INFO" &&
-    data.case.epoch === 0;
   const canRetry =
-    !!finalized &&
+    data?.reviewFinality?.status === "FINALIZED" &&
     data?.review?.verdict === "UNRESOLVED" &&
     !!data.reviewAttempt &&
     data.reviewAttempt.attempt < data.case.maxUnresolvedRetries &&
     now >= data.reviewAttempt.decidedAt + 300;
-  const canExpire =
-    !!finalized &&
-    !!data &&
-    ((data.review?.verdict === "UNRESOLVED" &&
-      !!data.reviewAttempt &&
-      data.reviewAttempt.attempt >= data.case.maxUnresolvedRetries) ||
-      (data.review?.verdict === "REQUEST_MORE_INFO" && data.case.epoch > 0));
-  const canTimeout =
-    !!data &&
-    data.case.createdAt !== null &&
-    data.case.readAt !== null &&
-    data.case.readAt > data.case.createdAt + data.case.hardDeadline &&
-    ["FUNDED", "EVIDENCE_OPEN", "EVIDENCE_SEALED"].includes(
-      data.case.lifecycle,
-    );
-  const canPrepareSettlement =
-    !data?.settlement &&
-    !!finalized &&
-    ["APPROVED", "REJECTED"].includes(data?.review?.verdict ?? "");
-  const canExecuteSettlement = isSettlementExecutable(data?.settlement ?? null);
-  const priorityAction = selectPriorityAction({
-    canAcceptTerms,
-    canFund,
-    canSubmitEvidence,
-    canRequestReview,
-    canCure,
-    canRetry,
-    canExpire,
-    canTimeout,
-    canPrepareSettlement,
-    canExecuteSettlement,
-  });
-
-  function focusSectionAfterPrimaryActivation(
-    event: MouseEvent<HTMLAnchorElement>,
-  ) {
-    if (
-      event.defaultPrevented ||
-      event.button !== 0 ||
-      event.metaKey ||
-      event.ctrlKey ||
-      event.shiftKey ||
-      event.altKey
-    )
-      return;
-    const target = document.getElementById(event.currentTarget.hash.slice(1));
-    window.requestAnimationFrame(() => target?.focus());
-  }
-
+  const workspaceModel = data
+    ? deriveCaseWorkspaceModel({
+        reconciledCase: data,
+        evidence,
+        reviewContext,
+        actorAddress: wallet.address,
+        walletStatus: wallet.status,
+        hasSigner: !!wallet.contract,
+        transaction: tx,
+        now,
+        retryEligible: canRetry,
+        evidenceSubmissionReady: !!previewHash,
+        sealRecoveryPending:
+          hasMatchingPendingSeal || !!awaitingSealReadback,
+      })
+    : null;
   function acceptTerms() {
     if (wallet.contract && data)
       void run(
@@ -825,7 +693,11 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       );
   }
   function requestReview() {
-    if (wallet.contract && canRequestReview)
+    if (
+      wallet.contract &&
+      workspaceModel?.primaryAction.id === "REQUEST_REVIEW" &&
+      workspaceModel.primaryAction.enabled
+    )
       void run(() => wallet.contract!.requestReview(caseId), true, "request_review");
   }
   function closeEvidence() {
@@ -896,29 +768,19 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       );
   }
   function runPriorityAction() {
-    if (priorityAction === "ACCEPT_TERMS") return acceptTerms();
-    if (priorityAction === "FUND") return fundCase();
-    if (priorityAction === "SUBMIT_EVIDENCE") return void submitEvidence();
-    if (priorityAction === "REQUEST_REVIEW") return requestReview();
-    if (priorityAction === "CURE") return startCure();
-    if (priorityAction === "RETRY") return retryReview();
-    if (priorityAction === "EXPIRE") return expireUnresolved();
-    if (priorityAction === "TIMEOUT") return timeoutRefund();
-    if (priorityAction === "PREPARE_SETTLEMENT") return prepareSettlement();
-    if (priorityAction === "EXECUTE_SETTLEMENT") return executeSettlement();
+    const actionId = workspaceModel?.primaryAction.id;
+    if (actionId === "ACCEPT_TERMS") return acceptTerms();
+    if (actionId === "FUND") return fundCase();
+    if (actionId === "SUBMIT_EVIDENCE") return void submitEvidence();
+    if (actionId === "CLOSE_EVIDENCE") return closeEvidence();
+    if (actionId === "REQUEST_REVIEW") return requestReview();
+    if (actionId === "START_CURE") return startCure();
+    if (actionId === "RETRY_REVIEW") return retryReview();
+    if (actionId === "EXPIRE_UNRESOLVED") return expireUnresolved();
+    if (actionId === "TIMEOUT_REFUND") return timeoutRefund();
+    if (actionId === "PREPARE_SETTLEMENT") return prepareSettlement();
+    if (actionId === "EXECUTE_SETTLEMENT") return executeSettlement();
   }
-  const timeline = useMemo(
-    () => [
-      "DRAFT",
-      "FUNDED",
-      "EVIDENCE_OPEN",
-      "EVIDENCE_SEALED",
-      "DECIDED",
-      "SETTLEMENT_PENDING",
-      "DISPATCHED_FINALIZED",
-    ],
-    [],
-  );
   if (loading && !data)
     return (
       <div className={styles.page}>
@@ -986,29 +848,36 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           <div className={styles.summaryItem}>
             <dt>Verdict</dt>
             <dd>
-              {data.review?.verdict.replaceAll("_", " ") ?? "Not available"}
+              {workspaceModel?.finalizedVerdict?.replaceAll("_", " ") ??
+                "Withheld until finality"}
             </dd>
           </div>
         </dl>
+        {workspaceModel && (
+          <CaseWorkflowStepper
+            stages={workspaceModel.stages}
+            actorRole={workspaceModel.actorRole}
+            roleWarning={workspaceModel.roleWarning}
+          />
+        )}
         <div className={styles.summaryAction}>
           <div>
-            <strong>Priority action</strong>
+            <strong>Authoritative action</strong>
             <p>
-              Selected from the currently valid authoritative controls below.
+              {workspaceModel?.primaryActionReason ??
+                "This is the single contract-authorized next action."}
             </p>
           </div>
-          {priorityAction ? (
+          {workspaceModel && (
             <Button
               disabled={
                 writeBusy ||
-                (priorityAction === "SUBMIT_EVIDENCE" && !previewHash)
+                !workspaceModel.primaryAction.enabled
               }
               onClick={runPriorityAction}
             >
-              {priorityActionLabels[priorityAction]}
+              {workspaceModel.primaryAction.label}
             </Button>
-          ) : (
-            <Badge tone="neutral">No action currently available</Badge>
           )}
         </div>
       </section>
@@ -1061,388 +930,82 @@ export function CaseDetail({ caseId }: { caseId: string }) {
           readback before requesting review.
         </section>
       )}
-      <ol className={styles.lifecycle} aria-label="Case lifecycle" tabIndex={0}>
-        {timeline.map((stage) => {
-          const current = stage === data.case.lifecycle;
-          const reached =
-            timeline.indexOf(stage) <= timeline.indexOf(data.case.lifecycle);
-          return (
-            <li
-              aria-current={current ? "step" : undefined}
-              data-state={
-                current ? "current" : reached ? "complete" : "upcoming"
-              }
-              key={stage}
-            >
-              <span aria-hidden="true" />
-              {stage.replaceAll("_", " ").toLowerCase()}
-            </li>
-          );
-        })}
-      </ol>
-      <nav className={styles.sectionNav} aria-label="Case sections">
-        <ul>
-          <li>
-            <a href="#terms" onClick={focusSectionAfterPrimaryActivation}>
-              Terms
-            </a>
-          </li>
-          <li>
-            <a href="#evidence" onClick={focusSectionAfterPrimaryActivation}>
-              Evidence
-            </a>
-          </li>
-          <li>
-            <a href="#decision" onClick={focusSectionAfterPrimaryActivation}>
-              AI decision
-            </a>
-          </li>
-          <li>
-            <a href="#settlement" onClick={focusSectionAfterPrimaryActivation}>
-              Settlement
-            </a>
-          </li>
-        </ul>
-      </nav>
-      <section
-        className={styles.workflowSection}
-        id="terms"
-        aria-labelledby="terms-heading"
-        tabIndex={-1}
-      >
-        <header className={styles.workflowHeading}>
-          <span className={styles.stepNumber}>01</span>
-          <div>
-            <h2 id="terms-heading">Terms</h2>
-            <p>Immutable agreement and accounting readback.</p>
-          </div>
-        </header>
-        <div className={styles.twoColumn}>
-          <section className={styles.card}>
-            <span className={styles.eyebrow}>Immutable agreement</span>
-            <h3>Locked terms</h3>
-            <dl className={styles.compactDl}>
-              <div>
-                <dt>Buyer</dt>
-                <dd>
-                  <code>{data.case.buyer}</code>
-                </dd>
-              </div>
-              <div>
-                <dt>Vendor</dt>
-                <dd>
-                  <code>{data.case.vendor}</code>
-                </dd>
-              </div>
-              <div>
-                <dt>Profile hash</dt>
-                <dd>
-                  <code>{data.case.profileHash}</code>
-                </dd>
-              </div>
-              <div>
-                <dt>Flows hash</dt>
-                <dd>
-                  <code>{data.case.flowsHash}</code>
-                </dd>
-              </div>
-              <div>
-                <dt>Simulated escrow</dt>
-                <dd>{data.case.escrowAmount.toString()} wei</dd>
-              </div>
-              <div>
-                <dt>Reserved</dt>
-                <dd>{data.case.reserved.toString()} wei</dd>
-              </div>
-            </dl>
-            <div className={styles.buttonRow}>
-              {canAcceptTerms && (
-                <Button
-                  variant="secondary"
-                  disabled={writeBusy}
-                  onClick={acceptTerms}
-                >
-                  Accept exact terms
-                </Button>
+      <div className={styles.evidenceReviewSplit}>
+        <EvidenceWorkspace
+          caseRecord={data.case}
+          evidence={evidence}
+          now={now}
+          controls={
+            <>
+              {canSubmitEvidence && (
+                <div className={styles.evidenceControls}>
+                  <label>
+                    Evidence envelope JSON
+                    <textarea
+                      rows={7}
+                      value={evidenceJson}
+                      onChange={(event) => {
+                        setEvidenceJson(event.target.value);
+                        setPreviewHash("");
+                      }}
+                    />
+                  </label>
+                  <div className={styles.buttonRow}>
+                    <Button
+                      variant="secondary"
+                      disabled={writeBusy}
+                      onClick={() => void inspectEnvelope()}
+                    >
+                      Validate canonical preview
+                    </Button>
+                  </div>
+                  {previewHash && (
+                    <div className={styles.hashBox}>
+                      <span>Canonical hash ready for submission</span>
+                      <code>{previewHash}</code>
+                    </div>
+                  )}
+                </div>
               )}
-              {isBuyer && data.case.lifecycle === "DRAFT" && (
-                <Button
-                  disabled={!data.case.vendorAccepted || writeBusy}
-                  onClick={fundCase}
-                >
-                  Fund simulated escrow
-                </Button>
-              )}
-              {!canAcceptTerms &&
-                !(isBuyer && data.case.lifecycle === "DRAFT") && (
+              {data.case.lifecycle === "EVIDENCE_OPEN" &&
+                !hasCompleteSealEvidence && (
                   <p className={styles.inlineState}>
-                    No actor-restricted terms action is available to this
-                    wallet.
+                    Missing evidence types: {missingSealEvidenceTypes.join(", ")}.
+                    The buyer needs all six exact current-epoch evidence types
+                    before sealing.
                   </p>
                 )}
-            </div>
-          </section>
-          <section className={styles.card}>
-            <span className={styles.eyebrow}>Accounting invariant</span>
-            <h3>Conservation readback</h3>
-            <div className={styles.metricGrid}>
-              <div>
-                <span>Total deposits</span>
-                <strong>{data.accounting.totalDeposits.toString()}</strong>
-              </div>
-              <div>
-                <span>Reserved</span>
-                <strong>{data.accounting.reserved.toString()}</strong>
-              </div>
-              <div>
-                <span>Pending</span>
-                <strong>{data.accounting.pendingDispatch.toString()}</strong>
-              </div>
-              <div>
-                <span>Dispatched</span>
-                <strong>
-                  {(
-                    data.accounting.dispatchedPayouts +
-                    data.accounting.dispatchedRefunds
-                  ).toString()}
-                </strong>
-              </div>
-            </div>
-          </section>
-        </div>
-      </section>
-      <section
-        className={styles.workflowSection}
-        id="evidence"
-        aria-labelledby="evidence-heading"
-        tabIndex={-1}
-      >
-        <header className={styles.workflowHeading}>
-          <span className={styles.stepNumber}>02</span>
-          <div>
-            <h2 id="evidence-heading">Evidence</h2>
-            <p>
-              Canonical vendor submission and validator-fetchable artifacts.
-            </p>
-          </div>
-        </header>
-        {canSubmitEvidence && (
-          <section className={`${styles.card} ${styles.formStack}`}>
-            <span className={styles.eyebrow}>Canonical envelope</span>
-            <h3>
-              {!evidence
-                ? "Open release evidence"
-                : "Append supporting evidence"}
-            </h3>
-            <p>
-              Paste an exact AccessSeal evidence/1 envelope. The preview
-              validates origin, epoch, freshness, media type and canonical
-              digest before signing.
-            </p>
-            <label>
-              Evidence envelope JSON
-              <textarea
-                rows={9}
-                value={evidenceJson}
-                onChange={(event) => {
-                  setEvidenceJson(event.target.value);
-                  setPreviewHash("");
-                }}
-              />
-            </label>
-            <div className={styles.buttonRow}>
-              <Button
-                variant="secondary"
-                disabled={writeBusy}
-                onClick={() => void inspectEnvelope()}
-              >
-                Validate canonical preview
-              </Button>
-              <Button
-                disabled={!previewHash || writeBusy}
-                onClick={() => void submitEvidence()}
-              >
-                Sign and submit evidence
-              </Button>
-            </div>
-            {previewHash && (
-              <div className={styles.hashBox}>
-                <span>Canonical hash</span>
-                <code>{previewHash}</code>
-              </div>
-            )}
-          </section>
-        )}
-        {!canSubmitEvidence && (
-          <p className={styles.inlineState}>
-            Evidence submission is not available for this wallet and lifecycle.
-            Existing evidence remains visible below.
-          </p>
-        )}
-        {data.case.lifecycle === "EVIDENCE_OPEN" && buyerCanSeeSealAction && (
-          <section
-            className={styles.actionCard}
-            aria-labelledby="seal-evidence-title"
-          >
-            <span className={styles.eyebrow}>
-              Buyer-controlled evidence seal
-            </span>
-            <h3 id="seal-evidence-title">Close complete evidence</h3>
-            <p>
-              Closing requires six exact current-epoch evidence types. The
-              lifecycle remains unchanged until finalized execution and
-              authoritative sealed readback agree.
-            </p>
-            <Button
-              disabled={
-                !canCloseEvidence || writeBusy || !!awaitingSealReadback
-              }
-              onClick={closeEvidence}
-            >
-              Close evidence &amp; enable review
-            </Button>
-            {!hasCompleteSealEvidence && (
-              <p className={styles.inlineState}>
-                Missing evidence types: {missingSealEvidenceTypes.join(", ")}.
-                Submit all six exact current-epoch evidence types before the
-                buyer can close evidence.
-              </p>
-            )}
-            {expiredSealEvidenceTypes.length > 0 && (
-              <p className={styles.inlineState}>
-                Expired evidence types: {expiredSealEvidenceTypes.join(", ")}.
-                They cannot be replaced in this epoch because duplicate evidence
-                types are rejected. Wait for cutoff review; if review requests
-                more information, use the bounded cure/new epoch. Use timeout
-                recovery only when the hard-deadline path applies.
-              </p>
-            )}
-            {hasCompleteSealEvidence && !wallet.contract && (
-              <p className={styles.inlineState}>
-                The buyer wallet is connected for reading, but a transaction
-                signer is unavailable. Reconnect the wallet before sealing.
-              </p>
-            )}
-          </section>
-        )}
-        {data.case.lifecycle === "EVIDENCE_OPEN" && !isConnectedBuyer && (
-          <section
-            className={styles.actionCard}
-            aria-labelledby="buyer-wallet-title"
-          >
-            <span className={styles.eyebrow}>
-              Buyer-controlled evidence seal
-            </span>
-            <h3 id="buyer-wallet-title">Buyer wallet required</h3>
-            <p>
-              Connect the buyer wallet to close evidence. The vendor and other
-              wallets cannot end the evidence period.
-            </p>
-            {wallet.status === "connected" ? (
-              <Button onClick={() => void wallet.changeAccount()}>
-                Change wallet
-              </Button>
-            ) : (
-              <Button onClick={() => void wallet.connect()}>
-                Connect buyer wallet
-              </Button>
-            )}
-          </section>
-        )}
-        {historicalEvidenceSeal && (
-          <section
-            className={styles.actionCard}
-            aria-labelledby="sealed-evidence-title"
-          >
-            <span className={styles.eyebrow}>Authoritative readback</span>
-            <h3 id="sealed-evidence-title">Evidence sealed</h3>
-            <p>
-              The buyer sealed this epoch at{" "}
-              {new Date(data.case.evidenceSealedAt * 1000).toISOString()}. A
-              {immediateReviewEligible
-                ? " A review may now be requested without waiting for the cutoff."
-                : " The sealed evidence remains part of this case's authoritative history."}
-            </p>
-            <dl className={styles.compactDl}>
-              <div>
-                <dt>Sealed by</dt>
-                <dd>
-                  <code>{data.case.evidenceSealedBy}</code>
-                </dd>
-              </div>
-            </dl>
-          </section>
-        )}
-        {evidence && <EvidenceInspector evidence={evidence} now={now} />}
-        {!evidence && (
-          <p className={styles.inlineState}>
-            No evidence envelope exists for the authoritative case epoch.
-          </p>
-        )}
-      </section>
-      <section
-        className={styles.workflowSection}
-        id="decision"
-        aria-labelledby="decision-heading"
-        tabIndex={-1}
-      >
-        <header className={styles.workflowHeading}>
-          <span className={styles.stepNumber}>03</span>
-          <div>
-            <h2 id="decision-heading">AI decision</h2>
-            <p>Review finality, appeal provenance, and guarded recovery.</p>
-          </div>
-        </header>
-        {reviewActionAvailable && (
-          <section className={styles.actionCard}>
-            <span className={styles.eyebrow}>Semantic review</span>
-            <h3>Request validator consensus</h3>
-            <p>
-              {immediateReviewEligible
-                ? "The authoritative seal makes review eligible now."
-                : fallbackReviewStatus}
-            </p>
-            <Button disabled={writeBusy || !canRequestReview} onClick={requestReview}>
-              Request intelligent review
-            </Button>
-          </section>
-        )}
-        {!data.review && !canRequestReview && (
-          <p className={styles.inlineState}>
-            No review decision is available for the authoritative case epoch.
-          </p>
-        )}
-        {!data.review && canTimeout && (
-          <RecoveryPanel
-            canCure={false}
-            canExpire={false}
-            canRetry={false}
-            canTimeout={canTimeout}
-            onCure={startCure}
-            onExpire={expireUnresolved}
-            onRetry={retryReview}
-            onTimeout={timeoutRefund}
-          />
-        )}
-        {data.review && data.reviewFinality && (
-          <>
-            <ReviewTracker
-              review={data.review}
-              finality={data.reviewFinality}
-              transactionPhase={
-                data.reviewFinality.status === "FINALIZED"
-                  ? "READBACK_CONFIRMED"
-                  : "CONSENSUS_PENDING"
-              }
-              cureDeadline={undefined}
-              retryAvailableAt={
-                data.reviewAttempt
-                  ? data.reviewAttempt.decidedAt + 300
-                  : undefined
-              }
-            />
-            <div className={styles.decisionLayout}>
-              <VerdictExplorer review={data.review} />
+              {expiredSealEvidenceTypes.length > 0 && (
+                <p className={styles.inlineState}>
+                  Expired evidence types: {expiredSealEvidenceTypes.join(", ")}.
+                  They remain immutable in this epoch; bounded recovery follows
+                  the contract lifecycle.
+                </p>
+              )}
+              {workspaceModel?.primaryAction.id === "CLOSE_EVIDENCE" &&
+                workspaceModel.roleWarning && (
+                  <Button
+                    variant="secondary"
+                    onClick={() =>
+                      void (wallet.status === "connected"
+                        ? wallet.changeAccount()
+                        : wallet.connect())
+                    }
+                  >
+                    {wallet.status === "connected" ? "Change wallet" : "Connect buyer wallet"}
+                  </Button>
+                )}
+            </>
+          }
+        />
+        <IntelligentReviewPanel
+          caseRecord={data.case}
+          context={reviewContext}
+          review={data.review}
+          finality={data.reviewFinality}
+          verdictTone={workspaceModel?.verdictTone ?? "neutral"}
+          controls={
+            data.review && data.reviewFinality?.status === "FINALIZED" ? (
               <AppealPanel
                 eligibility={eligibility}
                 onAppeal={() => {
@@ -1457,59 +1020,41 @@ export function CaseDetail({ caseId }: { caseId: string }) {
                     );
                 }}
               />
-            </div>
-            <div className={styles.decisionLayout}>
-              <RecoveryPanel
-                verdict={data.review.verdict}
-                canCure={canCure}
-                canRetry={canRetry}
-                canExpire={canExpire}
-                canTimeout={canTimeout}
-                retryAvailableAt={
-                  data.reviewAttempt
-                    ? data.reviewAttempt.decidedAt + 300
-                    : undefined
-                }
-                onCure={startCure}
-                onRetry={retryReview}
-                onExpire={expireUnresolved}
-                onTimeout={timeoutRefund}
-              />
-            </div>
-          </>
-        )}
-        {data.review && !data.reviewFinality && (
-          <p className={styles.inlineState}>
-            Review data exists, but protocol finality is not available.
-            Settlement remains locked.
-          </p>
-        )}
-      </section>
+            ) : undefined
+          }
+        />
+      </div>
       <section
-        className={styles.workflowSection}
+        className={styles.accountingPanel}
         id="settlement"
-        aria-labelledby="settlement-heading"
+        aria-labelledby="simulated-escrow-title"
         tabIndex={-1}
       >
-        <header className={styles.workflowHeading}>
-          <span className={styles.stepNumber}>04</span>
+        <header className={styles.commandPanelHeader}>
           <div>
-            <h2 id="settlement-heading">Settlement</h2>
-            <p>
-              Preparation, execution, conservation, and recipient confirmation.
-            </p>
+            <span className={styles.eyebrow}>Conservation readback</span>
+            <h2 id="simulated-escrow-title">Simulated escrow</h2>
           </div>
+          <Badge tone={data.settlement?.status === "DISPATCHED_FINALIZED" ? "success" : "info"}>
+            {data.settlement?.status.replaceAll("_", " ") ?? "Reserved"}
+          </Badge>
         </header>
-        <SettlementPanel
-          canPrepare={canPrepareSettlement}
-          settlement={data.settlement}
-          accounting={data.accounting}
-          confirmation={confirmation}
-          busy={writeBusy}
-          onPrepare={prepareSettlement}
-          onExecute={executeSettlement}
-        />
+        <div className={styles.accountingMetrics}>
+          <div><span>Total deposits</span><strong>{data.accounting.totalDeposits.toString()}</strong></div>
+          <div><span>Reserved</span><strong>{data.accounting.reserved.toString()}</strong></div>
+          <div><span>Pending dispatch</span><strong>{data.accounting.pendingDispatch.toString()}</strong></div>
+          <div><span>Dispatched</span><strong>{(data.accounting.dispatchedPayouts + data.accounting.dispatchedRefunds).toString()}</strong></div>
+        </div>
+        {data.settlement && (
+          <dl className={styles.reviewFacts}>
+            <div><dt>Settlement ID</dt><dd><code>{data.settlement.settlementId}</code></dd></div>
+            <div><dt>Recipient</dt><dd><code>{data.settlement.recipient}</code></dd></div>
+            <div><dt>Kind and reason</dt><dd>{data.settlement.kind} · {data.settlement.reason}</dd></div>
+            <div><dt>Review proof</dt><dd><code>{data.settlement.reviewProofId}</code></dd></div>
+          </dl>
+        )}
       </section>
+      <CaseActivity rows={workspaceModel?.activityRows ?? []} />
     </div>
   );
 }

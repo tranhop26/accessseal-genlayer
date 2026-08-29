@@ -8,14 +8,14 @@ import { useWallet } from "@/providers/wallet-provider";
 import { TransactionToast } from "@/components/transaction-toast";
 import styles from "./navigation.module.css";
 
-type IconName = "overview" | "cases" | "create" | "contract";
+type IconName = "overview" | "cases" | "activity" | "proofs";
 
 function Icon({ name }: { name: IconName }) {
   const paths: Record<IconName, ReactNode> = {
     overview: <path d="M4 5.5h6.5V12H4zM13.5 5.5H20V9h-6.5zM13.5 12H20v6.5h-6.5zM4 15h6.5v3.5H4z" />,
     cases: <path d="M4 6.5h5l1.5 1.75H20v9.25A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5zM4 6.5A1.5 1.5 0 0 1 5.5 5h3.25l1.5 1.75" />,
-    create: <path d="M12 5v14M5 12h14" />,
-    contract: <path d="M8.25 4.5 4.5 8.25l3.75 3.75M15.75 12l3.75-3.75-3.75-3.75M13.5 4.5l-3 15" />,
+    activity: <path d="M5 17.5h3.25l2.2-7 3.1 9 2.2-6H20M5 6.5h15" />,
+    proofs: <path d="M12 3.75 19 6.5v5.25c0 4.1-2.55 7.15-7 8.5-4.45-1.35-7-4.4-7-8.5V6.5zM8.8 12l2.1 2.1 4.4-4.4" />,
   };
 
   return (
@@ -80,36 +80,45 @@ type NavigationItem = {
   label: string;
   icon: IconName;
   current: (pathname: string) => boolean;
+  caseAnchor?: boolean;
 };
 
 function isCaseOverview(pathname: string) {
-  return pathname !== "/cases/new" && (pathname === "/cases" || /^\/cases\/[^/]+$/.test(pathname));
+  return /^\/cases\/[^/]+$/.test(pathname) && pathname !== "/cases/new";
 }
 
 const desktopItems: readonly NavigationItem[] = [
-  { href: "/cases", label: "Overview", icon: "overview", current: () => false },
+  { href: "/cases", label: "Overview", icon: "overview", current: (pathname) => pathname === "/cases" },
   { href: "/cases", label: "Cases", icon: "cases", current: isCaseOverview },
-  { href: "/cases/new", label: "Create case", icon: "create", current: (pathname) => pathname === "/cases/new" },
-  { href: "#contract-status", label: "Contract status", icon: "contract", current: () => false },
+  { href: "#activity", label: "Activity", icon: "activity", current: () => false, caseAnchor: true },
+  { href: "#proofs", label: "Proofs", icon: "proofs", current: () => false, caseAnchor: true },
 ];
 
-const mobileItems: readonly NavigationItem[] = [
-  { ...desktopItems[0], current: isCaseOverview },
-  desktopItems[2],
-  desktopItems[3],
-];
+const mobileItems: readonly NavigationItem[] = desktopItems;
 
 function NavigationLinks({ items, pathname, compact = false }: { items: readonly NavigationItem[]; pathname: string; compact?: boolean }) {
   return (
     <ul className={compact ? styles.compactLinks : styles.navigationLinks}>
       {items.map((item) => {
         const active = item.current(pathname);
+        const disabled = item.caseAnchor && !isCaseOverview(pathname);
         return (
           <li key={item.label}>
-            <Link aria-current={active ? "page" : undefined} className={active ? styles.activeLink : styles.navigationLink} href={item.href} title={compact ? item.label : undefined}>
-              <Icon name={item.icon} />
-              <span>{item.label}</span>
-            </Link>
+            {disabled ? (
+              <span
+                aria-disabled="true"
+                className={styles.disabledLink}
+                title={`${item.label} is available from an open case.`}
+              >
+                <Icon name={item.icon} />
+                <span>{item.label}</span>
+              </span>
+            ) : (
+              <Link aria-current={active ? "page" : undefined} className={active ? styles.activeLink : styles.navigationLink} href={item.href} title={compact ? item.label : undefined}>
+                <Icon name={item.icon} />
+                <span>{item.label}</span>
+              </Link>
+            )}
           </li>
         );
       })}
