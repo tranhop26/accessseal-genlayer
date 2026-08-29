@@ -362,8 +362,9 @@ test("V4 accepts a structurally valid exact 16384-byte PNG and rejects 16385 byt
 test("V4 production capture applies the configured screenshot limit to transient and staged outputs", () => {
   const captureSource = readFileSync(new URL("../../frontend/e2e/live-evidence.capture.spec.ts", import.meta.url), "utf8");
   assert.equal(schema.MAX_SCREENSHOT_BYTES, 16_384);
-  assert.match(captureSource, /statSync\(transientScreenshot\)\.size\)\.toBeLessThan\(MAX_SCREENSHOT_BYTES\)/);
-  assert.match(captureSource, /statSync\(resolve\(stagingDirectory, "screenshot\.png"\)\)\.size\)\.toBeLessThan\(MAX_SCREENSHOT_BYTES\)/);
+  assert.match(captureSource, /statSync\(transientScreenshot\)\.size\)\.toBeLessThanOrEqual\(MAX_SCREENSHOT_BYTES\)/);
+  assert.match(captureSource, /statSync\(resolve\(stagingDirectory, "screenshot\.png"\)\)\.size\)\.toBeLessThanOrEqual\(MAX_SCREENSHOT_BYTES\)/);
+  assert.doesNotMatch(captureSource, /statSync\([^\n]+screenshot[^\n]+\)\.toBeLessThan\(MAX_SCREENSHOT_BYTES\)/);
   assert.doesNotMatch(captureSource, /screenshot(?:\.png|Screenshot)?[^\n]*65_536/);
 });
 
