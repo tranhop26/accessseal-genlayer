@@ -59,17 +59,25 @@ test("buyer, vendor and third party complete a real approved GLSim workflow", as
   await app.selectRole(page, "buyer");
   await app.connect(page, "buyer");
   await app.holdNextTransaction(page);
-  await page
-    .getByRole("region", { name: "Case summary" })
-    .getByRole("button", { name: "Close evidence & enable review" })
-    .click();
-  await expect(page.getByRole("dialog", { name: "Confirm evidence seal" })).toBeVisible();
-  await expectCurrentStage(page, "EVIDENCE_OPEN");
-  await app.releaseHeldTransaction(page);
-  await expectCurrentStage(page, "EVIDENCE_SEALED");
-  await expect(
-    page.getByRole("region", { name: "Intelligent review" }),
-  ).toContainText("Context ready");
+  const closeEvidenceReadbackProof = {
+    gateAuthoritativeReadback: true,
+    afterActionClick: async () => {
+      await expect(page.getByRole("dialog", { name: "Confirm evidence seal" })).toBeVisible();
+      await expectCurrentStage(page, "EVIDENCE_OPEN");
+      await app.releaseHeldTransaction(page);
+    },
+  };
+  await writeAndConfirm(
+    page,
+    "Close evidence & enable review",
+    "EVIDENCE_SEALED",
+    async () =>
+      page
+        .getByRole("region", { name: "Intelligent review" })
+        .getByText("Context ready")
+        .isVisible(),
+    closeEvidenceReadbackProof,
+  );
 
   await beginTransactionPhaseCapture(page);
   await review(page, app, release, "APPROVED", {

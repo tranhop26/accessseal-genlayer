@@ -41,12 +41,17 @@ async function transactionHash(page: Page): Promise<string> {
   return (await code.isVisible() ? await code.textContent() : "")?.trim() ?? "";
 }
 
+type WriteAndConfirmOptions = {
+  gateAuthoritativeReadback?: boolean;
+  afterActionClick?: () => Promise<void>;
+};
+
 export async function writeAndConfirm(
   page: Page,
   buttonName: string,
   stage: Stage,
   authoritativeReadback: () => Promise<boolean> = async () => true,
-  options: { gateAuthoritativeReadback?: boolean } = {},
+  options: WriteAndConfirmOptions = {},
 ): Promise<void> {
   await failOnVisibleError(page);
   const previousHash = await transactionHash(page);
@@ -88,10 +93,11 @@ export async function writeAndConfirm(
     await page.route("http://127.0.0.1:4000/api", routeHandler);
   }
   await action.click();
+  await options.afterActionClick?.();
   if (observedAuthoritativeRead) {
     await observedAuthoritativeRead;
     await expect(
-      page.locator('section[role="status"][aria-live="polite"]'),
+      page.locator('section[role="status"][aria-live="polite"][data-tone]'),
     ).toContainText("Finalized execution succeeded");
     expect(previousLifecycle).toBeTruthy();
     await expectCurrentStage(page, previousLifecycle!.replaceAll(" ", "_") as Stage);
@@ -118,7 +124,7 @@ export async function writeAndConfirm(
       const nextHash = status?.querySelector("code")?.textContent?.trim() ?? "";
       if (current === expectedStage && nextHash && nextHash !== priorHash)
         return { success: true };
-      const transactionStatus = document.querySelector('section[role="status"][aria-live="polite"]');
+      const transactionStatus = document.querySelector('section[role="status"][aria-live="polite"][data-tone]');
       const phase = transactionStatus?.querySelector("h2")?.textContent?.trim() ?? "";
       const failedHash = transactionStatus?.querySelector("code")?.textContent?.trim() ?? "";
       if (

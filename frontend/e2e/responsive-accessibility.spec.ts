@@ -30,22 +30,34 @@ async function assertHeadingOrder(page: Page) {
 }
 
 async function assertPageAccessibility(page: Page) {
-  const horizontalOverflow = await page.evaluate(() => {
-    const viewportWidth = document.documentElement.clientWidth;
-    return Array.from(document.body.querySelectorAll<HTMLElement>("*"))
-      .filter((element) => {
-        const rectangle = element.getBoundingClientRect();
-        return rectangle.width > 0 && rectangle.right > viewportWidth + 1;
-      })
-      .slice(0, 10)
-      .map((element) => ({
-        className: element.className,
-        right: Math.round(element.getBoundingClientRect().right),
-        tagName: element.tagName,
-        text: element.textContent?.trim().slice(0, 80),
-      }));
+  const horizontalLayout = await page.evaluate(() => {
+    const root = document.documentElement;
+    const viewportWidth = root.clientWidth;
+    return {
+      offenders: Array.from(document.body.querySelectorAll<HTMLElement>("*"))
+        .filter((element) => {
+          const rectangle = element.getBoundingClientRect();
+          return rectangle.width > 0 &&
+            (rectangle.left < -1 || rectangle.right > viewportWidth + 1);
+        })
+        .slice(0, 10)
+        .map((element) => ({
+          className: element.className,
+          left: Math.round(element.getBoundingClientRect().left),
+          right: Math.round(element.getBoundingClientRect().right),
+          tagName: element.tagName,
+          text: element.textContent?.trim().slice(0, 80),
+        })),
+      document: {
+        clientWidth: root.clientWidth,
+        rootLeft: Math.round(root.getBoundingClientRect().left),
+        scrollWidth: root.scrollWidth,
+      },
+    };
   });
-  expect(horizontalOverflow).toEqual([]);
+  expect(horizontalLayout.document.rootLeft).toBeGreaterThanOrEqual(-1);
+  expect(horizontalLayout.document.scrollWidth).toBeLessThanOrEqual(horizontalLayout.document.clientWidth);
+  expect(horizontalLayout.offenders).toEqual([]);
   await assertHeadingOrder(page);
   const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
   expect(results.violations.filter((item) => item.impact === "serious" || item.impact === "critical")).toEqual([]);
@@ -354,7 +366,10 @@ test("lays out the populated command center at the three required viewports with
   const firstEvidence = evidence.getByRole("article").first();
   const accordion = firstEvidence.locator("summary");
   await expect(accordion).toHaveAccessibleName(/evidence details/i);
-  await accordion.click();
+  await accordion.focus();
+  await expect(accordion).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(firstEvidence.locator("details")).toHaveAttribute("open", "");
   await expect(firstEvidence.getByText("Exact envelope hash", { exact: true })).toBeVisible();
   for (const code of await firstEvidence.locator("code").all())
     expect(await code.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
@@ -389,6 +404,13 @@ test("lays out the populated command center at the three required viewports with
     expect(box).not.toBeNull();
     expect(box!.height).toBeGreaterThanOrEqual(44);
   }
+  const mobileNavigation = page.getByRole("navigation", { name: "Mobile workspace" });
+  await expect(mobileNavigation).toHaveCSS("position", "fixed");
+  const mobileNavigationGeometry = await mobileNavigation.evaluate((node) => {
+    const rectangle = node.getBoundingClientRect();
+    return { bottom: rectangle.bottom, viewportHeight: window.innerHeight };
+  });
+  expect(Math.abs(mobileNavigationGeometry.viewportHeight - mobileNavigationGeometry.bottom)).toBeLessThanOrEqual(1);
   await assertPageAccessibility(page);
 });
 
