@@ -17,6 +17,12 @@ const outputNames = [
   "critical-flow-trace.json",
 ] as const;
 const stagingDirectory = resolve("../work/evidence/live-capture.staging");
+const liveEvidenceOrigin = process.env.LIVE_EVIDENCE_BASE_URL;
+
+test.skip(
+  !liveEvidenceOrigin,
+  "production evidence capture requires explicit LIVE_EVIDENCE_BASE_URL",
+);
 
 function clearCaptureDirectories() {
   rmSync(captureDirectory, { force: true, recursive: true });
@@ -223,7 +229,7 @@ async function scan(page: Page, url: string): Promise<ScannerReport["scans"][num
 }
 
 test("captures the approved production accessibility evidence without wallet writes", async ({ page }, testInfo) => {
-  const origin = process.env.LIVE_EVIDENCE_BASE_URL;
+  const origin = liveEvidenceOrigin;
   expect(origin).toBe("https://accessseal-genlayer.vercel.app");
   const urls = {
     cases: `${origin}/cases`,

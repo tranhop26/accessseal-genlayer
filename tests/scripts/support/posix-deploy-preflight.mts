@@ -57,7 +57,7 @@ try {
     "work",
     "deployments",
     "studionet",
-    "v3",
+    "v4",
     sourceHash(artifact),
   );
   await mkdir(resolve(artifactDirectory, ".."), { recursive: true });

@@ -199,11 +199,11 @@ test("production lookup rejects a requested manifest swapped before its pinned o
   const repoRoot = process.platform === "win32" ? toNamespacedPath(rawRepoRoot) : rawRepoRoot;
   const address = "0x1234567890abcdef1234567890abcdef12345678";
   const artifactHash = sourceHash(new TextEncoder().encode("fault harness artifact"));
-  const directory = join(repoRoot, "work", "deployments", "studionet", "v3", artifactHash);
+  const directory = join(repoRoot, "work", "deployments", "studionet", "v4", artifactHash);
   const path = join(directory, `${address}.json`);
   const original = {
     schemaVersion: "accessseal-deployment-manifest/2",
-    contractVersion: "V3",
+    contractVersion: "V4",
     network: "studionet",
     chainId: 61999,
     contractAddress: address,
