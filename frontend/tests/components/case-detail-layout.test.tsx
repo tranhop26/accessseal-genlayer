@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { abi } from "genlayer-js";
 import { CaseDetail } from "@/components/case-detail";
 import { StatusPanel } from "@/components/status-panel";
+import { EvidenceWorkspace } from "@/components/cases/evidence-workspace";
 import { useWallet } from "@/providers/wallet-provider";
 import type { ReconciledCase } from "@/lib/transactions";
 import type { EvidenceEnvelopeV1, EvidenceType } from "@/lib/evidence";
@@ -219,6 +220,21 @@ function evidenceReadback(types: EvidenceType[], epoch = 0): EvidenceRecord {
         }) satisfies EvidenceEnvelopeV1,
     ),
   };
+}
+
+function previewEvidence(
+  payloadUri: string,
+  mediaType: string,
+  subjectOrigin = "https://audit.example",
+): EvidenceRecord {
+  const record = evidenceReadback(["SCREENSHOT"]);
+  record.envelopes[0] = {
+    ...record.envelopes[0]!,
+    mediaType,
+    payloadUri,
+    subjectOrigin,
+  };
+  return record;
 }
 
 function evidenceOpenReadback(sealed = false, epoch = 0): ReconciledCase {
@@ -458,6 +474,63 @@ describe("case workspace model", () => {
       "complete",
     ]);
     expect(model.activityRows.some((row) => row.proof === "settlement-1")).toBe(true);
+  });
+});
+
+describe("evidence preview boundary", () => {
+  it("embeds only same-origin HTTPS image and sandboxed text previews", () => {
+    const caseRecord = evidenceOpenReadback().case;
+    const image = render(
+      <EvidenceWorkspace
+        caseRecord={caseRecord}
+        evidence={previewEvidence(
+          "https://audit.example/evidence.png",
+          "image/png",
+        )}
+        now={1_000}
+      />,
+    );
+
+    expect(image.getByRole("img", { name: /screenshot evidence preview/i })).toHaveAttribute(
+      "src",
+      "https://audit.example/evidence.png",
+    );
+    image.unmount();
+
+    const text = render(
+      <EvidenceWorkspace
+        caseRecord={{ ...caseRecord, subjectOrigin: "https://audit.example:8443" }}
+        evidence={previewEvidence(
+          "https://audit.example:8443/evidence.txt",
+          "text/plain",
+          "https://audit.example:8443",
+        )}
+        now={1_000}
+      />,
+    );
+    const frame = text.getByTitle(/screenshot evidence preview/i);
+    expect(frame).toHaveAttribute("src", "https://audit.example:8443/evidence.txt");
+    expect(frame).toHaveAttribute("sandbox", "");
+  });
+
+  it.each([
+    ["HTTP scheme", "http://audit.example/evidence.png", "https://audit.example"],
+    ["port mismatch", "https://audit.example:8443/evidence.png", "https://audit.example"],
+    ["data URL", "data:image/png;base64,AAAA", "https://audit.example"],
+    ["blob URL", "blob:https://audit.example/evidence-id", "https://audit.example"],
+    ["malformed URL", "not a url", "https://audit.example"],
+    ["relative URL", "/evidence.png", "https://audit.example"],
+  ])("keeps an unsafe %s metadata-only", (_label, payloadUri, subjectOrigin) => {
+    const { container } = render(
+      <EvidenceWorkspace
+        caseRecord={evidenceOpenReadback().case}
+        evidence={previewEvidence(payloadUri, "image/png", subjectOrigin)}
+        now={1_000}
+      />,
+    );
+
+    expect(container.querySelector("img, iframe")).not.toBeInTheDocument();
+    expect(screen.getByText(/metadata only/i)).toBeInTheDocument();
   });
 });
 

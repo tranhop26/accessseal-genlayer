@@ -1,4 +1,5 @@
 import type { CaseRecord, EvidenceRecord } from "@/lib/access-seal";
+import { restrictedOrigin } from "@/lib/evidence";
 import styles from "./case-detail.module.css";
 
 function title(value: string) {
@@ -18,8 +19,11 @@ function title(value: string) {
 function safePreview(item: EvidenceRecord["envelopes"][number]) {
   try {
     const payload = new URL(item.payloadUri);
-    const subject = new URL(item.subjectOrigin);
-    if (payload.origin !== subject.origin) return null;
+    if (
+      payload.protocol !== "https:" ||
+      restrictedOrigin(item.payloadUri) !== item.subjectOrigin
+    )
+      return null;
     if (item.mediaType.startsWith("image/"))
       return (
         // The contract-bound URL is shown only when it shares the exact subject origin.
