@@ -212,8 +212,7 @@ export async function verifyDeployment(
   // though the exact deployed code is available.  On that hermetic local
   // network, the reviewed schema is still bound to the verified code bytes.
   // Every non-local deployment must expose and match the runtime schema.
-  const runtimeMethods = (deployedSchema as { methods?: unknown }).methods;
-  if (manifest.network !== "localnet" || (runtimeMethods && typeof runtimeMethods === "object" && Object.keys(runtimeMethods).length > 0)) {
+  if (!isExactEmptyGlsimLocalnetSchema(manifest.network, deployedSchema)) {
     verifyDeployedSchemaCompatibility(reviewedSchema, deployedSchema);
   }
 
@@ -237,6 +236,18 @@ export function verifyTrackedArtifact(repoRoot: string): void {
   } catch {
     throw new Error("deployment artifact is missing or stale");
   }
+}
+
+function isExactEmptyGlsimLocalnetSchema(network: NetworkName, schema: object): boolean {
+  if (network !== "localnet" || !Object.prototype.hasOwnProperty.call(schema, "methods")) {
+    return false;
+  }
+  const methods = (schema as { methods?: unknown }).methods;
+  return methods !== null &&
+    typeof methods === "object" &&
+    !Array.isArray(methods) &&
+    Object.getPrototypeOf(methods) === Object.prototype &&
+    Object.keys(methods).length === 0;
 }
 
 export function readReviewedArtifactSchema(repoRoot: string): object {
@@ -583,11 +594,8 @@ async function readDeploymentManifestUnderLease(
     return parsed.manifest;
   } catch (error) {
     if (!(error instanceof Error) || !/ENOENT/.test(error.message)) throw error;
+    throw new Error("V4 deployment manifest is unavailable in canonical namespace");
   }
-  const legacyDirectory = await inspectRealDirectory(resolve(repoRoot, "work", "deployments"));
-  const legacyPath = resolve(legacyDirectory.path, `${network}.json`);
-  const legacy = await readPinnedManifest(legacyDirectory.path, legacyPath);
-  return validateDeploymentManifest(JSON.parse(legacy.body) as DeploymentManifest);
 }
 
 async function readPinnedManifest(

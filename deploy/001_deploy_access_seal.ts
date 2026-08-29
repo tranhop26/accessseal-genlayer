@@ -190,6 +190,8 @@ export async function deployAccessSeal(
       deploymentArtifactSha256,
     ),
   );
+  const reviewedSchema = readReviewedArtifactSchema(repoRoot);
+  verifyFrozenSchema(reviewedSchema);
 
   const deploymentTransaction = await client.deployContract({ code: deploymentArtifact, args: [] });
   if (typeof deploymentTransaction !== "string" || !TX_HASH.test(deploymentTransaction)) {
@@ -209,8 +211,6 @@ export async function deployAccessSeal(
   });
   assertReceipt(finalized, true);
   const contractAddress = extractContractAddress(finalized);
-  const reviewedSchema = readReviewedArtifactSchema(repoRoot);
-  verifyFrozenSchema(reviewedSchema);
 
   const manifest: V4DeploymentManifest = {
     schemaVersion: "accessseal-deployment-manifest/2",

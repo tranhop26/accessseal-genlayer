@@ -125,6 +125,30 @@ async function writeRetainedV4Manifest(
   );
 }
 
+async function createInvalidFrozenSchemaFixture(): Promise<string> {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-invalid-frozen-schema-"));
+  await mkdir(join(repoRoot, "contracts"), { recursive: true });
+  await mkdir(join(repoRoot, "scripts"), { recursive: true });
+  const readable = new TextDecoder().decode(source);
+  await writeFile(
+    join(repoRoot, "contracts", "access_seal.py"),
+    `${readable}\n\n    @gl.public.view\n    def owner(self) -> str:\n        return \"forbidden\"\n`,
+  );
+  await copyFile(
+    resolve("scripts/build_contract_artifact.py"),
+    join(repoRoot, "scripts", "build_contract_artifact.py"),
+  );
+  await writeFile(join(repoRoot, ".gitignore"), "work/\n");
+  execFileSync("python", ["scripts/build_contract_artifact.py", "--write"], { cwd: repoRoot });
+  execFileSync("git", ["init", "-q"], { cwd: repoRoot });
+  execFileSync("git", ["config", "core.autocrlf", "false"], { cwd: repoRoot });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: repoRoot });
+  execFileSync("git", ["config", "user.name", "AccessSeal Test"], { cwd: repoRoot });
+  execFileSync("git", ["add", "."], { cwd: repoRoot });
+  execFileSync("git", ["commit", "-qm", "invalid frozen schema fixture"], { cwd: repoRoot });
+  return repoRoot;
+}
+
 function stagingEntries(names: string[]): string[] {
   return names.filter((name) => name.endsWith(".tmp"));
 }
@@ -636,6 +660,44 @@ test("preflights the V3 manifest destination before calling deployContract", asy
   }
 });
 
+test("rejects an invalid frozen schema before submitting a deployment", async () => {
+  const repoRoot = await createInvalidFrozenSchemaFixture();
+  let deployCalls = 0;
+  try {
+    await assert.rejects(
+      deployAccessSeal(client({
+        deployContract: async () => {
+          deployCalls += 1;
+          return txHash;
+        },
+      }), { network: "studionet", repoRoot }),
+      /owner|frozen schema/i,
+    );
+    assert.equal(deployCalls, 0);
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("V4 manifest lookup rejects a flat legacy manifest", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "accessseal-v4-flat-manifest-"));
+  try {
+    await mkdir(join(repoRoot, "contracts"), { recursive: true });
+    await mkdir(join(repoRoot, "work", "deployments"), { recursive: true });
+    await writeFile(join(repoRoot, "contracts", "access_seal_deploy.py"), artifactSource);
+    await writeFile(
+      join(repoRoot, "work", "deployments", "studionet.json"),
+      `${JSON.stringify(manifest())}\n`,
+    );
+    await assert.rejects(
+      readDeploymentManifest(repoRoot, "studionet"),
+      /V4 deployment manifest.*canonical namespace/i,
+    );
+  } finally {
+    await rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("deployment preserves an unowned namespace lease and makes zero deployment calls", {
   timeout: 10_000,
 }, async () => {
@@ -838,6 +900,31 @@ test("fails closed when deployed schema differs from the source-derived schema",
       { repoRoot: fixtureRepoRoot },
     ),
     /schema/i,
+  );
+});
+
+test("localnet accepts only the exact empty GLSim runtime methods shape", async () => {
+  const localManifest = manifest({ network: "localnet", chainId: 61127 });
+  const localClient = (deployedSchema: unknown) => client({
+    chain: { id: 61127, name: "Genlayer Localnet" },
+    getContractSchema: async () => deployedSchema,
+  });
+  for (const malformed of [
+    {},
+    { methods: null },
+    { methods: "" },
+    { methods: 0 },
+    { methods: [] },
+  ]) {
+    await assert.rejects(
+      verifyDeployment(localClient(malformed), localManifest, { repoRoot: fixtureRepoRoot }),
+      /schema/i,
+    );
+  }
+  await verifyDeployment(
+    localClient({ methods: {} }),
+    localManifest,
+    { repoRoot: fixtureRepoRoot },
   );
 });
 
