@@ -514,13 +514,15 @@ export type V4EvidenceBinding = {
 
 export type V4EvidenceOptions = { binding: V4EvidenceBinding; reviewImageSha256: `sha256:${string}` };
 export type ReleaseManifestV4 = {
-  binding: V4EvidenceBinding;
+  caseId: string;
+  epoch: number;
   files: ReleaseManifestFileV1[];
-  reviewImage: { height: number; mediaType: "image/png"; path: string; sha256: `sha256:${string}`; width: number };
-  schemaVersion: "accessseal-release-manifest/2";
+  profileHash: string;
+  schemaVersion: "accessseal-release-manifest/1";
+  subjectOrigin: string;
 };
 
-export const V4_RELEASE_MANIFEST_SCHEMA = "accessseal-release-manifest/2" as const;
+export const V4_RELEASE_MANIFEST_SCHEMA = "accessseal-release-manifest/1" as const;
 const V4_BINDING_KEYS = ["auditedPageUrls", "caseCreatedAt", "caseId", "casePath", "chainId", "contract", "criticalFlows", "epoch", "evidenceDeadlineSeconds", "flowsHash", "hardDeadlineSeconds", "maxEnvelopeLifetimeSeconds", "maxObservationAgeSeconds", "profileHash", "profileVersion", "releaseId", "replayDomain", "sourceCommit", "subjectOrigin", "vendor"];
 const MIN_LEGIBLE_SCREENSHOT_WIDTH = 320;
 const MIN_LEGIBLE_SCREENSHOT_HEIGHT = 180;
@@ -641,16 +643,18 @@ function validateV4Payloads(payloads: EvidencePayloads, options: V4EvidenceOptio
 
 export function buildV4ReleaseManifest(payloads: EvidencePayloads, options: V4EvidenceOptions): { manifest: ReleaseManifestV4; bytes: Buffer; releaseDigest: `sha256:${string}` } {
   validateV4Binding(options.binding);
-  const dimensions = validateV4Payloads(payloads, options);
+  validateV4Payloads(payloads, options);
   validatePayloadSemantics(payloads, semanticBindingForV4(options.binding));
   const specs = v4PayloadSpecs(options.binding);
   const screenshotSha256 = `sha256:${sha256(payloads.SCREENSHOT)}` as `sha256:${string}`;
   if (options.reviewImageSha256 !== screenshotSha256) throw new Error("V4 review-image hash does not match the screenshot");
   const manifest: ReleaseManifestV4 = {
     schemaVersion: V4_RELEASE_MANIFEST_SCHEMA,
-    binding: { ...options.binding },
+    caseId: options.binding.caseId,
+    epoch: options.binding.epoch,
+    subjectOrigin: options.binding.subjectOrigin,
+    profileHash: options.binding.profileHash,
     files: EVIDENCE_TYPES.map((evidenceType) => ({ evidenceType, mediaType: specs[evidenceType].mediaType, path: specs[evidenceType].path, sha256: `sha256:${sha256(payloads[evidenceType])}` })),
-    reviewImage: { path: specs.SCREENSHOT.path, mediaType: "image/png", sha256: screenshotSha256, ...dimensions },
   };
   const bytes = Buffer.from(canonicalJson(manifest));
   return { manifest, bytes, releaseDigest: `sha256:${sha256(bytes)}` };
