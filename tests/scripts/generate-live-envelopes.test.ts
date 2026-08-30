@@ -256,8 +256,9 @@ test("V4 envelopes carry the manifest-bound screenshot path, hash, and media typ
   assert.equal(screenshotEnvelope.envelope.payloadUri, `${subjectOrigin}${manifestScreenshot.path}`);
   assert.equal(screenshotEnvelope.envelope.payloadSha256, manifestScreenshot.sha256);
   assert.equal(screenshotEnvelope.envelope.mediaType, manifestScreenshot.mediaType);
-  assert.equal(verified.manifest.schemaVersion, "accessseal-release-manifest/2");
-  assert.equal((verified.manifest as any).reviewImage.sha256, screenshotEnvelope.envelope.payloadSha256);
+  assert.equal(verified.manifest.schemaVersion, "accessseal-release-manifest/1");
+  assert.equal(verified.manifest.caseId, caseId);
+  assert.equal(manifestScreenshot.sha256, screenshotEnvelope.envelope.payloadSha256);
   assert.equal(screenshotEnvelope.envelope.caseId, caseId);
   assert.match(screenshotEnvelope.envelope.nonce, /^v4-distinct-replay-v4-candidate-20260828-/);
   await assert.rejects(

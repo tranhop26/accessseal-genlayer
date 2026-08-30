@@ -186,8 +186,8 @@ export function validateLiveEnvelopeSet(
   }
   if (options?.v4 !== undefined) {
     const screenshot = set.find((item) => item.envelope.evidenceType === "SCREENSHOT");
-    const reviewImage = (verified.manifest as { reviewImage?: { sha256?: string } }).reviewImage;
-    if (screenshot?.envelope.payloadSha256 !== options.v4.reviewImageSha256 || reviewImage?.sha256 !== options.v4.reviewImageSha256) {
+    const manifestScreenshot = verified.manifest.files.find((file) => file.evidenceType === "SCREENSHOT");
+    if (screenshot?.envelope.payloadSha256 !== options.v4.reviewImageSha256 || manifestScreenshot?.sha256 !== options.v4.reviewImageSha256) {
       throw new Error("V4 review-image hash does not match the screenshot envelope");
     }
   }

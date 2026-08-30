@@ -390,18 +390,27 @@ test("V4 rejects CRC-valid PNGs whose IDAT stream is empty or corrupt", () => {
   }
 });
 
-test("V4 manifest records the exact review-image path, hash, media type, and dimensions", () => {
+test("V4 manifest matches the exact manifest/1 shape consumed by the frozen contract", () => {
   const screenshot = validPng();
   const payloads = { ...payloadsFromCapture(), SCREENSHOT: screenshot };
   const built = (schema as any).buildV4ReleaseManifest(payloads, v4Options(screenshot));
-  assert.equal(built.manifest.schemaVersion, "accessseal-release-manifest/2");
-  assert.deepEqual(built.manifest.reviewImage, {
-    path: "/evidence/releases/v4-candidate-20260828/screenshot.png",
-    mediaType: "image/png",
-    sha256: `sha256:${sha256(screenshot)}`,
-    width: 320,
-    height: 180,
-  });
+  assert.deepEqual(Object.keys(built.manifest).sort(), [
+    "caseId",
+    "epoch",
+    "files",
+    "profileHash",
+    "schemaVersion",
+    "subjectOrigin",
+  ]);
+  assert.equal(built.manifest.schemaVersion, "accessseal-release-manifest/1");
+  assert.equal(built.manifest.caseId, v4Options(screenshot).binding.caseId);
+  assert.equal(built.manifest.epoch, v4Options(screenshot).binding.epoch);
+  assert.equal(built.manifest.subjectOrigin, v4Options(screenshot).binding.subjectOrigin);
+  assert.equal(built.manifest.profileHash, v4Options(screenshot).binding.profileHash);
+  assert.equal(
+    built.manifest.files.find((file: { evidenceType: string }) => file.evidenceType === "SCREENSHOT").sha256,
+    `sha256:${sha256(screenshot)}`,
+  );
   assert.doesNotThrow(() => (schema as any).verifyV4EvidenceBundle(built.bytes, payloads, v4Options(screenshot)));
 });
 
