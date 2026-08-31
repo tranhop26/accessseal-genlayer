@@ -854,7 +854,7 @@ describe("case detail document layout", () => {
     try {
       const readback = evidenceOpenReadback();
       readback.case.evidenceCutoff = 1_700_000_000;
-      readback.case.readAt = 1_700_000_001;
+      readback.case.readAt = 1_700_000_000;
       const reader = mockWallet(readback, {
         evidence: evidenceReadback([
           "RELEASE_MANIFEST",
