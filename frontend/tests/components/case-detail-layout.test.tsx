@@ -849,12 +849,15 @@ describe("case detail document layout", () => {
     ).toBeVisible();
   });
 
-  it("does not start another deadline reconciliation after authoritative cutoff", async () => {
+  it.each([
+    ["at the authoritative cutoff", 1_700_000_000],
+    ["after the authoritative cutoff", 1_700_000_001],
+  ])("does not start another deadline reconciliation %s", async (_label, readAt) => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const readback = evidenceOpenReadback();
       readback.case.evidenceCutoff = 1_700_000_000;
-      readback.case.readAt = 1_700_000_000;
+      readback.case.readAt = readAt;
       const reader = mockWallet(readback, {
         evidence: evidenceReadback([
           "RELEASE_MANIFEST",
