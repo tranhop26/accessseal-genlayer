@@ -93,6 +93,41 @@ async function takeWalletRequestMethods(page: Page): Promise<string[]> {
   );
 }
 
+test("selects Live proof by keyboard and creates a readback with exact deadlines", async ({ page, accessSeal: app }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${app.baseURL}/cases/new`);
+  await app.connect(page, "buyer");
+  await page.getByLabel("Vendor wallet").fill(app.addresses.vendor);
+  await page.getByRole("button", { name: "Continue to terms" }).click();
+  await page.getByRole("radio", { name: /Standard — 24 hours \/ 7 days/i }).focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("radio", { name: /Live proof — 4 hours \/ 12 hours/i })).toBeChecked();
+  await expect(page.getByText(/delayed consensus can prevent completion/i)).toBeVisible();
+  expect(await page.locator("body").evaluate((body) => body.scrollWidth <= window.innerWidth)).toBe(true);
+  await assertPageAccessibility(page);
+  await page.getByLabel("Website origin").fill(app.subjectOrigin);
+  await page.getByLabel("Accessibility profile hash").fill(app.profileHash);
+  await page.getByLabel("Critical flow 1").fill("Browse catalog");
+  await page.getByLabel("Critical flow 2").fill("Complete checkout");
+  await page.getByLabel("Critical flow 3").fill("Track delivery");
+  await page.getByLabel("Simulated escrow (wei)").fill(app.escrow);
+  await page.getByRole("button", { name: "Review locked terms" }).click();
+  await expect(page.getByRole("heading", { name: "Verify immutable bindings" })).toBeVisible();
+  await page.getByText("Advanced contract details", { exact: true }).click();
+  await expect(page.getByText("14400 seconds", { exact: true })).toBeVisible();
+  await expect(page.getByText("43200 seconds", { exact: true })).toBeVisible();
+  const caseId = (await page.locator("details code").first().textContent())!.trim();
+  await page.getByRole("button", { name: "Create case on GenLayer" }).click();
+  await page.waitForURL(new RegExp(`/cases/${caseId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
+  await expect(page.getByText("Authoritative case readback", { exact: true })).toBeVisible();
+  await expectCurrentStage(page, "DRAFT");
+  const readback = JSON.parse(await app.diagnoseCase(caseId)) as {
+    case: { evidenceDeadline: number; hardDeadline: number };
+  };
+  expect(readback.case.evidenceDeadline).toBe(14_400);
+  expect(readback.case.hardDeadline).toBe(43_200);
+});
+
 test("changes wallet account and invalidates the stale case preview", async ({ page, accessSeal: app }) => {
   const browserErrors: string[] = [];
   const submittedTransactions: unknown[] = [];
