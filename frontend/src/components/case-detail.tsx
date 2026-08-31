@@ -309,7 +309,8 @@ export function CaseDetail({ caseId }: { caseId: string }) {
       data.case.lifecycle !== "EVIDENCE_OPEN" ||
       data.case.evidenceSealed ||
       data.case.evidenceCutoff === null ||
-      data.case.readAt === null
+      data.case.readAt === null ||
+      data.case.readAt >= data.case.evidenceCutoff
     )
       return;
     const secondsUntilRefresh = Math.max(

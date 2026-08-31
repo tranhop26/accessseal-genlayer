@@ -849,6 +849,38 @@ describe("case detail document layout", () => {
     ).toBeVisible();
   });
 
+  it.each([
+    ["at the authoritative cutoff", 1_700_000_000],
+    ["after the authoritative cutoff", 1_700_000_001],
+  ])("does not start another deadline reconciliation %s", async (_label, readAt) => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const readback = evidenceOpenReadback();
+      readback.case.evidenceCutoff = 1_700_000_000;
+      readback.case.readAt = readAt;
+      const reader = mockWallet(readback, {
+        evidence: evidenceReadback([
+          "RELEASE_MANIFEST",
+          "HTML_BUNDLE",
+          "SCREENSHOT",
+          "DOM_FACTS",
+        ]),
+      });
+
+      render(<CaseDetail caseId={CASE_ID} />);
+
+      expect(await screen.findByText("4 records")).toBeVisible();
+      expect(reader.readCase).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(reader.readCase).toHaveBeenCalledTimes(1);
+      expect(screen.getByText("4 records")).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("separates wallet confirmation, submission, and consensus pending seal states", async () => {
     let resolveClose: ((hash: Hash) => void) | undefined;
     let resolveAccepted:
