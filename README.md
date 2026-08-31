@@ -2,17 +2,19 @@
 
 AccessSeal is a GenLayer application for evidence-bound accessibility acceptance. A buyer and website vendor lock an acceptance profile, critical-flow hash, deadlines, retry budget, and escrow amount. The frozen Intelligent Contract is authoritative for evidence, verdict, lifecycle, custody, and settlement; the frontend only presents authoritative readback and asks the user to sign a selected write.
 
-> **Value warning:** Every localnet and Bradbury GEN value used by this repository is **simulated testnet value**. AccessSeal is not a payment product, WCAG certification, legal advice, or a substitute for testing with disabled people and assistive technology.
+> **Value warning:** Every localnet and Bradbury amount used by this repository is denominated in **simulated testnet base units (wei)**. AccessSeal is not a payment product, WCAG certification, legal advice, or a substitute for testing with disabled people and assistive technology.
 
 ## Publication status
 
 | Evidence item | Status |
 |---|---|
-| V4 contract address | Not yet executed |
-| V4 deployment transaction | Not yet executed |
-| Vercel production URL | Not yet executed |
+| V4 contract address | `0xa485edc97f5acd071a3dc793a790ac50d7a58df6` on Bradbury (`4221`) |
+| V4 deployment transaction | [`0x3a12f9a9c8886cb10a3946201f742e9c5fe25e2f8d598adb4cb457deb4930a04`](https://explorer-bradbury.genlayer.com/tx/0x3a12f9a9c8886cb10a3946201f742e9c5fe25e2f8d598adb4cb457deb4930a04) — `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` |
+| Vercel production URL | [accessseal-genlayer.vercel.app](https://accessseal-genlayer.vercel.app) — V4 config HTTP 200 |
+| Production merge commit | `6998b1d6dfa8035430720d5b1813725e3fe272ab` |
+| Copy-ready submission evidence | [docs/submission-evidence.md](docs/submission-evidence.md) |
 
-The repository contains local implementation and verification. It does not claim a GitHub push, external GenLayer deployment, live transaction, recipient delivery, or Vercel production release. Addresses and transaction data produced under `work/` are ephemeral local GLSim output, never external evidence.
+The verified live case reached four finalized evidence records before its cutoff expired, so Evidence 5–6 were not executed. This release claims only the finalized transactions and authoritative readbacks listed in [docs/submission-evidence.md](docs/submission-evidence.md); it does not claim recipient delivery or settlement completion.
 
 ## V4 lifecycle
 
@@ -53,7 +55,7 @@ $env:NEXT_PUBLIC_ACCESSSEAL_SAFE_TEST_CONFIG="1"
 npm run build
 ```
 
-The explicit safe-test address is accepted only in test mode. A normal frontend build rejects missing, zero, repeated, or placeholder contract addresses. `NEXT_PUBLIC_GENLAYER_NETWORK` accepts `localnet`, `studionet`, or `testnet_bradbury`; Bradbury remains simulated testnet value. The UI never accepts a private-key configuration.
+The explicit safe-test address is accepted only in test mode. A normal frontend build rejects missing, zero, repeated, or placeholder contract addresses. `NEXT_PUBLIC_GENLAYER_NETWORK` accepts `localnet`, `studionet`, or `testnet_bradbury`; Bradbury amounts remain simulated testnet base units (wei). The UI never accepts a private-key configuration.
 
 Run the complete local proof suite from the repository root:
 
@@ -86,4 +88,4 @@ Before any push, contract deployment, or Vercel production deployment, perform a
 - GenVM buffers web responses before byte caps; it offers no contract-configurable network timeout or streaming bound.
 - Consensus can be slow, unavailable, or disagree; the safe result is no payout.
 - `DISPATCHED_FINALIZED` proves only parent dispatch. It does not prove a recipient received funds; a linked finalized/successful child transaction or exact recipient balance delta is still required.
-- Local GLSim verifies contract behavior but cannot prove external EOA child delivery. No live Bradbury canary has been claimed.
+- Local GLSim verifies contract behavior but cannot prove external EOA child delivery. The verified Bradbury case `0x9e75a4720ffd577aafbecbce47fd6f605659c3dbfc35fa31390bc9743eafbff7` has exactly 4/6 mandatory evidence records after its cutoff (`2026-08-30 20:19:20 +07:00`); Evidence 5–6, closure, review, payout, and settlement were not executed on that live case.
