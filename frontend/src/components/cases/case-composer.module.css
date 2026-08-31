@@ -113,6 +113,59 @@
   margin-bottom: 0.45rem;
 }
 
+.deadlinePresets {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.deadlinePreset {
+  align-items: flex-start;
+  border: 1px solid var(--as-border);
+  border-radius: var(--as-radius-sm);
+  cursor: pointer;
+  display: flex !important;
+  grid-template-columns: auto 1fr;
+  padding: 0.8rem;
+}
+
+.deadlinePreset:has(input:checked) {
+  border-color: var(--as-primary);
+  box-shadow: 0 0 0 1px var(--as-primary);
+}
+
+.deadlinePreset input {
+  flex: 0 0 auto;
+  margin: 0.2rem 0 0;
+  min-height: auto;
+}
+
+.deadlinePreset span {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.deadlinePreset small {
+  color: var(--as-muted);
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.deadlinePreset:focus-within {
+  outline: 2px solid var(--as-primary);
+  outline-offset: 2px;
+}
+
+.deadlineWarning {
+  background: color-mix(in srgb, var(--as-warning) 10%, white);
+  border-radius: var(--as-radius-sm);
+  color: var(--as-text);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  margin: 0;
+  padding: 0.75rem;
+}
+
 .fields input {
   background: var(--as-surface);
   border: 1px solid var(--as-border);

@@ -45,6 +45,56 @@ async function moveToReview(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("case composer steps", () => {
+  it("defaults to Standard and binds the selected Live proof deadlines", async () => {
+    const user = userEvent.setup();
+    const onCreate = vi.fn();
+    render(<CaseComposer authority={authority} onCreate={onCreate} />);
+
+    fillParties();
+    await user.click(screen.getByRole("button", { name: "Continue to terms" }));
+    expect(
+      screen.getByRole("radio", { name: /Standard — 24 hours \/ 7 days/i }),
+    ).toBeChecked();
+    fillTerms();
+    await user.click(
+      screen.getByRole("radio", {
+        name: /Live proof — 4 hours \/ 12 hours/i,
+      }),
+    );
+    expect(
+      screen.getByText(/delayed consensus can prevent completion/i),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "Review locked terms" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Create case on GenLayer" }),
+    );
+
+    expect(onCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        evidenceDeadline: 14_400,
+        hardDeadline: 43_200,
+        maxUnresolvedRetries: 2,
+      }),
+    );
+  });
+
+  it("invalidates a canonical preview when its deadline preset changes", async () => {
+    const user = userEvent.setup();
+    render(<CaseComposer authority={authority} onCreate={vi.fn()} />);
+    await moveToReview(user);
+    await user.click(screen.getByRole("button", { name: "Back to terms" }));
+    await user.click(
+      screen.getByRole("radio", {
+        name: /Live proof — 4 hours \/ 12 hours/i,
+      }),
+    );
+    expect(
+      screen.queryByText(/ready for wallet signature/i),
+    ).not.toBeInTheDocument();
+  });
+
   it("moves Parties → Terms → Review and only signs a live authority-bound preview", async () => {
     const user = userEvent.setup();
     const onCreate = vi.fn();
