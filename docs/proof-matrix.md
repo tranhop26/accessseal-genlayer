@@ -8,7 +8,7 @@ This is the public claim-to-proof map for the verified V4 release. It links only
 |---|---|
 | V4 contract address | `0xa485edc97f5acd071a3dc793a790ac50d7a58df6` on GenLayer Bradbury (`testnet_bradbury`, chain `4221`) |
 | V4 deployment transaction | [`0x3a12f9a9c8886cb10a3946201f742e9c5fe25e2f8d598adb4cb457deb4930a04`](https://explorer-bradbury.genlayer.com/tx/0x3a12f9a9c8886cb10a3946201f742e9c5fe25e2f8d598adb4cb457deb4930a04) — `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` |
-| Vercel production URL | [https://accessseal-genlayer.vercel.app](https://accessseal-genlayer.vercel.app), V4 config HTTP 200; merge commit `6998b1d6dfa8035430720d5b1813725e3fe272ab`; deployment `dpl_9RBfyNfVvXCYjxdXBkvpPeLj2Ko5` |
+| Vercel production URL | [https://accessseal-genlayer.vercel.app](https://accessseal-genlayer.vercel.app), V4 config HTTP 200; merge commit `8b44298653de95b3dee94893ca8df1fdf892e511`; [Vercel deployment run](https://vercel.com/tdh-s-projects/accessseal-genlayer/71nqoFHoaFFJDTYBXYssFT6nfiKB); GitHub deployment record `6178903869` |
 | Live V4 case | `0x9e75a4720ffd577aafbecbce47fd6f605659c3dbfc35fa31390bc9743eafbff7`; Buyer `0x21b45103dd05c43969daf3cbb4277391777e2ec7`; Vendor `0x35c9979d30992b13ef6df7036bc745e2e1cd76a2`; authoritative lifecycle `EVIDENCE_OPEN` |
 | Evidence cutoff / authoritative count | `2026-08-30 20:19:20 +07:00`; exactly `4/6` (`RELEASE_MANIFEST`, `HTML_BUNDLE`, `SCREENSHOT`, `DOM_FACTS`) after cutoff |
 | Payout transaction(s) | Not executed on the live V4 case |
@@ -16,6 +16,8 @@ This is the public claim-to-proof map for the verified V4 release. It links only
 | Recipient child transaction / balance proof | Not executed on the live V4 case |
 
 Any localnet/Bradbury amount is denominated in simulated Bradbury testnet base units (wei). Ignored `work/` artifacts are local GLSim evidence only and cannot fill a live-evidence slot.
+
+The production smoke check on 2026-08-31 opened the exact live case on desktop and a 390×844 responsive viewport. After authoritative reconciliation it displayed `4 records`, no `0 records`, no active `Reconciling…` state, and no horizontal overflow; a further 12-second stability check produced no new console errors. Expected absent-state reads for review, review finality, and settlement are not promoted as failures or live proof.
 
 For the four submitted records below, the canonical on-chain envelope hash commits the canonical contract envelope. The separate payload SHA-256 binds the exact bytes returned by the linked production URL. Thus the envelope hash proves the on-chain record while the payload hash proves the exact public URL bytes.
 

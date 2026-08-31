@@ -11,10 +11,10 @@ AccessSeal is a GenLayer application for evidence-bound accessibility acceptance
 | V4 contract address | `0xa485edc97f5acd071a3dc793a790ac50d7a58df6` on Bradbury (`4221`) |
 | V4 deployment transaction | [`0x3a12f9a9c8886cb10a3946201f742e9c5fe25e2f8d598adb4cb457deb4930a04`](https://explorer-bradbury.genlayer.com/tx/0x3a12f9a9c8886cb10a3946201f742e9c5fe25e2f8d598adb4cb457deb4930a04) — `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` |
 | Vercel production URL | [accessseal-genlayer.vercel.app](https://accessseal-genlayer.vercel.app) — V4 config HTTP 200 |
-| Production merge commit | `6998b1d6dfa8035430720d5b1813725e3fe272ab` |
+| Production merge commit | `8b44298653de95b3dee94893ca8df1fdf892e511` ([CI](https://github.com/tranhop26/accessseal-genlayer/actions/runs/33379987516)) |
 | Copy-ready submission evidence | [docs/submission-evidence.md](docs/submission-evidence.md) |
 
-The verified live case reached four finalized evidence records before its cutoff expired, so Evidence 5–6 were not executed. This release claims only the finalized transactions and authoritative readbacks listed in [docs/submission-evidence.md](docs/submission-evidence.md); it does not claim recipient delivery or settlement completion.
+The verified live case reached four finalized evidence records before its cutoff expired, so Evidence 5–6 were not executed. Production smoke verification on merge commit `8b44298653de95b3dee94893ca8df1fdf892e511` confirmed that the post-cutoff case stabilizes at `4 records` on desktop and mobile without returning to `Reconciling… / 0 records`. This release claims only the finalized transactions and authoritative readbacks listed in [docs/submission-evidence.md](docs/submission-evidence.md); it does not claim recipient delivery or settlement completion.
 
 ## V4 lifecycle
 

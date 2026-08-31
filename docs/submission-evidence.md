@@ -11,7 +11,8 @@ This is a copy-ready record of the verified V4 submission evidence. All amounts 
 - Repository: [tranhop26/accessseal-genlayer](https://github.com/tranhop26/accessseal-genlayer)
 - Evidence release/bundle ID: `v4-live-20260830`
 - Source/deployment commit: `b2beb1434d42e79412d1083ed8b4517dcc22659a`
-- Production merge commit: `6998b1d6dfa8035430720d5b1813725e3fe272ab`
+- Production merge commit: `8b44298653de95b3dee94893ca8df1fdf892e511`
+- Production CI: [GitHub Actions run 33379987516](https://github.com/tranhop26/accessseal-genlayer/actions/runs/33379987516) — all three jobs passed
 - Release digest: `sha256:b6b118453742c45c08cc9766351fb7b5ba52e781f0da5d0893fe5577d97d3f05`
 - Readable contract source SHA-256: `42d7d94983357af0eb818f31f76327cfef1f52fd71462e7178dbd5de637c0fcf`
 - Deployment artifact/source SHA-256: `3bd9a8713791ceb011e8bb6f557950aa54938cba76b2c37f31ae77044d8750f8`
@@ -26,7 +27,8 @@ The verified V4 deployment metadata is schema `accessseal-deployment-manifest/2`
 - Deployer: `0x21b45103dd05c43969daF3CbB4277391777e2eC7`
 - Deployment recipient: `0xA485edC97f5acD071A3DC793a790ac50D7A58df6`
 - Receipt execution: `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN`
-- Vercel deployment ID: `dpl_9RBfyNfVvXCYjxdXBkvpPeLj2Ko5`
+- Vercel deployment run: [71nqoFHoaFFJDTYBXYssFT6nfiKB](https://vercel.com/tdh-s-projects/accessseal-genlayer/71nqoFHoaFFJDTYBXYssFT6nfiKB)
+- GitHub production deployment record: `6178903869`; generated deployment URL: [accessseal-genlayer-9x2ce6d23-tdh-s-projects.vercel.app](https://accessseal-genlayer-9x2ce6d23-tdh-s-projects.vercel.app)
 
 ## Tests and repository verification
 
@@ -35,7 +37,7 @@ Last fresh results, recorded 2026-08-31:
 | Check | Result |
 |---|---|
 | Script tests | `174 passed` |
-| Frontend tests | `226 passed` |
+| Frontend tests | `228 passed` across `16` files |
 | Direct tests | `244 passed` |
 | Integration tests | `46 passed, 1 skipped` |
 | Lint | pass |
@@ -49,7 +51,7 @@ The one integration skip is the documented GLSim limitation. It is not live proo
 
 Production origin: [https://accessseal-genlayer.vercel.app](https://accessseal-genlayer.vercel.app)
 
-Vercel deployment ID: `dpl_9RBfyNfVvXCYjxdXBkvpPeLj2Ko5`; production was merged from commit `6998b1d6dfa8035430720d5b1813725e3fe272ab`.
+Vercel deployment run [71nqoFHoaFFJDTYBXYssFT6nfiKB](https://vercel.com/tdh-s-projects/accessseal-genlayer/71nqoFHoaFFJDTYBXYssFT6nfiKB) completed successfully for merge commit `8b44298653de95b3dee94893ca8df1fdf892e511`. GitHub records it as production deployment `6178903869`; the canonical production origin and generated deployment URL both returned HTTP 200.
 
 The public configuration endpoint returned HTTP 200 with the V4 Bradbury configuration: [config.json](https://accessseal-genlayer.vercel.app/.well-known/accessseal/config.json).
 
@@ -67,6 +69,12 @@ The public configuration endpoint returned HTTP 200 with the V4 Bradbury configu
 | [critical-flow-trace.json](https://accessseal-genlayer.vercel.app/evidence/releases/v4-live-20260830/critical-flow-trace.json) | 200 | 5503 | `769a3a8f0790f91d890aa9f16a7f0ee5e707f5f5678b5bb06df0434f78d09dd9` |
 
 The repository secret audit passed. A content-level scan of these six published files found no private-key, mnemonic, password, secret, token, or authorization-marker matches. Representative ignored/local-only paths were requested from production and returned HTTP 404: `/work/evidence/live-envelopes/summary.json`, `/work/evidence/live-capture/release.html`, `/.superpowers/sdd/2026-08-31-accessseal-submission-proof/task-1-report.md`, and `/work/deployments/testnet_bradbury/v4/3bd9a8713791ceb011e8bb6f557950aa54938cba76b2c37f31ae77044d8750f8/0xa485edc97f5acd071a3dc793a790ac50d7a58df6.json`.
+
+## Production smoke verification
+
+On 2026-08-31, the canonical production app was exercised against the exact live V4 case below without connecting a wallet or sending a transaction. Desktop and a 390×844 responsive viewport both reconciled to the authoritative `4 records`; the temporary loading state cleared, `0 records` disappeared, and the view remained stable for a further 12 seconds. The responsive document width stayed within the viewport with no horizontal overflow. The create-case page exposed its labelled wallet and vendor controls and correctly represented the disconnected state.
+
+The console contained expected failed reads for review, review finality, and settlement because those records do not exist for this incomplete case. Their count did not increase during the final stability interval, and the UI rendered the corresponding absent states rather than presenting a false verdict or settlement.
 
 ## Live case
 
