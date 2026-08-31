@@ -4,12 +4,12 @@
 **Network:** `testnet_bradbury` — GenLayer Bradbury Testnet (simulated)
 **Chain ID:** `4221`
 
-This is a copy-ready record of the verified V4 submission evidence. All GEN values, balances, and transactions in this record are simulated Bradbury testnet values, not monetary assets outside the testnet.
+This is a copy-ready record of the verified V4 submission evidence. All amounts and balances in this record are simulated Bradbury testnet base units (wei), not monetary assets outside the testnet.
 
 ## Repository and release
 
 - Repository: [tranhop26/accessseal-genlayer](https://github.com/tranhop26/accessseal-genlayer)
-- Repository release: `v4-live-20260830`
+- Evidence release/bundle ID: `v4-live-20260830`
 - Source/deployment commit: `b2beb1434d42e79412d1083ed8b4517dcc22659a`
 - Production merge commit: `6998b1d6dfa8035430720d5b1813725e3fe272ab`
 - Release digest: `sha256:b6b118453742c45c08cc9766351fb7b5ba52e781f0da5d0893fe5577d97d3f05`
@@ -57,7 +57,7 @@ The public configuration endpoint returned HTTP 200 with the V4 Bradbury configu
 {"schemaVersion":"accessseal-public-config/1","network":"testnet_bradbury","chainId":4221,"contractAddress":"0xa485edc97f5acd071a3dc793a790ac50d7a58df6","safeTestConfig":false}
 ```
 
-| Public artifact | HTTP | Bytes | SHA-256 |
+| Public artifact | HTTP | Bytes | Payload SHA-256 |
 |---|---:|---:|---|
 | [release-manifest.json](https://accessseal-genlayer.vercel.app/evidence/releases/v4-live-20260830/release-manifest.json) | 200 | 1319 | `b6b118453742c45c08cc9766351fb7b5ba52e781f0da5d0893fe5577d97d3f05` |
 | [release.html](https://accessseal-genlayer.vercel.app/evidence/releases/v4-live-20260830/release.html) | 200 | 6136 | `07a22134a80ff550e0c509f82c0df5579e24b8d85e1e5b8a8ef4008d8ae75f20` |
@@ -76,7 +76,7 @@ The repository secret audit passed. A content-level scan of these six published 
 - Authoritative lifecycle: `EVIDENCE_OPEN`; epoch: `0`
 - Created at: `1788009560`; evidence deadline: `86400` seconds; cutoff: `1788095960` (`2026-08-30 20:19:20 +07:00`)
 - Latest observed chain time: `1788135006`, after the cutoff
-- Escrow / reserved: `100000000000000` / `100000000000000` simulated GEN units
+- Escrow / reserved: `100000000000000` / `100000000000000` simulated Bradbury testnet base units (wei)
 - Profile hash: `0x28643fd34cf95b5cdeee540fed5b6af58bc4e65ff0fb49ab9416cfa168c051bb`
 - Flows hash: `0xdfc23ff1a6164490f9170abdc1ee522febe70f21283050698a51e6146de51eb4`
 - Subject origin: [https://accessseal-genlayer.vercel.app](https://accessseal-genlayer.vercel.app)
@@ -92,22 +92,22 @@ All `Readback` cells are authoritative `latest-final` views captured at the veri
 | Deployer (`0x21b45103dd05c43969daF3CbB4277391777e2eC7`) | Deploy V4 | deployment (no decoded method) | [`0x3a12f9a9c8886cb10a3946201f742e9c5fe25e2f8d598adb4cb457deb4930a04`](https://explorer-bradbury.genlayer.com/tx/0x3a12f9a9c8886cb10a3946201f742e9c5fe25e2f8d598adb4cb457deb4930a04) | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final deployment recipient/contract `0xa485edc97f5acd071a3dc793a790ac50d7a58df6` |
 | Buyer (`0x21b45103dd05c43969daF3CbB4277391777e2eC7`) | Create | `create_case` | `0x0a72818263e7c80ded0f6a5b3addb72a179fb905c9f887c103f6ba22242c551d` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final case `0x9e75a4720ffd577aafbecbce47fd6f605659c3dbfc35fa31390bc9743eafbff7`; buyer `0x21b45103dd05c43969daf3cbb4277391777e2ec7`; vendor `0x35c9979d30992b13ef6df7036bc745e2e1cd76a2` |
 | Vendor (`0x35C9979d30992b13EF6dF7036bC745E2e1cD76a2`) | Accept | `accept_terms` | `0x1f0358b85ccdb4c071f77e67168b22c307aec65a5a723f4c5a009b167d89f96c` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final `vendorAccepted=true`; `termsHash=0x6f77825acc5d5e2fca597449e73dad5d7ae6067424cdf6ba1768ae05fd9824e3`; lifecycle `EVIDENCE_OPEN` |
-| Buyer (`0x21b45103dd05c43969daF3CbB4277391777e2eC7`) | Fund | `fund` | `0x4e6b2d004df0ba3628114315bb149d49dea52dbe55e2a46be4b6505a79ab1bbb` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final `escrowAmount=100000000000000`; `reserved=100000000000000`; accounting `totalDeposits=100000000000000` |
-| Vendor (`0x35C9979d30992b13EF6dF7036bC745E2e1cD76a2`) | Evidence 1 | `open_evidence` | `0x48557d4429256d6579fe9553c7143b13d5840ea4773bf4add36595bc64ad3f48` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final epoch 0, ordinal 1: `RELEASE_MANIFEST` / `sha256:6b4753f10a64937af4851d309f76a848d89ab629ffc890ff82f2db25f4b47fca`; cumulative `4/6` |
-| Vendor (`0x35C9979d30992b13EF6dF7036bC745E2e1cD76a2`) | Evidence 2 | `append_evidence` | `0x96528d58c18072498ff3899f135afce75b00427b99c23388183cc65968d2d692` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final epoch 0, ordinal 2: `HTML_BUNDLE` / `sha256:8428325b4dc273654d72e70efc86be12a379dd40d77ec0555b337cbeb93a58f5`; cumulative `4/6` |
-| Vendor (`0x35C9979d30992b13EF6dF7036bC745E2e1cD76a2`) | Evidence 3 | `append_evidence` | `0x41b5082374220a1d29290409c4dd6280189265a801981ade38b6fbce93ecb234` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final epoch 0, ordinal 3: `SCREENSHOT` / `sha256:3218856363c65a21b28f9e787a6ffb5490f246c4a74accec908d8ec8cd6be42d`; cumulative `4/6` |
-| Vendor (`0x35C9979d30992b13EF6dF7036bC745E2e1cD76a2`) | Evidence 4 | `append_evidence` | `0x52c0351b322a4c66c513a8c9506bac9d6294e3fe00a812f08cf50fb806e60af1` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final epoch 0, ordinal 4: `DOM_FACTS` / `sha256:c91ea3720280e1c5ccdeb433aa0a61493819f72f6b7fcafc4debbaddfd6f931c`; cumulative `4/6` |
+| Buyer (`0x21b45103dd05c43969daF3CbB4277391777e2eC7`) | Fund | `fund` | `0x4e6b2d004df0ba3628114315bb149d49dea52dbe55e2a46be4b6505a79ab1bbb` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final `escrowAmount=100000000000000`; `reserved=100000000000000`; accounting `totalDeposits=100000000000000`, all simulated Bradbury testnet base units (wei) |
+| Vendor (`0x35C9979d30992b13EF6dF7036bC745E2e1cD76a2`) | Evidence 1 | `open_evidence` | `0x48557d4429256d6579fe9553c7143b13d5840ea4773bf4add36595bc64ad3f48` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final epoch 0, ordinal 1: `RELEASE_MANIFEST`; canonical on-chain envelope hash `sha256:6b4753f10a64937af4851d309f76a848d89ab629ffc890ff82f2db25f4b47fca`; payload SHA-256 `b6b118453742c45c08cc9766351fb7b5ba52e781f0da5d0893fe5577d97d3f05`; cumulative `4/6` |
+| Vendor (`0x35C9979d30992b13EF6dF7036bC745E2e1cD76a2`) | Evidence 2 | `append_evidence` | `0x96528d58c18072498ff3899f135afce75b00427b99c23388183cc65968d2d692` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final epoch 0, ordinal 2: `HTML_BUNDLE`; canonical on-chain envelope hash `sha256:8428325b4dc273654d72e70efc86be12a379dd40d77ec0555b337cbeb93a58f5`; payload SHA-256 `07a22134a80ff550e0c509f82c0df5579e24b8d85e1e5b8a8ef4008d8ae75f20`; cumulative `4/6` |
+| Vendor (`0x35C9979d30992b13EF6dF7036bC745E2e1cD76a2`) | Evidence 3 | `append_evidence` | `0x41b5082374220a1d29290409c4dd6280189265a801981ade38b6fbce93ecb234` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final epoch 0, ordinal 3: `SCREENSHOT`; canonical on-chain envelope hash `sha256:3218856363c65a21b28f9e787a6ffb5490f246c4a74accec908d8ec8cd6be42d`; payload SHA-256 `4e355b19b754e6688e3d516865f2c83ea3176f175284e937e124800364bdc400`; cumulative `4/6` |
+| Vendor (`0x35C9979d30992b13EF6dF7036bC745E2e1cD76a2`) | Evidence 4 | `append_evidence` | `0x52c0351b322a4c66c513a8c9506bac9d6294e3fe00a812f08cf50fb806e60af1` | `testnet_bradbury` / `4221` | `FINALIZED` / `AGREE` / `FINISHED_WITH_RETURN` | Latest-final epoch 0, ordinal 4: `DOM_FACTS`; canonical on-chain envelope hash `sha256:c91ea3720280e1c5ccdeb433aa0a61493819f72f6b7fcafc4debbaddfd6f931c`; payload SHA-256 `5acc0417de26b4631eff8892348a69040341890e6def3a9fc93d2aac6c21f741`; cumulative `4/6` |
 
 ## Authoritative readback
 
 `get_case(caseId)` was read with `transactionHashVariant: "latest-final"` at `readAt=1788136808`. It reports the case facts above, `vendorAccepted=true`, and the locked `termsHash=0x6f77825acc5d5e2fca597449e73dad5d7ae6067424cdf6ba1768ae05fd9824e3`; its contract-domain `chainId` is `1`, while the Bradbury network chain ID is `4221`.
 
-`get_evidence(caseId, 0)` returns exactly four on-chain evidence envelopes, in this order:
+`get_evidence(caseId, 0)` returns exactly four on-chain evidence envelopes, in this order. The canonical on-chain envelope hash commits the canonical contract envelope; the separate payload SHA-256 binds the exact bytes returned by that record's public URL. In other words, the envelope hash proves the contract record and the payload hash proves the exact published artifact bytes:
 
-1. `RELEASE_MANIFEST` — `sha256:6b4753f10a64937af4851d309f76a848d89ab629ffc890ff82f2db25f4b47fca`
-2. `HTML_BUNDLE` — `sha256:8428325b4dc273654d72e70efc86be12a379dd40d77ec0555b337cbeb93a58f5`
-3. `SCREENSHOT` — `sha256:3218856363c65a21b28f9e787a6ffb5490f246c4a74accec908d8ec8cd6be42d`
-4. `DOM_FACTS` — `sha256:c91ea3720280e1c5ccdeb433aa0a61493819f72f6b7fcafc4debbaddfd6f931c`
+1. `RELEASE_MANIFEST` — canonical envelope `sha256:6b4753f10a64937af4851d309f76a848d89ab629ffc890ff82f2db25f4b47fca`; payload `b6b118453742c45c08cc9766351fb7b5ba52e781f0da5d0893fe5577d97d3f05` for [release-manifest.json](https://accessseal-genlayer.vercel.app/evidence/releases/v4-live-20260830/release-manifest.json)
+2. `HTML_BUNDLE` — canonical envelope `sha256:8428325b4dc273654d72e70efc86be12a379dd40d77ec0555b337cbeb93a58f5`; payload `07a22134a80ff550e0c509f82c0df5579e24b8d85e1e5b8a8ef4008d8ae75f20` for [release.html](https://accessseal-genlayer.vercel.app/evidence/releases/v4-live-20260830/release.html)
+3. `SCREENSHOT` — canonical envelope `sha256:3218856363c65a21b28f9e787a6ffb5490f246c4a74accec908d8ec8cd6be42d`; payload `4e355b19b754e6688e3d516865f2c83ea3176f175284e937e124800364bdc400` for [screenshot.png](https://accessseal-genlayer.vercel.app/evidence/releases/v4-live-20260830/screenshot.png)
+4. `DOM_FACTS` — canonical envelope `sha256:c91ea3720280e1c5ccdeb433aa0a61493819f72f6b7fcafc4debbaddfd6f931c`; payload `5acc0417de26b4631eff8892348a69040341890e6def3a9fc93d2aac6c21f741` for [dom-facts.json](https://accessseal-genlayer.vercel.app/evidence/releases/v4-live-20260830/dom-facts.json)
 
 ## Known limitation
 

@@ -2,7 +2,7 @@
 
 AccessSeal is a GenLayer application for evidence-bound accessibility acceptance. A buyer and website vendor lock an acceptance profile, critical-flow hash, deadlines, retry budget, and escrow amount. The frozen Intelligent Contract is authoritative for evidence, verdict, lifecycle, custody, and settlement; the frontend only presents authoritative readback and asks the user to sign a selected write.
 
-> **Value warning:** Every localnet and Bradbury GEN value used by this repository is **simulated testnet value**. AccessSeal is not a payment product, WCAG certification, legal advice, or a substitute for testing with disabled people and assistive technology.
+> **Value warning:** Every localnet and Bradbury amount used by this repository is denominated in **simulated testnet base units (wei)**. AccessSeal is not a payment product, WCAG certification, legal advice, or a substitute for testing with disabled people and assistive technology.
 
 ## Publication status
 
@@ -55,7 +55,7 @@ $env:NEXT_PUBLIC_ACCESSSEAL_SAFE_TEST_CONFIG="1"
 npm run build
 ```
 
-The explicit safe-test address is accepted only in test mode. A normal frontend build rejects missing, zero, repeated, or placeholder contract addresses. `NEXT_PUBLIC_GENLAYER_NETWORK` accepts `localnet`, `studionet`, or `testnet_bradbury`; Bradbury remains simulated testnet value. The UI never accepts a private-key configuration.
+The explicit safe-test address is accepted only in test mode. A normal frontend build rejects missing, zero, repeated, or placeholder contract addresses. `NEXT_PUBLIC_GENLAYER_NETWORK` accepts `localnet`, `studionet`, or `testnet_bradbury`; Bradbury amounts remain simulated testnet base units (wei). The UI never accepts a private-key configuration.
 
 Run the complete local proof suite from the repository root:
 
