@@ -159,6 +159,17 @@ describe("case composer steps", () => {
       .getByText("Advanced contract details")
       .closest("details")!;
     expect(within(advancedDetails).getByText("Chain ID")).toBeInTheDocument();
+    expect(
+      within(advancedDetails).getByText("24 hours (86400 seconds)"),
+    ).toBeInTheDocument();
+    expect(
+      within(advancedDetails).getByText("7 days (604800 seconds)"),
+    ).toBeInTheDocument();
+    expect(
+      within(advancedDetails).getByText(
+        /contract's authoritative createdAt establishes the absolute cutoff timestamps/i,
+      ),
+    ).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "Create case on GenLayer" }),

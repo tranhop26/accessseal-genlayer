@@ -71,6 +71,16 @@ function networkLabel(network: PublicNetwork | undefined) {
   return "Network unavailable";
 }
 
+function formatDeadlineWindow(seconds: number, preferHours = false) {
+  if (preferHours && seconds % 3_600 === 0)
+    return `${seconds / 3_600} hours (${seconds} seconds)`;
+  if (seconds % 86_400 === 0)
+    return `${seconds / 86_400} days (${seconds} seconds)`;
+  if (seconds % 3_600 === 0)
+    return `${seconds / 3_600} hours (${seconds} seconds)`;
+  return `${seconds} seconds`;
+}
+
 function sameAuthority(
   draft: CaseDraft | null,
   authority: CaseAuthority | null,
@@ -585,11 +595,25 @@ export function CaseComposer({
                       </div>
                       <div>
                         <dt>Evidence window</dt>
-                        <dd>{currentPreview.evidenceDeadline} seconds</dd>
+                        <dd>
+                          {formatDeadlineWindow(
+                            currentPreview.evidenceDeadline,
+                            true,
+                          )}
+                        </dd>
                       </div>
                       <div>
                         <dt>Hard deadline</dt>
-                        <dd>{currentPreview.hardDeadline} seconds</dd>
+                        <dd>
+                          {formatDeadlineWindow(currentPreview.hardDeadline)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Absolute cutoffs</dt>
+                        <dd>
+                          The contract&apos;s authoritative createdAt establishes
+                          the absolute cutoff timestamps.
+                        </dd>
                       </div>
                       <div>
                         <dt>Network</dt>

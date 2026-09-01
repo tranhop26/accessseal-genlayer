@@ -114,8 +114,13 @@ test("selects Live proof by keyboard and creates a readback with exact deadlines
   await page.getByRole("button", { name: "Review locked terms" }).click();
   await expect(page.getByRole("heading", { name: "Verify immutable bindings" })).toBeVisible();
   await page.getByText("Advanced contract details", { exact: true }).click();
-  await expect(page.getByText("14400 seconds", { exact: true })).toBeVisible();
-  await expect(page.getByText("43200 seconds", { exact: true })).toBeVisible();
+  await expect(page.getByText("4 hours (14400 seconds)", { exact: true })).toBeVisible();
+  await expect(page.getByText("12 hours (43200 seconds)", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(
+      /contract's authoritative createdAt establishes the absolute cutoff timestamps/i,
+    ),
+  ).toBeVisible();
   const caseId = (await page.locator("details code").first().textContent())!.trim();
   await page.getByRole("button", { name: "Create case on GenLayer" }).click();
   await page.waitForURL(new RegExp(`/cases/${caseId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`));
