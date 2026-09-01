@@ -84,12 +84,19 @@ describe("case composer steps", () => {
     const user = userEvent.setup();
     render(<CaseComposer authority={authority} onCreate={vi.fn()} />);
     await moveToReview(user);
+    expect(screen.getByText("Canonical bindings generated")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Back to terms" }));
     await user.click(
       screen.getByRole("radio", {
         name: /Live proof — 4 hours \/ 12 hours/i,
       }),
     );
+    expect(
+      screen.queryByText("Canonical bindings generated"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Complete review to generate canonical bindings"),
+    ).toBeVisible();
     expect(
       screen.queryByText(/ready for wallet signature/i),
     ).not.toBeInTheDocument();

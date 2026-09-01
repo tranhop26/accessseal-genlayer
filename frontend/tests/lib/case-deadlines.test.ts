@@ -8,6 +8,10 @@ import {
 describe("case deadline presets", () => {
   it("keeps Standard as the immutable default", () => {
     expect(DEFAULT_DEADLINE_PRESET_ID).toBe("standard");
+    expect(Object.isFrozen(DEADLINE_PRESETS)).toBe(true);
+    for (const preset of Object.values(DEADLINE_PRESETS)) {
+      expect(Object.isFrozen(preset)).toBe(true);
+    }
     expect(getDeadlinePreset(DEFAULT_DEADLINE_PRESET_ID)).toMatchObject({
       evidenceDeadline: 86_400,
       hardDeadline: 604_800,
