@@ -2,6 +2,12 @@
 
 import { useRef, useState } from "react";
 import { deriveCaseBindings } from "@/lib/access-seal";
+import {
+  DEADLINE_PRESETS,
+  DEFAULT_DEADLINE_PRESET_ID,
+  getDeadlinePreset,
+  type DeadlinePresetId,
+} from "@/lib/case-deadlines";
 import { restrictedOrigin } from "@/lib/evidence";
 import type { PublicNetwork } from "@/lib/config";
 import styles from "./cases/case-composer.module.css";
@@ -65,6 +71,16 @@ function networkLabel(network: PublicNetwork | undefined) {
   return "Network unavailable";
 }
 
+function formatDeadlineWindow(seconds: number, preferHours = false) {
+  if (preferHours && seconds % 3_600 === 0)
+    return `${seconds / 3_600} hours (${seconds} seconds)`;
+  if (seconds % 86_400 === 0)
+    return `${seconds / 86_400} days (${seconds} seconds)`;
+  if (seconds % 3_600 === 0)
+    return `${seconds / 3_600} hours (${seconds} seconds)`;
+  return `${seconds} seconds`;
+}
+
 function sameAuthority(
   draft: CaseDraft | null,
   authority: CaseAuthority | null,
@@ -110,6 +126,9 @@ export function CaseComposer({
   const [step, setStep] = useState<ComposerStep>("parties");
   const [values, setValues] = useState<ComposerValues>(EMPTY_VALUES);
   const [preview, setPreview] = useState<CaseDraft | null>(null);
+  const [deadlinePresetId, setDeadlinePresetId] =
+    useState<DeadlinePresetId>(DEFAULT_DEADLINE_PRESET_ID);
+  const deadlinePreset = getDeadlinePreset(deadlinePresetId);
   const fingerprint = authorityFingerprint(authority);
   const [observedAuthority, setObservedAuthority] = useState(fingerprint);
   if (observedAuthority !== fingerprint) {
@@ -131,6 +150,11 @@ export function CaseComposer({
     setPreview(null);
     setError("");
     setErrorField(null);
+  }
+
+  function selectDeadlinePreset(id: DeadlinePresetId) {
+    setDeadlinePresetId(id);
+    invalidatePreview();
   }
 
   function focusField(field: ComposerField | null) {
@@ -238,8 +262,8 @@ export function CaseComposer({
         subjectOrigin,
         profileHash,
         flows,
-        evidenceDeadline: 86400,
-        hardDeadline: 604800,
+        evidenceDeadline: deadlinePreset.evidenceDeadline,
+        hardDeadline: deadlinePreset.hardDeadline,
         maxUnresolvedRetries: 2,
         escrowAmount,
         salt: crypto.randomUUID(),
@@ -475,6 +499,29 @@ export function CaseComposer({
                     />
                   ))}
                 </fieldset>
+                <fieldset className={styles.deadlinePresets}>
+                  <legend>Case deadline profile</legend>
+                  {DEADLINE_PRESETS.map((preset) => (
+                    <label key={preset.id} className={styles.deadlinePreset}>
+                      <input
+                        checked={deadlinePresetId === preset.id}
+                        name="deadline-preset"
+                        onChange={() => selectDeadlinePreset(preset.id)}
+                        type="radio"
+                        value={preset.id}
+                      />
+                      <span>
+                        <strong>{preset.label}</strong>
+                        <small>{preset.description}</small>
+                      </span>
+                    </label>
+                  ))}
+                  {deadlinePreset.warning && (
+                    <p className={styles.deadlineWarning} role="note">
+                      {deadlinePreset.warning}
+                    </p>
+                  )}
+                </fieldset>
                 <label>
                   Simulated escrow (wei)
                   <input
@@ -544,6 +591,28 @@ export function CaseComposer({
                         <dt>Profile hash</dt>
                         <dd>
                           <code>{currentPreview.profileHash}</code>
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Evidence window</dt>
+                        <dd>
+                          {formatDeadlineWindow(
+                            currentPreview.evidenceDeadline,
+                            true,
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Hard deadline</dt>
+                        <dd>
+                          {formatDeadlineWindow(currentPreview.hardDeadline)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Absolute cutoffs</dt>
+                        <dd>
+                          The contract&apos;s authoritative createdAt establishes
+                          the absolute cutoff timestamps.
                         </dd>
                       </div>
                       <div>
